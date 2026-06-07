@@ -1,0 +1,1524 @@
+From 4f1e721de47a8b75151407e53cbfbabe025d931c Mon Sep 17 00:00:00 2001
+From: Jung-Kwang Lee <ntoskrnl7@gmail.com>
+Date: Wed, 13 May 2026 15:09:21 +0900
+Subject: [PATCH 1/3] feat: add user agent override APIs
+
+---
+ docs/api/app.md                               |  20 ++
+ docs/api/browser-window.md                    |   1 +
+ docs/api/session.md                           |  19 ++
+ .../app-user-agent-override-options.md        |   4 +
+ .../session-user-agent-override-options.md    |   5 +
+ .../structures/user-agent-brand-version.md    |   4 +
+ docs/api/structures/user-agent-metadata.md    |  13 +
+ ...eb-contents-user-agent-override-options.md |   5 +
+ docs/api/web-contents.md                      |  19 ++
+ docs/api/webview-tag.md                       |   1 +
+ filenames.gni                                 |   2 +
+ shell/browser/api/electron_api_app.cc         |  21 ++
+ shell/browser/api/electron_api_app.h          |   3 +
+ shell/browser/api/electron_api_session.cc     |  37 +++
+ shell/browser/api/electron_api_session.h      |   3 +
+ .../browser/api/electron_api_web_contents.cc  |  56 ++++-
+ shell/browser/api/electron_api_web_contents.h |   3 +
+ shell/browser/electron_browser_client.cc      |  35 +++
+ shell/browser/electron_browser_client.h       |   9 +
+ shell/browser/electron_browser_context.cc     | 114 ++++++++-
+ shell/browser/electron_browser_context.h      |  10 +
+ shell/browser/user_agent_override.cc          | 236 ++++++++++++++++++
+ shell/browser/user_agent_override.h           |  51 ++++
+ spec/api-app-spec.ts                          |  44 ++++
+ spec/api-session-spec.ts                      | 160 ++++++++++++
+ spec/api-web-contents-spec.ts                 |  79 +++++-
+ spec/ts-smoke/electron/main.ts                |  36 ++-
+ 27 files changed, 975 insertions(+), 15 deletions(-)
+ create mode 100644 docs/api/structures/app-user-agent-override-options.md
+ create mode 100644 docs/api/structures/session-user-agent-override-options.md
+ create mode 100644 docs/api/structures/user-agent-brand-version.md
+ create mode 100644 docs/api/structures/user-agent-metadata.md
+ create mode 100644 docs/api/structures/web-contents-user-agent-override-options.md
+ create mode 100644 shell/browser/user_agent_override.cc
+ create mode 100644 shell/browser/user_agent_override.h
+
+diff --git a/docs/api/app.md b/docs/api/app.md
+index 9523a08aca..6e5496d420 100644
+--- a/docs/api/app.md
++++ b/docs/api/app.md
+@@ -705,6 +705,23 @@ Overrides the current application's name.
+ > [!NOTE]
+ > This function overrides the name used internally by Electron; it does not affect the name that the OS uses.
+ 
++### `app.setUserAgentOverride(options)`
++
++* `options` [AppUserAgentOverrideOptions](structures/app-user-agent-override-options.md)
++
++Sets the global fallback user agent and User-Agent Client Hints metadata. The
++override is used when no user agent override is set at the `session` or
++`webContents` level.
++
++Call this API before creating sessions or windows when the override must apply
++to early navigations, frames, shared workers, service workers, and dedicated
++workers.
++
++### `app.clearUserAgentOverride()`
++
++Clears the global user agent override and restores Electron's default global
++fallback user agent and User-Agent Client Hints metadata.
++
+ ### `app.getLocale()`
+ 
+ Returns `string` - The current application locale, fetched using Chromium's `l10n_util` library.
+@@ -1817,6 +1834,9 @@ This is the user agent that will be used when no user agent is set at the
+ app has the same user agent.  Set to a custom value as early as possible
+ in your app's initialization to ensure that your overridden value is used.
+ 
++Use [`app.setUserAgentOverride(options)`](#appsetuseragentoverrideoptions) when
++the fallback also needs matching User-Agent Client Hints metadata.
++
+ ### `app.runningUnderARM64Translation` _Readonly_ _macOS_ _Windows_
+ 
+ A `boolean` which when `true` indicates that the app is currently running under
+diff --git a/docs/api/browser-window.md b/docs/api/browser-window.md
+index 2779ed08fd..c49e60bf47 100644
+--- a/docs/api/browser-window.md
++++ b/docs/api/browser-window.md
+@@ -1256,6 +1256,7 @@ Captures a snapshot of the page within `rect`. Omitting `rect` will capture the
+ * `options` Object (optional)
+   * `httpReferrer` (string | [Referrer](structures/referrer.md)) (optional) - An HTTP Referrer URL.
+   * `userAgent` string (optional) - A user agent originating the request.
++  * `userAgentMetadata` [UserAgentMetadata](structures/user-agent-metadata.md) (optional) - User-Agent Client Hints metadata for this navigation. When this option is specified, `userAgent` must also be specified.
+   * `extraHeaders` string (optional) - Extra headers separated by "\n"
+   * `postData` ([UploadRawData](structures/upload-raw-data.md) | [UploadFile](structures/upload-file.md))[] (optional)
+   * `baseURLForDataURL` string (optional) - Base URL (with trailing path separator) for files to be loaded by the data URL. This is needed only if the specified `url` is a data URL and needs to load other files.
+diff --git a/docs/api/session.md b/docs/api/session.md
+index 27df6c3a19..b952b4c650 100644
+--- a/docs/api/session.md
++++ b/docs/api/session.md
+@@ -1316,6 +1316,25 @@ example `"en-US,fr,de,ko,zh-CN,ja"`.
+ This doesn't affect existing `WebContents`, and each `WebContents` can use
+ `webContents.setUserAgent` to override the session-wide user agent.
+ 
++#### `ses.setUserAgentOverride(options)`
++
++* `options` [SessionUserAgentOverrideOptions](structures/session-user-agent-override-options.md)
++
++Overrides the user agent, User-Agent Client Hints metadata, and optionally
++`acceptLanguages` for this session.
++
++The override applies to navigations and workers created after the call.
++`WebContents` instances can use `webContents.setUserAgentOverride` to override
++the session-wide value for frames and dedicated workers. Shared workers and
++service workers use the session override because they are scoped to the
++session's storage partition.
++
++#### `ses.clearUserAgentOverride()`
++
++Clears this session's user agent and `acceptLanguages` override. Future
++navigations and workers fall back to the app-level override or Electron's
++default user agent metadata.
++
+ #### `ses.isPersistent()`
+ 
+ Returns `boolean` - Whether or not this session is a persistent one. The default
+diff --git a/docs/api/structures/app-user-agent-override-options.md b/docs/api/structures/app-user-agent-override-options.md
+new file mode 100644
+index 0000000000..293a1cd7d9
+--- /dev/null
++++ b/docs/api/structures/app-user-agent-override-options.md
+@@ -0,0 +1,4 @@
++# AppUserAgentOverrideOptions Object
++
++* `userAgent` string - The legacy `User-Agent` string to use as the global fallback.
++* `userAgentMetadata` [UserAgentMetadata](user-agent-metadata.md) - The User-Agent Client Hints metadata that matches `userAgent`.
+diff --git a/docs/api/structures/session-user-agent-override-options.md b/docs/api/structures/session-user-agent-override-options.md
+new file mode 100644
+index 0000000000..98c418fc92
+--- /dev/null
++++ b/docs/api/structures/session-user-agent-override-options.md
+@@ -0,0 +1,5 @@
++# SessionUserAgentOverrideOptions Object
++
++* `userAgent` string - The legacy `User-Agent` string to use for this session.
++* `userAgentMetadata` [UserAgentMetadata](user-agent-metadata.md) - The User-Agent Client Hints metadata that matches `userAgent`.
++* `acceptLanguages` string (optional) - A comma separated ordered list of language codes, for example `"en-US,fr,de,ko,zh-CN,ja"`.
+diff --git a/docs/api/structures/user-agent-brand-version.md b/docs/api/structures/user-agent-brand-version.md
+new file mode 100644
+index 0000000000..db1f472d9b
+--- /dev/null
++++ b/docs/api/structures/user-agent-brand-version.md
+@@ -0,0 +1,4 @@
++# UserAgentBrandVersion Object
++
++* `brand` string - A browser brand token used in User-Agent Client Hints.
++* `version` string - The version token associated with `brand`.
+diff --git a/docs/api/structures/user-agent-metadata.md b/docs/api/structures/user-agent-metadata.md
+new file mode 100644
+index 0000000000..8a23272379
+--- /dev/null
++++ b/docs/api/structures/user-agent-metadata.md
+@@ -0,0 +1,13 @@
++# UserAgentMetadata Object
++
++* `brands` [UserAgentBrandVersion](user-agent-brand-version.md)[] (optional) - Brand/version pairs used for low-entropy `Sec-CH-UA` values and `navigator.userAgentData.brands`.
++* `fullVersionList` [UserAgentBrandVersion](user-agent-brand-version.md)[] (optional) - Brand/version pairs used for high-entropy full-version Client Hints values.
++* `fullVersion` string (optional) - The full browser version used when Chromium exposes the legacy full-version Client Hint.
++* `platform` string (optional) - The platform token used for `Sec-CH-UA-Platform` and `navigator.userAgentData.platform`.
++* `platformVersion` string (optional) - The platform version used for high-entropy platform-version Client Hints values.
++* `architecture` string (optional) - The CPU architecture token used for high-entropy architecture Client Hints values.
++* `model` string (optional) - The device model token used for high-entropy model Client Hints values.
++* `mobile` boolean (optional) - Whether Chromium should expose the mobile User-Agent Client Hints value.
++* `bitness` string (optional) - The CPU bitness token used for high-entropy bitness Client Hints values.
++* `wow64` boolean (optional) - Whether Chromium should expose the Windows-on-Windows 64-bit Client Hints value.
++* `formFactors` string[] (optional) - Form factor tokens used for high-entropy form-factor Client Hints values.
+diff --git a/docs/api/structures/web-contents-user-agent-override-options.md b/docs/api/structures/web-contents-user-agent-override-options.md
+new file mode 100644
+index 0000000000..a3bd13877f
+--- /dev/null
++++ b/docs/api/structures/web-contents-user-agent-override-options.md
+@@ -0,0 +1,5 @@
++# WebContentsUserAgentOverrideOptions Object
++
++* `userAgent` string - The legacy `User-Agent` string to use for this `WebContents`.
++* `userAgentMetadata` [UserAgentMetadata](user-agent-metadata.md) - The User-Agent Client Hints metadata that matches `userAgent`.
++* `inheritToNewWindows` boolean (optional) - Whether child windows opened from this `WebContents` should inherit the override. Default is `false`.
+diff --git a/docs/api/web-contents.md b/docs/api/web-contents.md
+index 203665a8c0..7fec0a4908 100644
+--- a/docs/api/web-contents.md
++++ b/docs/api/web-contents.md
+@@ -1093,6 +1093,7 @@ Emitted when the [mainFrame](web-contents.md#contentsmainframe-readonly), an `<i
+ * `options` Object (optional)
+   * `httpReferrer` (string | [Referrer](structures/referrer.md)) (optional) - An HTTP Referrer url.
+   * `userAgent` string (optional) - A user agent originating the request.
++  * `userAgentMetadata` [UserAgentMetadata](structures/user-agent-metadata.md) (optional) - User-Agent Client Hints metadata for this navigation. When this option is specified, `userAgent` must also be specified.
+   * `extraHeaders` string (optional) - Extra headers separated by "\n".
+   * `postData` ([UploadRawData](structures/upload-raw-data.md) | [UploadFile](structures/upload-file.md))[] (optional)
+   * `baseURLForDataURL` string (optional) - Base url (with trailing path separator) for files to be loaded by the data url. This is needed only if the specified `url` is a data url and needs to load other files.
+@@ -1381,6 +1382,24 @@ win.webContents.on('unresponsive', async () => {
+ 
+ Overrides the user agent for this web page.
+ 
++#### `contents.setUserAgentOverride(options)`
++
++* `options` [WebContentsUserAgentOverrideOptions](structures/web-contents-user-agent-override-options.md)
++
++Overrides the user agent and User-Agent Client Hints metadata for this
++`WebContents`. The override applies to frames and dedicated workers created
++after the call.
++
++Call this API before `loadURL()` when the override must apply to the first
++navigation. Shared workers and service workers use the session-level or app-level
++override because they are scoped to a storage partition rather than a single
++`WebContents`.
++
++#### `contents.clearUserAgentOverride()`
++
++Clears this `WebContents` user agent override and restores the current
++session-level or app-level fallback for future navigations.
++
+ #### `contents.getUserAgent()`
+ 
+ Returns `string` - The user agent for this web page.
+diff --git a/docs/api/webview-tag.md b/docs/api/webview-tag.md
+index 409cc71e9e..61e6d2ba17 100644
+--- a/docs/api/webview-tag.md
++++ b/docs/api/webview-tag.md
+@@ -272,6 +272,7 @@ webview.addEventListener('dom-ready', () => {
+ * `options` Object (optional)
+   * `httpReferrer` (string | [Referrer](structures/referrer.md)) (optional) - An HTTP Referrer url.
+   * `userAgent` string (optional) - A user agent originating the request.
++  * `userAgentMetadata` [UserAgentMetadata](structures/user-agent-metadata.md) (optional) - User-Agent Client Hints metadata for this navigation. When this option is specified, `userAgent` must also be specified.
+   * `extraHeaders` string (optional) - Extra headers separated by "\n"
+   * `postData` ([UploadRawData](structures/upload-raw-data.md) | [UploadFile](structures/upload-file.md))[] (optional)
+   * `baseURLForDataURL` string (optional) - Base url (with trailing path separator) for files to be loaded by the data url. This is needed only if the specified `url` is a data url and needs to load other files.
+diff --git a/filenames.gni b/filenames.gni
+index 6ddb1a8140..f1abc2d7ff 100644
+--- a/filenames.gni
++++ b/filenames.gni
+@@ -555,6 +555,8 @@ filenames = {
+     "shell/browser/usb/usb_chooser_context_factory.h",
+     "shell/browser/usb/usb_chooser_controller.cc",
+     "shell/browser/usb/usb_chooser_controller.h",
++    "shell/browser/user_agent_override.cc",
++    "shell/browser/user_agent_override.h",
+     "shell/browser/web_contents_permission_helper.cc",
+     "shell/browser/web_contents_permission_helper.h",
+     "shell/browser/web_contents_preferences.cc",
+diff --git a/shell/browser/api/electron_api_app.cc b/shell/browser/api/electron_api_app.cc
+index 3c3935adfb..baabc3123f 100644
+--- a/shell/browser/api/electron_api_app.cc
++++ b/shell/browser/api/electron_api_app.cc
+@@ -61,6 +61,7 @@
+ #include "shell/browser/javascript_environment.h"
+ #include "shell/browser/net/resolve_proxy_helper.h"
+ #include "shell/browser/relauncher.h"
++#include "shell/browser/user_agent_override.h"
+ #include "shell/common/application_info.h"
+ #include "shell/common/callback_util.h"
+ #include "shell/common/electron_command_line.h"
+@@ -1646,6 +1647,24 @@ void App::SetUserAgentFallback(const std::string& user_agent) {
+   ElectronBrowserClient::Get()->SetUserAgent(user_agent);
+ }
+ 
++void App::SetUserAgentOverride(gin_helper::ErrorThrower thrower,
++                               const gin_helper::Dictionary& options) {
++  UserAgentOverrideOptions user_agent_override;
++  if (!ParseUserAgentOverrideOptions(
++          thrower, options,
++          ElectronBrowserClient::Get()->GetUserAgentMetadata(), false, false,
++          &user_agent_override)) {
++    return;
++  }
++
++  ElectronBrowserClient::Get()->SetUserAgentOverride(
++      user_agent_override.user_agent, user_agent_override.user_agent_metadata);
++}
++
++void App::ClearUserAgentOverride() {
++  ElectronBrowserClient::Get()->ClearUserAgentOverride();
++}
++
+ #if BUILDFLAG(IS_WIN)
+ bool App::IsRunningUnderARM64Translation() const {
+   return base::win::OSInfo::IsRunningEmulatedOnArm64();
+@@ -2018,6 +2037,8 @@ gin::ObjectTemplateBuilder App::GetObjectTemplateBuilder(v8::Isolate* isolate) {
+ #endif
+       .SetProperty("userAgentFallback", &App::GetUserAgentFallback,
+                    &App::SetUserAgentFallback)
++      .SetMethod("setUserAgentOverride", &App::SetUserAgentOverride)
++      .SetMethod("clearUserAgentOverride", &App::ClearUserAgentOverride)
+       .SetMethod("configureHostResolver", &ConfigureHostResolver)
+       .SetMethod("enableSandbox", &App::EnableSandbox)
+       .SetMethod("setProxy", &App::SetProxy)
+diff --git a/shell/browser/api/electron_api_app.h b/shell/browser/api/electron_api_app.h
+index e3f487934d..3aee766d9f 100644
+--- a/shell/browser/api/electron_api_app.h
++++ b/shell/browser/api/electron_api_app.h
+@@ -238,6 +238,9 @@ class App final : public gin::Wrappable<App>,
+   void EnableSandbox(gin_helper::ErrorThrower thrower);
+   void SetUserAgentFallback(const std::string& user_agent);
+   std::string GetUserAgentFallback();
++  void SetUserAgentOverride(gin_helper::ErrorThrower thrower,
++                            const gin_helper::Dictionary& options);
++  void ClearUserAgentOverride();
+   v8::Local<v8::Promise> SetProxy(gin::Arguments* args);
+   v8::Local<v8::Promise> ResolveProxy(gin::Arguments* args);
+ 
+diff --git a/shell/browser/api/electron_api_session.cc b/shell/browser/api/electron_api_session.cc
+index 7e2dda091c..df2e0c7c84 100644
+--- a/shell/browser/api/electron_api_session.cc
++++ b/shell/browser/api/electron_api_session.cc
+@@ -70,6 +70,7 @@
+ #include "shell/browser/api/electron_api_web_frame_main.h"
+ #include "shell/browser/api/electron_api_web_request.h"
+ #include "shell/browser/browser.h"
++#include "shell/browser/electron_browser_client.h"
+ #include "shell/browser/electron_browser_context.h"
+ #include "shell/browser/electron_browser_main_parts.h"
+ #include "shell/browser/electron_permission_manager.h"
+@@ -79,6 +80,7 @@
+ #include "shell/browser/net/resolve_host_function.h"
+ #include "shell/browser/net/resolve_proxy_helper.h"
+ #include "shell/browser/session_preferences.h"
++#include "shell/browser/user_agent_override.h"
+ #include "shell/common/gin_converters/callback_converter.h"
+ #include "shell/common/gin_converters/content_converter.h"
+ #include "shell/common/gin_converters/file_path_converter.h"
+@@ -1021,6 +1023,39 @@ void Session::SetUserAgent(const std::string& user_agent,
+   }
+ }
+ 
++void Session::SetUserAgentOverride(gin_helper::ErrorThrower thrower,
++                                   const gin_helper::Dictionary& options) {
++  UserAgentOverrideOptions user_agent_override;
++  if (!ParseUserAgentOverrideOptions(thrower, options,
++                                     browser_context_->GetUserAgentMetadata(),
++                                     true, false, &user_agent_override)) {
++    return;
++  }
++
++  browser_context_->SetUserAgentOverride(
++      user_agent_override.user_agent, user_agent_override.user_agent_metadata);
++
++  auto* network_context =
++      browser_context_->GetDefaultStoragePartition()->GetNetworkContext();
++  network_context->SetUserAgent(user_agent_override.user_agent);
++  if (user_agent_override.accept_languages.has_value()) {
++    network_context->SetAcceptLanguage(
++        net::HttpUtil::GenerateAcceptLanguageHeader(
++            user_agent_override.accept_languages.value()));
++  }
++}
++
++void Session::ClearUserAgentOverride() {
++  browser_context_->ClearUserAgentOverride();
++
++  auto* network_context =
++      browser_context_->GetDefaultStoragePartition()->GetNetworkContext();
++  network_context->SetUserAgent(browser_context_->GetUserAgent());
++  network_context->SetAcceptLanguage(
++      net::HttpUtil::GenerateAcceptLanguageHeader(
++          ElectronBrowserClient::Get()->GetApplicationLocale()));
++}
++
+ std::string Session::GetUserAgent() {
+   return browser_context_->GetUserAgent();
+ }
+@@ -1823,6 +1858,8 @@ void Session::FillObjectTemplate(v8::Isolate* isolate,
+                  &Session::AllowNTLMCredentialsForDomains)
+       .SetMethod("isPersistent", &Session::IsPersistent)
+       .SetMethod("setUserAgent", &Session::SetUserAgent)
++      .SetMethod("setUserAgentOverride", &Session::SetUserAgentOverride)
++      .SetMethod("clearUserAgentOverride", &Session::ClearUserAgentOverride)
+       .SetMethod("getUserAgent", &Session::GetUserAgent)
+       .SetMethod("setSSLConfig", &Session::SetSSLConfig)
+       .SetMethod("getBlobData", &Session::GetBlobData)
+diff --git a/shell/browser/api/electron_api_session.h b/shell/browser/api/electron_api_session.h
+index 149d092bc3..8e167a15e7 100644
+--- a/shell/browser/api/electron_api_session.h
++++ b/shell/browser/api/electron_api_session.h
+@@ -148,6 +148,9 @@ class Session final : public gin::Wrappable<Session>,
+   v8::Local<v8::Promise> ClearAuthCache();
+   void AllowNTLMCredentialsForDomains(const std::string& domains);
+   void SetUserAgent(const std::string& user_agent, gin::Arguments* args);
++  void SetUserAgentOverride(gin_helper::ErrorThrower thrower,
++                            const gin_helper::Dictionary& options);
++  void ClearUserAgentOverride();
+   std::string GetUserAgent();
+   void SetSSLConfig(network::mojom::SSLConfigPtr config);
+   bool IsPersistent();
+diff --git a/shell/browser/api/electron_api_web_contents.cc b/shell/browser/api/electron_api_web_contents.cc
+index 221a7d87ab..2aeda4af73 100644
+--- a/shell/browser/api/electron_api_web_contents.cc
++++ b/shell/browser/api/electron_api_web_contents.cc
+@@ -37,7 +37,6 @@
+ #include "chrome/browser/ui/exclusive_access/exclusive_access_manager.h"
+ #include "chrome/browser/ui/views/eye_dropper/eye_dropper.h"
+ #include "chrome/common/pref_names.h"
+-#include "components/embedder_support/user_agent_utils.h"
+ #include "components/input/native_web_keyboard_event.h"
+ #include "components/prefs/pref_service.h"
+ #include "components/prefs/scoped_user_pref_update.h"
+@@ -114,6 +113,7 @@
+ #include "shell/browser/ui/file_dialog.h"
+ #include "shell/browser/ui/inspectable_web_contents.h"
+ #include "shell/browser/ui/inspectable_web_contents_view.h"
++#include "shell/browser/user_agent_override.h"
+ #include "shell/browser/web_contents_permission_helper.h"
+ #include "shell/browser/web_contents_preferences.h"
+ #include "shell/browser/web_contents_zoom_controller.h"
+@@ -1127,7 +1127,8 @@ WebContents::WebContents(v8::Isolate* isolate,
+ 
+   session_ = Session::FromOrCreate(isolate, GetBrowserContext());
+ 
+-  SetUserAgent(GetBrowserContext()->GetUserAgent());
++  web_contents->SetUserAgentOverride(
++      GetBrowserContext()->GetUserAgentOverride(), false);
+ 
+   web_contents->SetUserData(kElectronApiWebContentsKey,
+                             std::make_unique<UserDataLink>(GetWeakPtr()));
+@@ -1349,7 +1350,8 @@ void WebContents::InitWithSessionAndOptions(
+ 
+   AutofillDriverFactory::CreateForWebContents(web_contents());
+ 
+-  SetUserAgent(GetBrowserContext()->GetUserAgent());
++  web_contents()->SetUserAgentOverride(
++      GetBrowserContext()->GetUserAgentOverride(), false);
+ 
+   if (is_guest()) {
+     NativeWindow* owner_window = nullptr;
+@@ -2820,9 +2822,22 @@ void WebContents::LoadURL(const GURL& url,
+                             network::mojom::ReferrerPolicy::kDefault);
+   }
+ 
+-  std::string user_agent;
+-  if (options.Get("userAgent", &user_agent))
+-    SetUserAgent(user_agent);
++  base::Value user_agent_metadata;
++  if (options.Get("userAgentMetadata", &user_agent_metadata)) {
++    UserAgentOverrideOptions user_agent_override;
++    gin_helper::ErrorThrower thrower(JavascriptEnvironment::GetIsolate());
++    if (!ParseUserAgentOverrideOptions(
++            thrower, options, GetBrowserContext()->GetUserAgentMetadata(),
++            false, false, &user_agent_override)) {
++      return;
++    }
++    web_contents()->SetUserAgentOverride(
++        ToBlinkUserAgentOverride(user_agent_override), false);
++  } else {
++    std::string user_agent;
++    if (options.Get("userAgent", &user_agent))
++      SetUserAgent(user_agent);
++  }
+ 
+   std::string extra_headers;
+   if (options.Get("extraHeaders", &extra_headers))
+@@ -3201,12 +3216,29 @@ void WebContents::ForcefullyCrashRenderer() {
+ }
+ 
+ void WebContents::SetUserAgent(const std::string& user_agent) {
+-  blink::UserAgentOverride ua_override;
+-  ua_override.ua_string_override = user_agent;
+-  if (!user_agent.empty())
+-    ua_override.ua_metadata_override = embedder_support::GetUserAgentMetadata();
++  web_contents()->SetUserAgentOverride(
++      ToBlinkUserAgentOverride(user_agent,
++                               GetBrowserContext()->GetUserAgentMetadata()),
++      false);
++}
++
++void WebContents::SetUserAgentOverride(gin_helper::ErrorThrower thrower,
++                                       const gin_helper::Dictionary& options) {
++  UserAgentOverrideOptions user_agent_override;
++  if (!ParseUserAgentOverrideOptions(
++          thrower, options, GetBrowserContext()->GetUserAgentMetadata(), false,
++          true, &user_agent_override)) {
++    return;
++  }
++
++  web_contents()->SetUserAgentOverride(
++      ToBlinkUserAgentOverride(user_agent_override),
++      user_agent_override.inherit_to_new_windows);
++}
+ 
+-  web_contents()->SetUserAgentOverride(ua_override, false);
++void WebContents::ClearUserAgentOverride() {
++  web_contents()->SetUserAgentOverride(
++      GetBrowserContext()->GetUserAgentOverride(), false);
+ }
+ 
+ std::string WebContents::GetUserAgent() {
+@@ -5235,6 +5267,8 @@ void WebContents::FillObjectTemplate(v8::Isolate* isolate,
+       .SetMethod("forcefullyCrashRenderer",
+                  &WebContents::ForcefullyCrashRenderer)
+       .SetMethod("setUserAgent", &WebContents::SetUserAgent)
++      .SetMethod("setUserAgentOverride", &WebContents::SetUserAgentOverride)
++      .SetMethod("clearUserAgentOverride", &WebContents::ClearUserAgentOverride)
+       .SetMethod("getUserAgent", &WebContents::GetUserAgent)
+       .SetMethod("savePage", &WebContents::SavePage)
+       .SetMethod("openDevTools", &WebContents::OpenDevTools)
+diff --git a/shell/browser/api/electron_api_web_contents.h b/shell/browser/api/electron_api_web_contents.h
+index 4a3e9faa85..f384c39fda 100644
+--- a/shell/browser/api/electron_api_web_contents.h
++++ b/shell/browser/api/electron_api_web_contents.h
+@@ -233,6 +233,9 @@ class WebContents final : public ExclusiveAccessContext,
+   bool IsCrashed() const;
+   void ForcefullyCrashRenderer();
+   void SetUserAgent(const std::string& user_agent);
++  void SetUserAgentOverride(gin_helper::ErrorThrower thrower,
++                            const gin_helper::Dictionary& options);
++  void ClearUserAgentOverride();
+   std::string GetUserAgent();
+   void InsertCSS(const std::string& css);
+   v8::Local<v8::Promise> SavePage(const base::FilePath& full_file_path,
+diff --git a/shell/browser/electron_browser_client.cc b/shell/browser/electron_browser_client.cc
+index 0347eb5162..d0cc767bbe 100644
+--- a/shell/browser/electron_browser_client.cc
++++ b/shell/browser/electron_browser_client.cc
+@@ -1179,14 +1179,49 @@ std::string ElectronBrowserClient::GetUserAgent() {
+   return user_agent_override_;
+ }
+ 
++std::string ElectronBrowserClient::GetUserAgent(
++    content::BrowserContext* browser_context) {
++  if (!ElectronBrowserContext::IsValidContext(browser_context))
++    return GetUserAgent();
++
++  auto* electron_browser_context =
++      static_cast<ElectronBrowserContext*>(browser_context);
++  return electron_browser_context->GetUserAgent();
++}
++
+ void ElectronBrowserClient::SetUserAgent(const std::string& user_agent) {
+   user_agent_override_ = user_agent;
++  user_agent_metadata_override_.reset();
++}
++
++void ElectronBrowserClient::SetUserAgentOverride(
++    const std::string& user_agent,
++    const blink::UserAgentMetadata& user_agent_metadata) {
++  user_agent_override_ = user_agent;
++  user_agent_metadata_override_ = user_agent_metadata;
++}
++
++void ElectronBrowserClient::ClearUserAgentOverride() {
++  user_agent_override_.clear();
++  user_agent_metadata_override_.reset();
+ }
+ 
+ blink::UserAgentMetadata ElectronBrowserClient::GetUserAgentMetadata() {
++  if (user_agent_metadata_override_.has_value())
++    return user_agent_metadata_override_.value();
+   return embedder_support::GetUserAgentMetadata();
+ }
+ 
++blink::UserAgentMetadata ElectronBrowserClient::GetUserAgentMetadata(
++    content::BrowserContext* browser_context) {
++  if (!ElectronBrowserContext::IsValidContext(browser_context))
++    return GetUserAgentMetadata();
++
++  auto* electron_browser_context =
++      static_cast<ElectronBrowserContext*>(browser_context);
++  return electron_browser_context->GetUserAgentMetadata();
++}
++
+ mojo::PendingRemote<network::mojom::URLLoaderFactory>
+ ElectronBrowserClient::CreateNonNetworkNavigationURLLoaderFactory(
+     const std::string& scheme,
+diff --git a/shell/browser/electron_browser_client.h b/shell/browser/electron_browser_client.h
+index 9ad3c999cb..002f355f2b 100644
+--- a/shell/browser/electron_browser_client.h
++++ b/shell/browser/electron_browser_client.h
+@@ -22,6 +22,7 @@
+ #include "electron/buildflags/buildflags.h"
+ #include "net/ssl/client_cert_identity.h"
+ #include "services/metrics/public/cpp/ukm_source_id.h"
++#include "third_party/blink/public/common/user_agent/user_agent_metadata.h"
+ #include "third_party/blink/public/mojom/badging/badging.mojom-forward.h"
+ 
+ namespace base {
+@@ -116,8 +117,15 @@ class ElectronBrowserClient : public content::ContentBrowserClient,
+       content::WebContents* unfocused_web_contents) override;
+ 
+   std::string GetUserAgent() override;
++  std::string GetUserAgent(content::BrowserContext* browser_context) override;
+   void SetUserAgent(const std::string& user_agent);
++  void SetUserAgentOverride(
++      const std::string& user_agent,
++      const blink::UserAgentMetadata& user_agent_metadata);
++  void ClearUserAgentOverride();
+   blink::UserAgentMetadata GetUserAgentMetadata() override;
++  blink::UserAgentMetadata GetUserAgentMetadata(
++      content::BrowserContext* browser_context) override;
+ 
+   content::SerialDelegate* GetSerialDelegate() override;
+ 
+@@ -367,6 +375,7 @@ class ElectronBrowserClient : public content::ContentBrowserClient,
+   raw_ptr<Delegate> delegate_ = nullptr;
+ 
+   std::string user_agent_override_ = "";
++  std::optional<blink::UserAgentMetadata> user_agent_metadata_override_;
+ 
+   // Simple shared ID generator, used by ProxyingURLLoaderFactory and
+   // ProxyingWebSocket classes.
+diff --git a/shell/browser/electron_browser_context.cc b/shell/browser/electron_browser_context.cc
+index 4a425dc3af..46a34bdaef 100644
+--- a/shell/browser/electron_browser_context.cc
++++ b/shell/browser/electron_browser_context.cc
+@@ -14,6 +14,7 @@
+ #include "base/command_line.h"
+ #include "base/containers/to_vector.h"
+ #include "base/files/file_path.h"
++#include "base/memory/raw_ptr.h"
+ #include "base/no_destructor.h"
+ #include "base/path_service.h"
+ #include "base/strings/escape.h"
+@@ -32,6 +33,7 @@
+ #include "content/browser/blob_storage/chrome_blob_storage_context.h"  // nogncheck
+ #include "content/browser/network_service_instance_impl.h"  // nogncheck
+ #include "content/public/browser/browser_thread.h"
++#include "content/public/browser/client_hints_controller_delegate.h"
+ #include "content/public/browser/cors_origin_pattern_setter.h"
+ #include "content/public/browser/host_zoom_map.h"
+ #include "content/public/browser/preconnect_manager.h"
+@@ -42,8 +44,10 @@
+ #include "gin/arguments.h"
+ #include "media/audio/audio_device_description.h"
+ #include "services/network/public/cpp/features.h"
++#include "services/network/public/cpp/is_potentially_trustworthy.h"
+ #include "services/network/public/cpp/originating_process_id.h"
+ #include "services/network/public/cpp/wrapper_shared_url_loader_factory.h"
++#include "services/network/public/mojom/web_client_hints_types.mojom.h"
+ #include "shell/browser/cookie_change_notifier.h"
+ #include "shell/browser/electron_browser_client.h"
+ #include "shell/browser/electron_browser_main_parts.h"
+@@ -68,9 +72,11 @@
+ #include "shell/common/gin_helper/dictionary.h"
+ #include "shell/common/options_switches.h"
+ #include "shell/common/thread_restrictions.h"
++#include "third_party/blink/public/common/client_hints/enabled_client_hints.h"
+ #include "third_party/blink/public/common/page/page_zoom.h"
+ #include "third_party/blink/public/mojom/media/capture_handle_config.mojom.h"
+ #include "third_party/blink/public/mojom/mediastream/media_stream.mojom.h"
++#include "ui/gfx/geometry/size.h"
+ 
+ #if BUILDFLAG(ENABLE_ELECTRON_EXTENSIONS)
+ #include "extensions/browser/browser_context_keyed_service_factories.h"
+@@ -106,6 +112,82 @@ namespace electron {
+ 
+ namespace {
+ 
++class ElectronClientHintsControllerDelegate
++    : public content::ClientHintsControllerDelegate {
++ public:
++  explicit ElectronClientHintsControllerDelegate(
++      ElectronBrowserContext* browser_context)
++      : browser_context_(browser_context) {}
++
++  ElectronClientHintsControllerDelegate(
++      const ElectronClientHintsControllerDelegate&) = delete;
++  ElectronClientHintsControllerDelegate& operator=(
++      const ElectronClientHintsControllerDelegate&) = delete;
++
++  network::NetworkQualityTracker* GetNetworkQualityTracker() override {
++    return nullptr;
++  }
++
++  void GetAllowedClientHintsFromSource(
++      const url::Origin& origin,
++      blink::EnabledClientHints* client_hints) override {
++    if (!network::IsOriginPotentiallyTrustworthy(origin))
++      return;
++
++    if (auto iter = accept_ch_cache_.find(origin);
++        iter != accept_ch_cache_.end()) {
++      *client_hints = iter->second;
++    }
++
++    for (auto hint : additional_hints_)
++      client_hints->SetIsEnabled(hint, true);
++  }
++
++  bool IsJavaScriptAllowed(const GURL& url,
++                           content::RenderFrameHost* parent_rfh) override {
++    return true;
++  }
++
++  blink::UserAgentMetadata GetUserAgentMetadata() override {
++    return browser_context_->GetUserAgentMetadata();
++  }
++
++  void PersistClientHints(const url::Origin& primary_origin,
++                          content::RenderFrameHost* parent_rfh,
++                          const std::vector<network::mojom::WebClientHintsType>&
++                              client_hints) override {
++    if (!network::IsOriginPotentiallyTrustworthy(primary_origin))
++      return;
++
++    blink::EnabledClientHints enabled_hints;
++    for (auto hint : client_hints)
++      enabled_hints.SetIsEnabled(hint, true);
++    accept_ch_cache_[primary_origin] = enabled_hints;
++  }
++
++  void SetAdditionalClientHints(
++      const std::vector<network::mojom::WebClientHintsType>& hints) override {
++    additional_hints_ = hints;
++  }
++
++  void ClearAdditionalClientHints() override { additional_hints_.clear(); }
++
++  void SetMostRecentMainFrameViewportSize(
++      const gfx::Size& viewport_size) override {
++    most_recent_main_frame_viewport_size_ = viewport_size;
++  }
++
++  gfx::Size GetMostRecentMainFrameViewportSize() override {
++    return most_recent_main_frame_viewport_size_;
++  }
++
++ private:
++  raw_ptr<ElectronBrowserContext> browser_context_;
++  std::map<url::Origin, blink::EnabledClientHints> accept_ch_cache_;
++  std::vector<network::mojom::WebClientHintsType> additional_hints_;
++  gfx::Size most_recent_main_frame_viewport_size_;
++};
++
+ // Copied from chrome/browser/media/webrtc/desktop_capture_devices_util.cc.
+ media::mojom::CaptureHandlePtr CreateCaptureHandle(
+     content::WebContents* capturer,
+@@ -509,6 +591,19 @@ void ElectronBrowserContext::InitPrefs() {
+ 
+ void ElectronBrowserContext::SetUserAgent(const std::string& user_agent) {
+   user_agent_ = user_agent;
++  user_agent_metadata_.reset();
++}
++
++void ElectronBrowserContext::SetUserAgentOverride(
++    const std::string& user_agent,
++    const blink::UserAgentMetadata& user_agent_metadata) {
++  user_agent_ = user_agent;
++  user_agent_metadata_ = user_agent_metadata;
++}
++
++void ElectronBrowserContext::ClearUserAgentOverride() {
++  user_agent_.reset();
++  user_agent_metadata_.reset();
+ }
+ 
+ base::FilePath ElectronBrowserContext::GetPath() const {
+@@ -570,6 +665,19 @@ std::string ElectronBrowserContext::GetUserAgent() const {
+   return user_agent_.value_or(ElectronBrowserClient::Get()->GetUserAgent());
+ }
+ 
++blink::UserAgentMetadata ElectronBrowserContext::GetUserAgentMetadata() const {
++  return user_agent_metadata_.value_or(
++      ElectronBrowserClient::Get()->GetUserAgentMetadata());
++}
++
++blink::UserAgentOverride ElectronBrowserContext::GetUserAgentOverride() const {
++  blink::UserAgentOverride override;
++  override.ua_string_override = GetUserAgent();
++  if (!override.ua_string_override.empty())
++    override.ua_metadata_override = GetUserAgentMetadata();
++  return override;
++}
++
+ content::PreconnectManager* ElectronBrowserContext::GetPreconnectManager() {
+   if (!preconnect_manager_) {
+     preconnect_manager_delegate_ =
+@@ -662,7 +770,11 @@ ElectronBrowserContext::GetBrowsingDataRemoverDelegate() {
+ 
+ content::ClientHintsControllerDelegate*
+ ElectronBrowserContext::GetClientHintsControllerDelegate() {
+-  return nullptr;
++  if (!client_hints_controller_delegate_) {
++    client_hints_controller_delegate_ =
++        std::make_unique<ElectronClientHintsControllerDelegate>(this);
++  }
++  return client_hints_controller_delegate_.get();
+ }
+ 
+ content::StorageNotificationService*
+diff --git a/shell/browser/electron_browser_context.h b/shell/browser/electron_browser_context.h
+index a9c59761f1..06a1379beb 100644
+--- a/shell/browser/electron_browser_context.h
++++ b/shell/browser/electron_browser_context.h
+@@ -23,6 +23,7 @@
+ #include "services/network/public/mojom/network_context.mojom.h"
+ #include "services/network/public/mojom/ssl_config.mojom.h"
+ #include "third_party/blink/public/common/permissions/permission_utils.h"
++#include "third_party/blink/public/common/user_agent/user_agent_metadata.h"
+ 
+ class PrefService;
+ class ValueMapPrefStore;
+@@ -89,7 +90,13 @@ class ElectronBrowserContext : public content::BrowserContext {
+   static void DestroyAllContexts();
+ 
+   void SetUserAgent(const std::string& user_agent);
++  void SetUserAgentOverride(
++      const std::string& user_agent,
++      const blink::UserAgentMetadata& user_agent_metadata);
++  void ClearUserAgentOverride();
+   std::string GetUserAgent() const;
++  blink::UserAgentMetadata GetUserAgentMetadata() const;
++  blink::UserAgentOverride GetUserAgentOverride() const;
+   bool can_use_http_cache() const { return use_cache_; }
+   int max_cache_size() const { return max_cache_size_; }
+   ResolveProxyHelper* GetResolveProxyHelper();
+@@ -210,8 +217,11 @@ class ElectronBrowserContext : public content::BrowserContext {
+   std::unique_ptr<ElectronPreconnectManagerDelegate>
+       preconnect_manager_delegate_;
+   std::unique_ptr<ProtocolRegistry> protocol_registry_;
++  std::unique_ptr<content::ClientHintsControllerDelegate>
++      client_hints_controller_delegate_;
+ 
+   std::optional<std::string> user_agent_;
++  std::optional<blink::UserAgentMetadata> user_agent_metadata_;
+   base::FilePath path_;
+   bool in_memory_ = false;
+   bool use_cache_ = true;
+diff --git a/shell/browser/user_agent_override.cc b/shell/browser/user_agent_override.cc
+new file mode 100644
+index 0000000000..229f11d99f
+--- /dev/null
++++ b/shell/browser/user_agent_override.cc
+@@ -0,0 +1,236 @@
++// Copyright (c) 2026 SoftCamp Co., Ltd.
++// Use of this source code is governed by the MIT license that can be
++// found in the LICENSE file.
++
++#include "shell/browser/user_agent_override.h"
++
++#include <string>
++#include <string_view>
++#include <utility>
++#include <vector>
++
++#include "base/strings/string_util.h"
++#include "base/values.h"
++#include "net/http/http_util.h"
++#include "shell/common/gin_converters/value_converter.h"
++#include "shell/common/gin_helper/dictionary.h"
++#include "shell/common/gin_helper/error_thrower.h"
++
++namespace electron {
++
++namespace {
++
++bool ValidateClientHintString(std::string_view value) {
++  for (const char c : value) {
++    if (!base::IsAsciiPrintable(c))
++      return false;
++  }
++  return true;
++}
++
++bool ReadClientHintString(const base::DictValue& dict,
++                          const char* key,
++                          std::string* out,
++                          std::string* error) {
++  const std::string* value = dict.FindString(key);
++  if (!value)
++    return true;
++  if (!ValidateClientHintString(*value)) {
++    *error = std::string("Invalid ") + key + " string";
++    return false;
++  }
++  *out = *value;
++  return true;
++}
++
++bool ReadBrandVersionList(const base::DictValue& dict,
++                          const char* key,
++                          blink::UserAgentBrandList* out,
++                          std::string* error) {
++  const base::ListValue* list = dict.FindList(key);
++  if (!list)
++    return true;
++
++  blink::UserAgentBrandList parsed;
++  for (const base::Value& item : *list) {
++    if (!item.is_dict()) {
++      *error = std::string(key) + " must be an array of objects";
++      return false;
++    }
++
++    const base::DictValue& brand_dict = item.GetDict();
++    const std::string* brand = brand_dict.FindString("brand");
++    const std::string* version = brand_dict.FindString("version");
++    if (!brand || !version) {
++      *error = std::string(key) + " entries must include brand and version";
++      return false;
++    }
++    if (!ValidateClientHintString(*brand)) {
++      *error = "Invalid brand string";
++      return false;
++    }
++    if (!ValidateClientHintString(*version)) {
++      *error = "Invalid brand version string";
++      return false;
++    }
++
++    parsed.emplace_back(*brand, *version);
++  }
++
++  *out = std::move(parsed);
++  return true;
++}
++
++bool ReadFormFactors(const base::DictValue& dict,
++                     blink::UserAgentMetadata* metadata,
++                     std::string* error) {
++  const base::ListValue* list = dict.FindList("formFactors");
++  if (!list)
++    return true;
++
++  std::vector<std::string> form_factors;
++  for (const base::Value& item : *list) {
++    if (!item.is_string()) {
++      *error = "formFactors must be an array of strings";
++      return false;
++    }
++
++    const std::string& form_factor = item.GetString();
++    if (!ValidateClientHintString(form_factor) ||
++        !blink::UserAgentMetadata::IsValidFormFactor(form_factor)) {
++      *error = "Invalid form factor string";
++      return false;
++    }
++    form_factors.push_back(form_factor);
++  }
++
++  metadata->form_factors = std::move(form_factors);
++  return true;
++}
++
++bool ParseUserAgentMetadata(const base::Value& value,
++                            const blink::UserAgentMetadata& default_metadata,
++                            blink::UserAgentMetadata* metadata,
++                            std::string* error) {
++  if (!value.is_dict()) {
++    *error = "userAgentMetadata must be an object";
++    return false;
++  }
++
++  const base::DictValue& dict = value.GetDict();
++  blink::UserAgentMetadata parsed = default_metadata;
++
++  if (!ReadBrandVersionList(dict, "brands", &parsed.brand_version_list, error))
++    return false;
++  if (!ReadBrandVersionList(dict, "fullVersionList",
++                            &parsed.brand_full_version_list, error)) {
++    return false;
++  }
++  if (!ReadClientHintString(dict, "fullVersion", &parsed.full_version, error))
++    return false;
++  if (!ReadClientHintString(dict, "platform", &parsed.platform, error))
++    return false;
++  if (!ReadClientHintString(dict, "platformVersion", &parsed.platform_version,
++                            error)) {
++    return false;
++  }
++  if (!ReadClientHintString(dict, "architecture", &parsed.architecture, error))
++    return false;
++  if (!ReadClientHintString(dict, "model", &parsed.model, error))
++    return false;
++  if (!ReadClientHintString(dict, "bitness", &parsed.bitness, error))
++    return false;
++
++  if (std::optional<bool> mobile = dict.FindBool("mobile"))
++    parsed.mobile = *mobile;
++  if (std::optional<bool> wow64 = dict.FindBool("wow64"))
++    parsed.wow64 = *wow64;
++
++  if (!ReadFormFactors(dict, &parsed, error))
++    return false;
++
++  *metadata = std::move(parsed);
++  return true;
++}
++
++}  // namespace
++
++UserAgentOverrideOptions::UserAgentOverrideOptions() = default;
++UserAgentOverrideOptions::UserAgentOverrideOptions(
++    const UserAgentOverrideOptions&) = default;
++UserAgentOverrideOptions::UserAgentOverrideOptions(
++    UserAgentOverrideOptions&&) noexcept = default;
++UserAgentOverrideOptions& UserAgentOverrideOptions::operator=(
++    const UserAgentOverrideOptions&) = default;
++UserAgentOverrideOptions& UserAgentOverrideOptions::operator=(
++    UserAgentOverrideOptions&&) noexcept = default;
++UserAgentOverrideOptions::~UserAgentOverrideOptions() = default;
++
++bool ParseUserAgentOverrideOptions(
++    gin_helper::ErrorThrower thrower,
++    const gin_helper::Dictionary& options,
++    const blink::UserAgentMetadata& default_metadata,
++    bool allow_accept_languages,
++    bool allow_inherit_to_new_windows,
++    UserAgentOverrideOptions* override_out) {
++  std::string user_agent;
++  if (!options.Get("userAgent", &user_agent) || user_agent.empty()) {
++    thrower.ThrowTypeError("userAgent must be a non-empty string");
++    return false;
++  }
++
++  if (!net::HttpUtil::IsValidHeaderValue(user_agent)) {
++    thrower.ThrowTypeError("Invalid characters found in userAgent");
++    return false;
++  }
++
++  base::Value metadata_value;
++  if (!options.Get("userAgentMetadata", &metadata_value)) {
++    thrower.ThrowTypeError("userAgentMetadata must be provided");
++    return false;
++  }
++
++  blink::UserAgentMetadata metadata;
++  std::string error;
++  if (!ParseUserAgentMetadata(metadata_value, default_metadata, &metadata,
++                              &error)) {
++    thrower.ThrowTypeError(error);
++    return false;
++  }
++
++  UserAgentOverrideOptions parsed;
++  parsed.user_agent = std::move(user_agent);
++  parsed.user_agent_metadata = std::move(metadata);
++
++  if (allow_accept_languages) {
++    std::string accept_languages;
++    if (options.Get("acceptLanguages", &accept_languages))
++      parsed.accept_languages = std::move(accept_languages);
++  }
++
++  if (allow_inherit_to_new_windows) {
++    parsed.inherit_to_new_windows =
++        options.ValueOrDefault("inheritToNewWindows", false);
++  }
++
++  *override_out = std::move(parsed);
++  return true;
++}
++
++blink::UserAgentOverride ToBlinkUserAgentOverride(
++    const std::string& user_agent,
++    const blink::UserAgentMetadata& user_agent_metadata) {
++  blink::UserAgentOverride override;
++  override.ua_string_override = user_agent;
++  if (!user_agent.empty())
++    override.ua_metadata_override = user_agent_metadata;
++  return override;
++}
++
++blink::UserAgentOverride ToBlinkUserAgentOverride(
++    const UserAgentOverrideOptions& options) {
++  return ToBlinkUserAgentOverride(options.user_agent,
++                                  options.user_agent_metadata);
++}
++
++}  // namespace electron
+diff --git a/shell/browser/user_agent_override.h b/shell/browser/user_agent_override.h
+new file mode 100644
+index 0000000000..01c6a10d8c
+--- /dev/null
++++ b/shell/browser/user_agent_override.h
+@@ -0,0 +1,51 @@
++// Copyright (c) 2026 SoftCamp Co., Ltd.
++// Use of this source code is governed by the MIT license that can be
++// found in the LICENSE file.
++
++#ifndef ELECTRON_SHELL_BROWSER_USER_AGENT_OVERRIDE_H_
++#define ELECTRON_SHELL_BROWSER_USER_AGENT_OVERRIDE_H_
++
++#include <optional>
++#include <string>
++
++#include "third_party/blink/public/common/user_agent/user_agent_metadata.h"
++
++namespace gin_helper {
++class Dictionary;
++class ErrorThrower;
++}  // namespace gin_helper
++
++namespace electron {
++
++struct UserAgentOverrideOptions {
++  UserAgentOverrideOptions();
++  UserAgentOverrideOptions(const UserAgentOverrideOptions&);
++  UserAgentOverrideOptions(UserAgentOverrideOptions&&) noexcept;
++  UserAgentOverrideOptions& operator=(const UserAgentOverrideOptions&);
++  UserAgentOverrideOptions& operator=(UserAgentOverrideOptions&&) noexcept;
++  ~UserAgentOverrideOptions();
++
++  std::string user_agent;
++  blink::UserAgentMetadata user_agent_metadata;
++  std::optional<std::string> accept_languages;
++  bool inherit_to_new_windows = false;
++};
++
++bool ParseUserAgentOverrideOptions(
++    gin_helper::ErrorThrower thrower,
++    const gin_helper::Dictionary& options,
++    const blink::UserAgentMetadata& default_metadata,
++    bool allow_accept_languages,
++    bool allow_inherit_to_new_windows,
++    UserAgentOverrideOptions* override_out);
++
++blink::UserAgentOverride ToBlinkUserAgentOverride(
++    const std::string& user_agent,
++    const blink::UserAgentMetadata& user_agent_metadata);
++
++blink::UserAgentOverride ToBlinkUserAgentOverride(
++    const UserAgentOverrideOptions& options);
++
++}  // namespace electron
++
++#endif  // ELECTRON_SHELL_BROWSER_USER_AGENT_OVERRIDE_H_
+diff --git a/spec/api-app-spec.ts b/spec/api-app-spec.ts
+index c6cf4fb07d..6ed6eade57 100644
+--- a/spec/api-app-spec.ts
++++ b/spec/api-app-spec.ts
+@@ -2540,11 +2540,29 @@ describe('default behavior', () => {
+ 
+   describe('user agent fallback', () => {
+     let initialValue: string;
++    const userAgent = 'Mozilla/5.0 AppUserAgentOverride/99.0';
++    const userAgentMetadata = {
++      brands: [{ brand: 'AppBrand', version: '99' }],
++      fullVersionList: [{ brand: 'AppBrand', version: '99.0.1234.5' }],
++      fullVersion: '99.0.1234.5',
++      platform: 'Windows',
++      platformVersion: '19.0.0',
++      architecture: 'x86',
++      model: '',
++      mobile: false,
++      bitness: '64',
++      wow64: false,
++      formFactors: ['Desktop']
++    };
+ 
+     before(() => {
+       initialValue = app.userAgentFallback!;
+     });
+ 
++    afterEach(() => {
++      app.clearUserAgentOverride();
++    });
++
+     it('should have a reasonable default', () => {
+       expect(initialValue).to.include(`Electron/${process.versions.electron}`);
+       expect(initialValue).to.include(`Chrome/${process.versions.chrome}`);
+@@ -2560,6 +2578,32 @@ describe('default behavior', () => {
+       app.userAgentFallback = '';
+       expect(app.userAgentFallback).to.equal(initialValue);
+     });
++
++    it('can set a fallback with User-Agent Client Hints metadata', async () => {
++      app.setUserAgentOverride({ userAgent, userAgentMetadata });
++
++      const server = http.createServer((req, res) => {
++        res.end('<!DOCTYPE html>');
++      });
++      defer(() => {
++        server.close();
++      });
++
++      const { url } = await listen(server);
++      const ses = session.fromPartition(`app-user-agent-override-${crypto.randomUUID()}`);
++      const w = new BrowserWindow({ show: false, webPreferences: { session: ses } });
++      await w.loadURL(url);
++      const result = await w.webContents.executeJavaScript(`({
++        userAgent: navigator.userAgent,
++        brands: navigator.userAgentData.brands,
++        platform: navigator.userAgentData.platform
++      })`);
++
++      expect(ses.getUserAgent()).to.equal(userAgent);
++      expect(result.userAgent).to.equal(userAgent);
++      expect(result.brands.map((brand: any) => brand.brand)).to.include('AppBrand');
++      expect(result.platform).to.equal('Windows');
++    });
+   });
+ 
+   describe('login event', () => {
+diff --git a/spec/api-session-spec.ts b/spec/api-session-spec.ts
+index 8a073fbc3c..fab2f57b7a 100644
+--- a/spec/api-session-spec.ts
++++ b/spec/api-session-spec.ts
+@@ -2136,6 +2136,166 @@ describe('session module', () => {
+     });
+   });
+ 
++  describe('ses.setUserAgentOverride()', () => {
++    afterEach(closeAllWindows);
++
++    const userAgent = 'Mozilla/5.0 SessionUserAgentOverride/99.0';
++    const userAgentMetadata = {
++      brands: [{ brand: 'SessionBrand', version: '99' }],
++      fullVersionList: [{ brand: 'SessionBrand', version: '99.0.1234.5' }],
++      fullVersion: '99.0.1234.5',
++      platform: 'Windows',
++      platformVersion: '19.0.0',
++      architecture: 'x86',
++      model: '',
++      mobile: false,
++      bitness: '64',
++      wow64: false,
++      formFactors: ['Desktop']
++    };
++
++    it('can be retrieved and cleared with getUserAgent()', () => {
++      const ses = session.fromPartition(`user-agent-override-${crypto.randomUUID()}`);
++      ses.setUserAgentOverride({ userAgent, userAgentMetadata });
++      expect(ses.getUserAgent()).to.equal(userAgent);
++      ses.clearUserAgentOverride();
++      expect(ses.getUserAgent()).not.to.equal(userAgent);
++    });
++
++    it('sets User-Agent and low-entropy Client Hints headers for renderer requests', async () => {
++      const ses = session.fromPartition(`user-agent-override-headers-${crypto.randomUUID()}`);
++      ses.setUserAgentOverride({
++        userAgent,
++        userAgentMetadata,
++        acceptLanguages: 'en-US,ko'
++      });
++
++      let headers: http.IncomingHttpHeaders | null = null;
++      const server = http.createServer((req, res) => {
++        headers = req.headers;
++        res.end('<!DOCTYPE html>');
++      });
++      defer(() => {
++        server.close();
++      });
++
++      const { url } = await listen(server);
++      const w = new BrowserWindow({ show: false, webPreferences: { session: ses } });
++      await w.loadURL(url);
++
++      expect(headers!['user-agent']).to.equal(userAgent);
++      expect(headers!['accept-language']).to.equal('en-US,ko;q=0.9');
++      expect(headers!['sec-ch-ua']).to.include('SessionBrand');
++      expect(headers!['sec-ch-ua-mobile']).to.equal('?0');
++      expect(headers!['sec-ch-ua-platform']).to.equal('"Windows"');
++    });
++
++    it('sets navigator.userAgent and navigator.userAgentData for pages', async () => {
++      const ses = session.fromPartition(`user-agent-override-page-${crypto.randomUUID()}`);
++      ses.setUserAgentOverride({ userAgent, userAgentMetadata });
++
++      const server = http.createServer((req, res) => {
++        res.end('<!DOCTYPE html>');
++      });
++      defer(() => {
++        server.close();
++      });
++
++      const { url } = await listen(server);
++      const w = new BrowserWindow({ show: false, webPreferences: { session: ses } });
++      await w.loadURL(url);
++      const result = await w.webContents.executeJavaScript(`({
++        userAgent: navigator.userAgent,
++        brands: navigator.userAgentData.brands,
++        platform: navigator.userAgentData.platform
++      })`);
++
++      expect(result.userAgent).to.equal(userAgent);
++      expect(result.brands.map((brand: any) => brand.brand)).to.include('SessionBrand');
++      expect(result.platform).to.equal('Windows');
++    });
++
++    it('sets navigator.userAgent for shared workers', async () => {
++      const ses = session.fromPartition(`user-agent-override-shared-worker-${crypto.randomUUID()}`);
++      ses.setUserAgentOverride({ userAgent, userAgentMetadata });
++
++      const server = http.createServer((req, res) => {
++        if (req.url === '/shared-worker.js') {
++          res.setHeader('Content-Type', 'text/javascript');
++          res.end(`
++            onconnect = event => {
++              const port = event.ports[0];
++              port.postMessage(navigator.userAgent);
++            };
++          `);
++          return;
++        }
++
++        res.setHeader('Content-Type', 'text/html');
++        res.end('<!DOCTYPE html>');
++      });
++      defer(() => {
++        server.close();
++      });
++
++      const { url } = await listen(server);
++      const w = new BrowserWindow({ show: false, webPreferences: { session: ses } });
++      await w.loadURL(url);
++      const workerUserAgent = await w.webContents.executeJavaScript(`
++        new Promise((resolve, reject) => {
++          const worker = new SharedWorker('/shared-worker.js');
++          worker.onerror = event => reject(event.message);
++          worker.port.onmessage = event => resolve(event.data);
++          worker.port.start();
++        })
++      `);
++
++      expect(workerUserAgent).to.equal(userAgent);
++    });
++
++    it('sets navigator.userAgent for service workers', async () => {
++      const ses = session.fromPartition(`user-agent-override-service-worker-${crypto.randomUUID()}`);
++      ses.setUserAgentOverride({ userAgent, userAgentMetadata });
++
++      const server = http.createServer((req, res) => {
++        if (req.url === '/service-worker.js') {
++          res.setHeader('Content-Type', 'text/javascript');
++          res.end(`
++            self.addEventListener('message', event => {
++              event.ports[0].postMessage(navigator.userAgent);
++            });
++          `);
++          return;
++        }
++
++        res.setHeader('Content-Type', 'text/html');
++        res.end('<!DOCTYPE html>');
++      });
++      defer(() => {
++        server.close();
++      });
++
++      const { url } = await listen(server);
++      const w = new BrowserWindow({ show: false, webPreferences: { session: ses } });
++      await w.loadURL(url);
++      const workerUserAgent = await w.webContents.executeJavaScript(`
++        (async () => {
++          const registration = await navigator.serviceWorker.register('/service-worker.js');
++          await navigator.serviceWorker.ready;
++          const worker = registration.active || registration.waiting || registration.installing;
++          return await new Promise((resolve, reject) => {
++            const channel = new MessageChannel();
++            channel.port1.onmessage = event => resolve(event.data);
++            channel.port1.onmessageerror = event => reject(event);
++            worker.postMessage('user-agent', [channel.port2]);
++          });
++        })()
++      `);
++
++      expect(workerUserAgent).to.equal(userAgent);
++    });
++  });
++
+   describe('ses.registerPreloadScript(script)', () => {
+     afterEach(closeAllWindows);
+ 
+diff --git a/spec/api-web-contents-spec.ts b/spec/api-web-contents-spec.ts
+index 2fd39aa870..50f86ffe54 100644
+--- a/spec/api-web-contents-spec.ts
++++ b/spec/api-web-contents-spec.ts
+@@ -1226,7 +1226,8 @@ describe('webContents module', () => {
+ 
+     it('emits caret bounds and input state for a focused editable element', async () => {
+       const w = new BrowserWindow({ show: false, width: 400, height: 300 });
+-      await w.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(`
++      await w.loadURL(
++        `data:text/html;charset=utf-8,${encodeURIComponent(`
+         <!DOCTYPE html>
+         <input
+           id="field"
+@@ -1235,7 +1236,8 @@ describe('webContents module', () => {
+           enterkeyhint="go"
+           value="hello"
+           style="font-size: 24px; margin: 20px;">
+-      `)}`);
++      `)}`
++      );
+ 
+       const caretInfoChanged = new Promise<Electron.TextCaretInfoChangedDetails>((resolve) => {
+         const listener = (_event: Electron.Event, details: Electron.TextCaretInfoChangedDetails) => {
+@@ -1917,6 +1919,21 @@ describe('webContents module', () => {
+ 
+   describe('userAgent APIs', () => {
+     afterEach(closeAllWindows);
++    const userAgent = 'Mozilla/5.0 WebContentsUserAgentOverride/99.0';
++    const userAgentMetadata = {
++      brands: [{ brand: 'WebContentsBrand', version: '99' }],
++      fullVersionList: [{ brand: 'WebContentsBrand', version: '99.0.1234.5' }],
++      fullVersion: '99.0.1234.5',
++      platform: 'Windows',
++      platformVersion: '19.0.0',
++      architecture: 'x86',
++      model: '',
++      mobile: false,
++      bitness: '64',
++      wow64: false,
++      formFactors: ['Desktop']
++    };
++
+     it('is not empty by default', () => {
+       const w = new BrowserWindow({ show: false });
+       const userAgent = w.webContents.getUserAgent();
+@@ -1944,6 +1961,64 @@ describe('webContents module', () => {
+       w.webContents.userAgent = userAgent;
+       expect(w.webContents.userAgent).to.equal(userAgent);
+     });
++
++    it('can set and clear a user agent override with Client Hints metadata', async () => {
++      const ses = session.fromPartition(`webcontents-user-agent-override-${crypto.randomUUID()}`);
++      ses.setUserAgentOverride({
++        userAgent: 'Mozilla/5.0 SessionFallback/99.0',
++        userAgentMetadata: {
++          ...userAgentMetadata,
++          brands: [{ brand: 'SessionFallbackBrand', version: '99' }],
++          fullVersionList: [{ brand: 'SessionFallbackBrand', version: '99.0.1234.5' }]
++        }
++      });
++
++      const server = http.createServer((req, res) => {
++        res.end('<!DOCTYPE html>');
++      });
++      defer(() => {
++        server.close();
++      });
++
++      const { url } = await listen(server);
++      const w = new BrowserWindow({ show: false, webPreferences: { session: ses } });
++      w.webContents.setUserAgentOverride({ userAgent, userAgentMetadata });
++      await w.loadURL(url);
++      let result = await w.webContents.executeJavaScript(`({
++        userAgent: navigator.userAgent,
++        brands: navigator.userAgentData.brands
++      })`);
++      expect(result.userAgent).to.equal(userAgent);
++      expect(result.brands.map((brand: any) => brand.brand)).to.include('WebContentsBrand');
++
++      w.webContents.clearUserAgentOverride();
++      await w.loadURL(`${url}/after-clear`);
++      result = await w.webContents.executeJavaScript(`({
++        userAgent: navigator.userAgent,
++        brands: navigator.userAgentData.brands
++      })`);
++      expect(result.userAgent).to.equal('Mozilla/5.0 SessionFallback/99.0');
++      expect(result.brands.map((brand: any) => brand.brand)).to.include('SessionFallbackBrand');
++    });
++
++    it('can set Client Hints metadata for one loadURL call', async () => {
++      let headers: http.IncomingHttpHeaders | null = null;
++      const server = http.createServer((req, res) => {
++        headers = req.headers;
++        res.end('<!DOCTYPE html>');
++      });
++      defer(() => {
++        server.close();
++      });
++
++      const { url } = await listen(server);
++      const w = new BrowserWindow({ show: false });
++      await w.loadURL(url, { userAgent, userAgentMetadata });
++
++      expect(headers!['user-agent']).to.equal(userAgent);
++      expect(headers!['sec-ch-ua']).to.include('WebContentsBrand');
++      expect(headers!['sec-ch-ua-mobile']).to.equal('?0');
++    });
+   });
+ 
+   describe('audioMuted APIs', () => {
+diff --git a/spec/ts-smoke/electron/main.ts b/spec/ts-smoke/electron/main.ts
+index d8e89ca75a..adb675e2e3 100644
+--- a/spec/ts-smoke/electron/main.ts
++++ b/spec/ts-smoke/electron/main.ts
+@@ -58,6 +58,40 @@ app.whenReady().then(() => {
+   mainWindow.loadURL(`file://${__dirname}/index.html`);
+   mainWindow.loadURL('file://foo/bar', { userAgent: 'cool-agent', httpReferrer: 'greatReferrer' });
+   mainWindow.webContents.loadURL('file://foo/bar', { userAgent: 'cool-agent', httpReferrer: 'greatReferrer' });
++  const userAgentMetadata = {
++    brands: [{ brand: 'Chromium', version: '142' }],
++    fullVersionList: [{ brand: 'Chromium', version: '142.0.7444.83' }],
++    fullVersion: '142.0.7444.83',
++    platform: 'Windows',
++    platformVersion: '19.0.0',
++    architecture: 'x86',
++    model: '',
++    mobile: false,
++    bitness: '64',
++    wow64: false,
++    formFactors: ['Desktop']
++  };
++  app.setUserAgentOverride({
++    userAgent: 'Mozilla/5.0 ElectronUserAgentOverride',
++    userAgentMetadata
++  });
++  app.clearUserAgentOverride();
++  session.defaultSession.setUserAgentOverride({
++    userAgent: 'Mozilla/5.0 ElectronSessionUserAgentOverride',
++    userAgentMetadata,
++    acceptLanguages: 'en-US,ko'
++  });
++  session.defaultSession.clearUserAgentOverride();
++  mainWindow.webContents.setUserAgentOverride({
++    userAgent: 'Mozilla/5.0 ElectronWebContentsUserAgentOverride',
++    userAgentMetadata,
++    inheritToNewWindows: true
++  });
++  mainWindow.webContents.clearUserAgentOverride();
++  mainWindow.webContents.loadURL('file://foo/bar', {
++    userAgent: 'Mozilla/5.0 ElectronNavigationUserAgentOverride',
++    userAgentMetadata
++  });
+   mainWindow.webContents.loadURL('file://foo/bar', {
+     userAgent: 'cool-agent',
+     httpReferrer: 'greatReferrer',
+@@ -91,7 +125,7 @@ app.whenReady().then(() => {
+   mainWindow.webContents.print();
+   mainWindow.webContents.setPrintRequestHandler(async (details, request) => {
+     const html = String(await details.frame.executeJavaScript('document.documentElement.outerHTML'));
+-    request.handle(job => {
++    request.handle((job) => {
+       job.print({ silent: true }).then(() => console.log('print succeeded'));
+       job.toPDF({ printBackground: html.length > 0 }).then((data: Buffer) => console.log(data));
+     });
+-- 
+2.53.0
+

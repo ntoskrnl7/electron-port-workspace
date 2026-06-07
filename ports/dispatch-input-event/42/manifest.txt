@@ -1,0 +1,9 @@
+schema_version=1
+name=dispatch-input-event
+target=42
+electronized_chromium_patches=true
+depends_on=print-request-handler,widevine-cdm,preload,text-caret-info,user-agent-override
+electron_patch_stack_source=chromium-direct
+electron_patch_files=electron/*.patch
+chromium_direct_archive=chromium-direct
+notes=Exported from the current Electron 42 ports stack; includes a Chromium DevTools drag-source cleanup patch.

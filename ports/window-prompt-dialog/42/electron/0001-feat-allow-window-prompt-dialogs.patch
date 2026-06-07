@@ -1,0 +1,114 @@
+From 4be57ca72d08e49011d1a6f9980e337da5d06a86 Mon Sep 17 00:00:00 2001
+From: Codex <codex@localhost>
+Date: Wed, 20 May 2026 11:39:48 +0900
+Subject: feat: allow window prompt dialogs
+
+---
+ lib/browser/api/web-contents.ts |  7 ++----
+ lib/renderer/window-setup.ts    |  6 -----
+ spec/chromium-spec.ts           | 43 +++++++++++++++++++++++++++++++++
+ 3 files changed, 45 insertions(+), 11 deletions(-)
+
+diff --git a/lib/browser/api/web-contents.ts b/lib/browser/api/web-contents.ts
+index 45fcfa63f0..37f53ffda5 100644
+--- a/lib/browser/api/web-contents.ts
++++ b/lib/browser/api/web-contents.ts
+@@ -1017,9 +1017,6 @@ WebContents.prototype._init = function () {
+     const prefs = this.getLastWebPreferences();
+     if (!prefs || prefs.disableDialogs) return callback(false, '');
+
+-    // We don't support prompt() for some reason :)
+-    if (info.dialogType === 'prompt') return callback(false, '');
+-
+     originCounts.set(origin, (originCounts.get(origin) ?? 0) + 1);
+
+     // TODO: translate?
+@@ -1033,7 +1030,7 @@ WebContents.prototype._init = function () {
+       message: info.messageText,
+       checkboxLabel: checkbox,
+       signal: abortController.signal,
+-      ...(info.dialogType === 'confirm'
++      ...(info.dialogType === 'confirm' || info.dialogType === 'prompt'
+         ? {
+             buttons: ['OK', 'Cancel'],
+             defaultId: 0,
+@@ -1052,7 +1049,7 @@ WebContents.prototype._init = function () {
+       const result = await promise;
+       if (abortController.signal.aborted || this.isDestroyed()) return;
+       if (result.checkboxChecked) originCounts.set(origin, -1);
+-      return callback(result.response === 0, '');
++      return callback(result.response === 0, info.dialogType === 'prompt' ? info.defaultPromptText : '');
+     } finally {
+       openDialogs.delete(abortController);
+     }
+diff --git a/lib/renderer/window-setup.ts b/lib/renderer/window-setup.ts
+index 2ec0b7adba..479c6c3bee 100644
+--- a/lib/renderer/window-setup.ts
++++ b/lib/renderer/window-setup.ts
+@@ -13,12 +13,6 @@ export const windowSetup = (isWebView: boolean, isHiddenPage: boolean) => {
+     if (contextIsolationEnabled) internalContextBridge.overrideGlobalValueFromIsolatedWorld(['close'], window.close);
+   }
+
+-  // But we do not support prompt().
+-  window.prompt = function () {
+-    throw new Error('prompt() is not supported.');
+-  };
+-  if (contextIsolationEnabled) internalContextBridge.overrideGlobalValueFromIsolatedWorld(['prompt'], window.prompt);
+-
+   if (isWebView) {
+     // Webview `document.visibilityState` tracks window visibility (and ignores
+     // the actual <webview> element visibility) for backwards compatibility.
+diff --git a/spec/chromium-spec.ts b/spec/chromium-spec.ts
+index 975d4e26f8..5357ff9d00 100644
+--- a/spec/chromium-spec.ts
++++ b/spec/chromium-spec.ts
+@@ -3593,6 +3593,49 @@ describe('chromium features', () => {
+       });
+     });
+
++    describe('window.prompt(message, defaultValue)', () => {
++      itremote('throws an exception when the arguments cannot be converted to strings', () => {
++        expect(() => {
++          window.prompt({ toString: null } as unknown as string, 'default');
++        }).to.throw('Cannot convert object to primitive value');
++      });
++
++      it('can be handled through the JavaScript dialog callback', async () => {
++        const w = new BrowserWindow({ show: false });
++        w.webContents.removeAllListeners('-run-dialog');
++        w.loadURL('about:blank');
++        const p = once(w.webContents, '-run-dialog');
++        const resultPromise = w.webContents.executeJavaScript('prompt("hello", "default text")', true);
++        const [info, cb] = await p;
++        expect(info.frame).to.equal(w.webContents.mainFrame);
++        expect(info.messageText).to.equal('hello');
++        expect(info.defaultPromptText).to.equal('default text');
++        expect(info.dialogType).to.equal('prompt');
++        cb(true, 'typed text');
++        const result = await resultPromise;
++        expect(result).to.equal('typed text');
++      });
++
++      it('uses the default prompt value for the built-in message box handler', async () => {
++        const originalShowMessageBox = dialog.showMessageBox;
++        try {
++          const w = new BrowserWindow({ show: false });
++          w.loadURL('about:blank');
++          let recordedOpts: MessageBoxOptions | undefined;
++          dialog.showMessageBox = (bw, opts?: MessageBoxOptions) => {
++            recordedOpts = opts;
++            return Promise.resolve({ response: 0, checkboxChecked: false });
++          };
++          const result = await w.webContents.executeJavaScript('prompt("hello", "default text")', true);
++          expect(recordedOpts?.message).to.equal('hello');
++          expect(recordedOpts?.buttons).to.deep.equal(['OK', 'Cancel']);
++          expect(result).to.equal('default text');
++        } finally {
++          dialog.showMessageBox = originalShowMessageBox;
++        }
++      });
++    });
++
+     describe('safeDialogs web preference', () => {
+       const originalShowMessageBox = dialog.showMessageBox;
+       afterEach(() => {

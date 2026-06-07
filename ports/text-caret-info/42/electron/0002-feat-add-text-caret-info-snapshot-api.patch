@@ -1,0 +1,453 @@
+From fca6c6b151638122232303644d9df94bfbfd5bd4 Mon Sep 17 00:00:00 2001
+From: Codex <codex@localhost>
+Date: Sun, 31 May 2026 20:45:32 +0900
+Subject: feat: add text caret info snapshot API
+
+---
+ docs/api/structures/text-caret-info-caret.md  |   9 +
+ .../structures/text-caret-info-composition.md |   5 +
+ .../structures/text-caret-info-selection.md   |   8 +
+ docs/api/structures/text-caret-info.md        |  23 ++
+ docs/api/web-contents.md                      |   6 +
+ .../browser/api/electron_api_web_contents.cc  | 228 ++++++++++--------
+ shell/browser/api/electron_api_web_contents.h |   1 +
+ spec/api-web-contents-spec.ts                 |  56 +++++
+ 8 files changed, 237 insertions(+), 99 deletions(-)
+ create mode 100644 docs/api/structures/text-caret-info-caret.md
+ create mode 100644 docs/api/structures/text-caret-info-composition.md
+ create mode 100644 docs/api/structures/text-caret-info-selection.md
+ create mode 100644 docs/api/structures/text-caret-info.md
+
+diff --git a/docs/api/structures/text-caret-info-caret.md b/docs/api/structures/text-caret-info-caret.md
+new file mode 100644
+index 0000000000..7ec442a0ee
+--- /dev/null
++++ b/docs/api/structures/text-caret-info-caret.md
+@@ -0,0 +1,9 @@
++# TextCaretInfoCaret Object
++
++* `visible` boolean - Whether a caret or active selection edge is currently
++  visible and valid.
++* `bounds` [Rectangle](rectangle.md) - The visual rectangle of the text
++  insertion caret or active selection edge. Coordinates are in WebContents
++  viewport DIP coordinates.
++* `screenBounds` [Rectangle](rectangle.md) (optional) - The same caret rectangle
++  in screen DIP coordinates, when available.
+diff --git a/docs/api/structures/text-caret-info-composition.md b/docs/api/structures/text-caret-info-composition.md
+new file mode 100644
+index 0000000000..2596912d0e
+--- /dev/null
++++ b/docs/api/structures/text-caret-info-composition.md
+@@ -0,0 +1,5 @@
++# TextCaretInfoComposition Object
++
++* `isComposing` boolean - Whether IME composition is currently active.
++* `start` number (optional) - The start offset of the active composition range.
++* `end` number (optional) - The end offset of the active composition range.
+diff --git a/docs/api/structures/text-caret-info-selection.md b/docs/api/structures/text-caret-info-selection.md
+new file mode 100644
+index 0000000000..fb65c72d3a
+--- /dev/null
++++ b/docs/api/structures/text-caret-info-selection.md
+@@ -0,0 +1,8 @@
++# TextCaretInfoSelection Object
++
++* `isCollapsed` boolean - Whether the current selection is collapsed to a
++  caret. When this is `false`, typing normally replaces the selected text.
++* `start` number - The start offset of the current selection in the active
++  editable context.
++* `end` number - The end offset of the current selection in the active editable
++  context.
+diff --git a/docs/api/structures/text-caret-info.md b/docs/api/structures/text-caret-info.md
+new file mode 100644
+index 0000000000..7cb556d1e2
+--- /dev/null
++++ b/docs/api/structures/text-caret-info.md
+@@ -0,0 +1,23 @@
++# TextCaretInfo Object
++
++* `frame` [WebFrameMain](../web-frame-main.md) - The frame that owns the
++  focused editable element.
++* `url` string - The current URL of `frame`.
++* `isMainFrame` boolean - Whether `frame` is the main frame of the WebContents.
++* `inputType` string - The current Chromium text input type for the focused
++  editable context. Can be `text`, `password`, `search`, `email`, `number`,
++  `telephone`, `url`, `date`, `dateTime`, `dateTimeLocal`, `month`, `time`,
++  `week`, `textArea`, `contentEditable`, `dateTimeField`, `null`, or
++  `unknown`.
++* `inputMode` string - The current input mode requested by the focused editable
++  context. Can be `default`, `none`, `text`, `tel`, `url`, `email`, `numeric`,
++  `decimal`, `search`, or `unknown`.
++* `inputAction` string - The current enter-key action requested by the focused
++  editable context. Can be `default`, `enter`, `done`, `go`, `next`,
++  `previous`, `search`, `send`, or `unknown`.
++* `caret` [TextCaretInfoCaret](text-caret-info-caret.md) - The current caret
++  state.
++* `selection` [TextCaretInfoSelection](text-caret-info-selection.md) (optional) -
++  The current selection range reported for the focused editable context.
++* `composition` [TextCaretInfoComposition](text-caret-info-composition.md) -
++  The current IME composition state reported for the focused editable context.
+diff --git a/docs/api/web-contents.md b/docs/api/web-contents.md
+index 203665a8c0..d9c5472bdd 100644
+--- a/docs/api/web-contents.md
++++ b/docs/api/web-contents.md
+@@ -1197,6 +1197,12 @@ Focuses the web page.
+ 
+ Returns `boolean` - Whether the web page is focused.
+ 
++#### `contents.getTextCaretInfo()` _Experimental_
++
++Returns [`TextCaretInfo | null`](structures/text-caret-info.md) - The current
++text caret state for the focused editable element, or `null` if no editable
++caret information is available.
++
+ #### `contents.isLoading()`
+ 
+ Returns `boolean` - Whether web page is still loading resources.
+diff --git a/shell/browser/api/electron_api_web_contents.cc b/shell/browser/api/electron_api_web_contents.cc
+index 221a7d87ab..fad4b1f8de 100644
+--- a/shell/browser/api/electron_api_web_contents.cc
++++ b/shell/browser/api/electron_api_web_contents.cc
+@@ -780,6 +780,114 @@ void SetRangeDetails(gin_helper::Dictionary* target,
+   target->Set("end", static_cast<uint32_t>(range.end()));
+ }
+ 
++content::RenderFrameHost* GetRenderFrameHostForView(
++    content::WebContents* contents,
++    content::RenderWidgetHostViewBase* view) {
++  if (!contents || !view)
++    return nullptr;
++
++  content::RenderWidgetHost* widget = view->GetRenderWidgetHost();
++  content::RenderFrameHost* focused_frame = contents->GetFocusedFrame();
++  if (focused_frame && (focused_frame->GetView() == view ||
++                        focused_frame->GetRenderWidgetHost() == widget)) {
++    return focused_frame;
++  }
++
++  content::RenderFrameHost* result = nullptr;
++  contents->ForEachRenderFrameHostWithAction(
++      [view, widget, &result](content::RenderFrameHost* frame) {
++        if (frame->GetView() == view ||
++            frame->GetRenderWidgetHost() == widget) {
++          result = frame;
++          return content::RenderFrameHost::FrameIterationAction::kStop;
++        }
++        return content::RenderFrameHost::FrameIterationAction::kContinue;
++      });
++  return result;
++}
++
++v8::Local<v8::Value> CreateTextCaretInfo(
++    v8::Isolate* isolate,
++    content::WebContents* contents,
++    content::TextInputManager* text_input_manager,
++    content::RenderWidgetHostViewBase* view,
++    std::optional<std::string_view> reason) {
++  if (!contents || !text_input_manager || !view ||
++      !text_input_manager->IsRegistered(view)) {
++    return v8::Null(isolate);
++  }
++
++  const ui::mojom::TextInputState* text_input_state =
++      text_input_manager->GetTextInputState();
++  if (!text_input_state ||
++      text_input_state->type == ui::TEXT_INPUT_TYPE_NONE) {
++    return v8::Null(isolate);
++  }
++
++  const auto* region = text_input_manager->GetSelectionRegion(view);
++  if (!region)
++    return v8::Null(isolate);
++
++  gfx::Rect caret_bounds = RectFromSelectionBound(region->focus);
++  if (caret_bounds.IsEmpty())
++    caret_bounds = region->caret_rect;
++  if (caret_bounds.IsEmpty())
++    return v8::Null(isolate);
++
++  content::RenderFrameHost* render_frame_host =
++      GetRenderFrameHostForView(contents, view);
++  if (!render_frame_host)
++    return v8::Null(isolate);
++
++  auto details = gin_helper::Dictionary::CreateEmpty(isolate);
++  details.SetGetter("frame", render_frame_host);
++  details.Set("url", render_frame_host->GetLastCommittedURL().spec());
++  details.Set("isMainFrame", render_frame_host->GetParent() == nullptr);
++  details.Set("inputType",
++              std::string(TextInputTypeToString(text_input_state->type)));
++  details.Set("inputMode",
++              std::string(TextInputModeToString(text_input_state->mode)));
++  details.Set("inputAction",
++              std::string(TextInputActionToString(text_input_state->action)));
++
++  auto caret = gin_helper::Dictionary::CreateEmpty(isolate);
++  caret.Set("visible", region->focus.type() != gfx::SelectionBound::EMPTY);
++  caret.Set("bounds", caret_bounds);
++
++  content::RenderWidgetHostView* root_view =
++      contents->GetTopLevelRenderWidgetHostView();
++  if (root_view) {
++    gfx::Point screen_origin = caret_bounds.origin();
++    screen_origin += root_view->GetViewBounds().OffsetFromOrigin();
++    caret.Set("screenBounds", gfx::Rect(screen_origin, caret_bounds.size()));
++  }
++  details.Set("caret", caret);
++
++  if (text_input_state->selection.IsValid()) {
++    auto selection = gin_helper::Dictionary::CreateEmpty(isolate);
++    SetRangeDetails(&selection, text_input_state->selection);
++    details.Set("selection", selection);
++  }
++
++  const bool has_composition = text_input_state->composition &&
++                               text_input_state->composition->IsValid();
++  auto composition = gin_helper::Dictionary::CreateEmpty(isolate);
++  composition.Set("isComposing", has_composition);
++  if (has_composition) {
++    composition.Set(
++        "start", static_cast<uint32_t>(text_input_state->composition->start()));
++    composition.Set(
++        "end", static_cast<uint32_t>(text_input_state->composition->end()));
++  }
++  details.Set("composition", composition);
++
++  if (reason) {
++    details.Set("reason", std::string(*reason));
++  }
++
++  return details.GetHandle();
++}
++
+ class TextCaretFrameObserver : public base::SupportsUserData::Data,
+                                public content::WebContentsObserver,
+                                public content::TextInputManager::Observer {
+@@ -845,113 +953,19 @@ class TextCaretFrameObserver : public base::SupportsUserData::Data,
+     text_input_manager_ = nullptr;
+   }
+ 
+-  content::RenderFrameHost* GetRenderFrameHostForView(
+-      content::RenderWidgetHostViewBase* view) {
+-    content::WebContents* contents = web_contents();
+-    if (!contents || !view)
+-      return nullptr;
+-
+-    content::RenderWidgetHost* widget = view->GetRenderWidgetHost();
+-    content::RenderFrameHost* focused_frame = contents->GetFocusedFrame();
+-    if (focused_frame &&
+-        (focused_frame->GetView() == view ||
+-         focused_frame->GetRenderWidgetHost() == widget)) {
+-      return focused_frame;
+-    }
+-
+-    content::RenderFrameHost* result = nullptr;
+-    contents->ForEachRenderFrameHostWithAction(
+-        [view, widget, &result](content::RenderFrameHost* frame) {
+-          if (frame->GetView() == view ||
+-              frame->GetRenderWidgetHost() == widget) {
+-            result = frame;
+-            return content::RenderFrameHost::FrameIterationAction::kStop;
+-          }
+-          return content::RenderFrameHost::FrameIterationAction::kContinue;
+-        });
+-    return result;
+-  }
+-
+   void EmitCaretInfoChanged(content::TextInputManager* text_input_manager,
+                             content::RenderWidgetHostViewBase* updated_view,
+                             const char* reason) {
+-    if (!api_web_contents_ || !text_input_manager || !updated_view ||
+-        !text_input_manager->IsRegistered(updated_view)) {
++    if (!api_web_contents_) {
+       return;
+     }
+ 
+-    const ui::mojom::TextInputState* text_input_state =
+-        text_input_manager->GetTextInputState();
+-    if (!text_input_state ||
+-        text_input_state->type == ui::TEXT_INPUT_TYPE_NONE) {
+-      return;
+-    }
+-
+-    const auto* region = text_input_manager->GetSelectionRegion(updated_view);
+-    if (!region)
+-      return;
+-
+-    gfx::Rect caret_bounds = RectFromSelectionBound(region->focus);
+-    if (caret_bounds.IsEmpty())
+-      caret_bounds = region->caret_rect;
+-    if (caret_bounds.IsEmpty())
+-      return;
+-
+-    content::RenderFrameHost* render_frame_host =
+-        GetRenderFrameHostForView(updated_view);
+-    if (!render_frame_host)
+-      return;
+-
+     v8::Isolate* isolate = JavascriptEnvironment::GetIsolate();
+     v8::HandleScope handle_scope(isolate);
+-
+-    auto details = gin_helper::Dictionary::CreateEmpty(isolate);
+-    details.SetGetter("frame", render_frame_host);
+-    details.Set("url", render_frame_host->GetLastCommittedURL().spec());
+-    details.Set("isMainFrame", render_frame_host->GetParent() == nullptr);
+-    details.Set("inputType",
+-                std::string(TextInputTypeToString(text_input_state->type)));
+-    details.Set("inputMode",
+-                std::string(TextInputModeToString(text_input_state->mode)));
+-    details.Set("inputAction",
+-                std::string(TextInputActionToString(text_input_state->action)));
+-
+-    auto caret = gin_helper::Dictionary::CreateEmpty(isolate);
+-    caret.Set("visible", region->focus.type() != gfx::SelectionBound::EMPTY);
+-    caret.Set("bounds", caret_bounds);
+-
+-    content::RenderWidgetHostView* root_view =
+-        web_contents()->GetTopLevelRenderWidgetHostView();
+-    if (root_view) {
+-      gfx::Point screen_origin = caret_bounds.origin();
+-      screen_origin += root_view->GetViewBounds().OffsetFromOrigin();
+-      caret.Set("screenBounds", gfx::Rect(screen_origin, caret_bounds.size()));
+-    }
+-    details.Set("caret", caret);
+-
+-    if (text_input_state->selection.IsValid()) {
+-      auto selection = gin_helper::Dictionary::CreateEmpty(isolate);
+-      SetRangeDetails(&selection, text_input_state->selection);
+-      details.Set("selection", selection);
+-    }
+-
+-    const bool has_composition = text_input_state->composition &&
+-                                 text_input_state->composition->IsValid();
+-    auto composition = gin_helper::Dictionary::CreateEmpty(isolate);
+-    composition.Set("isComposing", has_composition);
+-    if (has_composition) {
+-      composition.Set("start",
+-                      static_cast<uint32_t>(
+-                          text_input_state->composition->start()));
+-      composition.Set("end",
+-                      static_cast<uint32_t>(
+-                          text_input_state->composition->end()));
+-    }
+-    details.Set("composition", composition);
+-
+-    details.Set("reason", std::string(reason));
+-
+-    api_web_contents_->Emit("text-caret-info-changed", details);
++    v8::Local<v8::Value> details = CreateTextCaretInfo(
++        isolate, web_contents(), text_input_manager, updated_view, reason);
++    if (!details->IsNull())
++      api_web_contents_->Emit("text-caret-info-changed", details);
+   }
+ 
+   base::WeakPtr<WebContents> api_web_contents_;
+@@ -4200,6 +4214,21 @@ bool WebContents::IsFocused() const {
+ }
+ #endif
+ 
++v8::Local<v8::Value> WebContents::GetTextCaretInfo(v8::Isolate* isolate) {
++  auto* web_contents_impl =
++      static_cast<content::WebContentsImpl*>(web_contents());
++  auto* text_input_manager = web_contents_impl->GetTextInputManager();
++  if (!text_input_manager)
++    return v8::Null(isolate);
++
++  content::RenderWidgetHostImpl* active_widget =
++      text_input_manager->GetActiveWidget();
++  content::RenderWidgetHostViewBase* active_view =
++      active_widget ? active_widget->GetView() : nullptr;
++  return CreateTextCaretInfo(isolate, web_contents(), text_input_manager,
++                             active_view, std::nullopt);
++}
++
+ void WebContents::SendInputEvent(v8::Isolate* isolate,
+                                  v8::Local<v8::Value> input_event) {
+   content::RenderWidgetHostView* view =
+@@ -5271,6 +5300,7 @@ void WebContents::FillObjectTemplate(v8::Isolate* isolate,
+       .SetMethod("stopFindInPage", &WebContents::StopFindInPage)
+       .SetMethod("focus", &WebContents::Focus)
+       .SetMethod("isFocused", &WebContents::IsFocused)
++      .SetMethod("getTextCaretInfo", &WebContents::GetTextCaretInfo)
+       .SetMethod("sendInputEvent", &WebContents::SendInputEvent)
+       .SetMethod("beginFrameSubscription", &WebContents::BeginFrameSubscription)
+       .SetMethod("endFrameSubscription", &WebContents::EndFrameSubscription)
+diff --git a/shell/browser/api/electron_api_web_contents.h b/shell/browser/api/electron_api_web_contents.h
+index 4a3e9faa85..423735038c 100644
+--- a/shell/browser/api/electron_api_web_contents.h
++++ b/shell/browser/api/electron_api_web_contents.h
+@@ -302,6 +302,7 @@ class WebContents final : public ExclusiveAccessContext,
+   // Focus.
+   void Focus();
+   bool IsFocused() const;
++  v8::Local<v8::Value> GetTextCaretInfo(v8::Isolate* isolate);
+ 
+   // Send WebInputEvent to the page.
+   void SendInputEvent(v8::Isolate* isolate, v8::Local<v8::Value> input_event);
+diff --git a/spec/api-web-contents-spec.ts b/spec/api-web-contents-spec.ts
+index d8ab7cd49c..e1517e7d29 100644
+--- a/spec/api-web-contents-spec.ts
++++ b/spec/api-web-contents-spec.ts
+@@ -1219,6 +1219,62 @@ describe('webContents module', () => {
+   describe('text-caret-info-changed event', () => {
+     afterEach(closeAllWindows);
+ 
++    it('returns null when no editable caret information is available', async () => {
++      const w = new BrowserWindow({ show: false, width: 400, height: 300 });
++      await w.loadURL('data:text/html;charset=utf-8,<p>no editable element</p>');
++
++      expect(w.webContents.getTextCaretInfo()).to.equal(null);
++    });
++
++    it('returns the current caret bounds and input state', async () => {
++      const w = new BrowserWindow({ show: false, width: 400, height: 300 });
++      await w.loadURL(
++        `data:text/html;charset=utf-8,${encodeURIComponent(`
++        <!DOCTYPE html>
++        <input
++          id="field"
++          type="search"
++          inputmode="email"
++          enterkeyhint="go"
++          value="hello"
++          style="font-size: 24px; margin: 20px;">
++      `)}`
++      );
++
++      await w.webContents.executeJavaScript(`
++        const field = document.getElementById('field');
++        field.focus();
++        field.setSelectionRange(2, 2);
++      `);
++
++      await waitUntil(() => {
++        const info = w.webContents.getTextCaretInfo();
++        return info?.selection?.start === 2 && info.selection.end === 2;
++      });
++
++      const info = w.webContents.getTextCaretInfo();
++      expect(info).to.not.equal(null);
++      if (info === null) {
++        throw new Error('Expected text caret info');
++      }
++
++      expect(info.frame).to.equal(w.webContents.mainFrame);
++      expect(info.url).to.equal(w.webContents.mainFrame.url);
++      expect(info.isMainFrame).to.be.true();
++      expect(info.inputType).to.equal('search');
++      expect(info.inputMode).to.equal('email');
++      expect(info.inputAction).to.equal('go');
++      expect(info.caret.visible).to.be.true();
++      expect(info.caret.bounds.width).to.be.greaterThan(0);
++      expect(info.caret.bounds.height).to.be.greaterThan(0);
++      expect(info.selection).to.deep.equal({
++        isCollapsed: true,
++        start: 2,
++        end: 2
++      });
++      expect(info.composition).to.deep.equal({ isComposing: false });
++    });
++
+     it('emits caret bounds and input state for a focused editable element', async () => {
+       const w = new BrowserWindow({ show: false, width: 400, height: 300 });
+       await w.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(`

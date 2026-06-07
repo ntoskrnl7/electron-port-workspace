@@ -1,0 +1,1412 @@
+From a9a116bb489e051f7bb86ab7fd8880f679420a79 Mon Sep 17 00:00:00 2001
+From: Jung-Kwang Lee <ntoskrnl7@gmail.com>
+Date: Thu, 30 Apr 2026 10:03:02 +0900
+Subject: media/gpu/vaapi: stabilize Intel iHD HEVC encoding
+
+---
+ .../h265_vaapi_video_encoder_delegate.cc      | 547 ++++++++++++++----
+ .../vaapi/h265_vaapi_video_encoder_delegate.h |  21 +-
+ .../vaapi/vaapi_video_encode_accelerator.cc   | 208 ++++++-
+ .../vaapi/vaapi_video_encode_accelerator.h    |   1 +
+ .../gpu/vaapi/vaapi_video_encoder_delegate.cc |  21 +-
+ .../gpu/vaapi/vaapi_video_encoder_delegate.h  |  37 +-
+ 6 files changed, 703 insertions(+), 132 deletions(-)
+
+diff --git a/media/gpu/vaapi/h265_vaapi_video_encoder_delegate.cc b/media/gpu/vaapi/h265_vaapi_video_encoder_delegate.cc
+index 0dece0fd75d8f..72e2a22f340d1 100644
+--- a/media/gpu/vaapi/h265_vaapi_video_encoder_delegate.cc
++++ b/media/gpu/vaapi/h265_vaapi_video_encoder_delegate.cc
+@@ -13,15 +13,18 @@
+ #include <va/va_enc_hevc.h>
+ 
+ #include <algorithm>
++#include <array>
+ #include <climits>
+ #include <optional>
+ 
+ #include "base/bits.h"
++#include "base/containers/span.h"
+ #include "base/logging.h"
+ #include "base/memory/ref_counted_memory.h"
+ #include "base/notimplemented.h"
+ #include "base/numerics/checked_math.h"
+ #include "base/numerics/safe_conversions.h"
++#include "media/base/video_color_space.h"
+ #include "media/gpu/h265_builder.h"
+ #include "media/gpu/gpu_video_encode_accelerator_helpers.h"
+ #include "media/gpu/h265_dpb.h"
+@@ -35,12 +38,16 @@ namespace media {
+ 
+ namespace {
+ 
+-constexpr size_t kIDRPeriod = 2048;
++constexpr size_t kDefaultIntraPeriod = 120;
++constexpr size_t kDisplayIntraPeriod = 30;
+ constexpr uint32_t kCPBWindowSizeMs = 1500;
+-constexpr uint8_t kDefaultInitialQp = 26;
+-constexpr uint32_t kDefaultHevcLevelIdc = 120;  // Level 4.0.
+-constexpr int kCTUSizeInPixels = 64;
+-constexpr int kMinCodingBlockSizeInPixels = 8;
++constexpr uint8_t kDefaultInitialQp = 20;
++constexpr uint8_t kDisplayInitialQp = 18;
++constexpr uint32_t kDefaultHevcLevelIdc = 93;  // Level 3.1.
++constexpr uint32_t kDefaultIPPeriod = 1;
++constexpr uint8_t kDefaultLog2MaxPicOrderCntLsbMinus4 = 8;
++constexpr int kSurfaceAlignmentInPixels = 16;
++constexpr int kCTUSizeInPixels = 32;
+ 
+ bool SupportsPackedHeaders(VideoCodecProfile profile) {
+   switch (profile) {
+@@ -60,6 +67,7 @@ bool SuppressPackedHeadersForVisibleSizeShmemMain10(
+     const gfx::Size& visible_size,
+     const gfx::Size& coded_size) {
+   return config.output_profile == HEVCPROFILE_MAIN10 &&
++         config.input_format == PIXEL_FORMAT_I420 &&
+          config.storage_type ==
+              VideoEncodeAccelerator::Config::StorageType::kShmem &&
+          visible_size != coded_size;
+@@ -71,6 +79,37 @@ void InitVAPictureHEVC(VAPictureHEVC* va_pic) {
+   va_pic->flags = VA_PICTURE_HEVC_INVALID;
+ }
+ 
++void FillVAPictureHEVC(VAPictureHEVC* va_pic,
++                       const scoped_refptr<H265Picture>& pic,
++                       H265Picture::ReferenceType ref_type) {
++  CHECK(va_pic);
++  CHECK(pic);
++  CHECK(pic->AsVaapiH265Picture());
++
++  va_pic->picture_id = pic->AsVaapiH265Picture()->va_surface_id();
++  va_pic->pic_order_cnt = pic->pic_order_cnt_val_;
++  va_pic->flags = 0;
++
++  switch (ref_type) {
++    case H265Picture::kShortTermCurrBefore:
++      va_pic->flags |= VA_PICTURE_HEVC_RPS_ST_CURR_BEFORE;
++      break;
++    case H265Picture::kShortTermCurrAfter:
++      va_pic->flags |= VA_PICTURE_HEVC_RPS_ST_CURR_AFTER;
++      break;
++    case H265Picture::kLongTermCurr:
++      va_pic->flags |= VA_PICTURE_HEVC_RPS_LT_CURR;
++      break;
++    default:
++      break;
++  }
++
++  if (ref_type == H265Picture::kLongTermCurr ||
++      ref_type == H265Picture::kLongTermFoll) {
++    va_pic->flags |= VA_PICTURE_HEVC_LONG_TERM_REFERENCE;
++  }
++}
++
+ template <typename VAEncMiscParam>
+ VAEncMiscParam& AllocateMiscParameterBuffer(
+     std::vector<uint8_t>& misc_buffer,
+@@ -78,12 +117,37 @@ VAEncMiscParam& AllocateMiscParameterBuffer(
+   constexpr size_t kBufferSize =
+       sizeof(VAEncMiscParameterBuffer) + sizeof(VAEncMiscParam);
+   misc_buffer.resize(kBufferSize);
+-  auto* va_buffer =
+-      reinterpret_cast<VAEncMiscParameterBuffer*>(misc_buffer.data());
++  auto* va_buffer = reinterpret_cast<VAEncMiscParameterBuffer*>(
++      misc_buffer.data());
+   va_buffer->type = misc_param_type;
+   return *reinterpret_cast<VAEncMiscParam*>(va_buffer->data);
+ }
+ 
++void CreateVAEncRateControlParams(
++    uint32_t bits_per_second,
++    uint32_t target_percentage,
++    uint32_t window_size,
++    uint32_t framerate,
++    uint32_t buffer_size,
++    base::span<std::vector<uint8_t>, 3> misc_buffers) {
++  auto& rate_control_param =
++      AllocateMiscParameterBuffer<VAEncMiscParameterRateControl>(
++          misc_buffers[0], VAEncMiscParameterTypeRateControl);
++  rate_control_param.bits_per_second = bits_per_second;
++  rate_control_param.target_percentage = target_percentage;
++  rate_control_param.window_size = window_size;
++
++  auto& hrd_param = AllocateMiscParameterBuffer<VAEncMiscParameterHRD>(
++      misc_buffers[1], VAEncMiscParameterTypeHRD);
++  hrd_param.buffer_size = buffer_size;
++  hrd_param.initial_buffer_fullness = (buffer_size * 3) / 4;
++
++  auto& frame_rate_param =
++      AllocateMiscParameterBuffer<VAEncMiscParameterFrameRate>(
++          misc_buffers[2], VAEncMiscParameterTypeFrameRate);
++  frame_rate_param.framerate = (1u << 16) | framerate;
++}
++
+ std::optional<uint8_t> ToGeneralProfileIdc(VideoCodecProfile profile) {
+   switch (profile) {
+     case HEVCPROFILE_MAIN:
+@@ -101,6 +165,27 @@ std::optional<uint8_t> ToGeneralProfileIdc(VideoCodecProfile profile) {
+   }
+ }
+ 
++uint32_t MakeGeneralProfileCompatibilityFlags(uint8_t profile_idc) {
++  auto set_profile_flag = [](uint32_t* flags, uint8_t idc) {
++    CHECK_LT(idc, 32u);
++    *flags |= 1u << (31 - idc);
++  };
++
++  uint32_t flags = 0;
++  set_profile_flag(&flags, profile_idc);
++
++  // Match FFmpeg's HEVC compatibility flag handling for the common profiles
++  // used by this path.
++  if (profile_idc == H265ProfileTierLevel::kProfileIdcMain) {
++    set_profile_flag(&flags, H265ProfileTierLevel::kProfileIdcMain10);
++  } else if (profile_idc == H265ProfileTierLevel::kProfileIdcMainStill) {
++    set_profile_flag(&flags, H265ProfileTierLevel::kProfileIdcMain);
++    set_profile_flag(&flags, H265ProfileTierLevel::kProfileIdcMain10);
++  }
++
++  return flags;
++}
++
+ uint8_t GetBitDepthMinus8(VideoCodecProfile profile) {
+   switch (profile) {
+     case HEVCPROFILE_MAIN10:
+@@ -181,20 +266,39 @@ bool H265VaapiVideoEncoderDelegate::Initialize(
+   }
+ 
+   visible_size_ = config.input_visible_size;
++  content_type_ = config.content_type;
++  level_idc_ = config.hevc_output_level.value_or(kDefaultHevcLevelIdc);
+   coded_size_ = gfx::Size(
+       base::bits::AlignUpDeprecatedDoNotUse(visible_size_.width(),
+-                                            kMinCodingBlockSizeInPixels),
++                                            kSurfaceAlignmentInPixels),
+       base::bits::AlignUpDeprecatedDoNotUse(visible_size_.height(),
+-                                            kMinCodingBlockSizeInPixels));
++                                            kSurfaceAlignmentInPixels));
+ 
+   if (ave_config.max_num_ref_frames == 0) {
+     DVLOGF(1) << "Invalid max reference frame setting from VEA";
+     return false;
+   }
+ 
+-  initial_qp_ = kDefaultInitialQp;
++  initial_qp_ = content_type_ ==
++                        VideoEncodeAccelerator::Config::ContentType::kDisplay
++                    ? kDisplayInitialQp
++                    : kDefaultInitialQp;
+   frame_num_ = 0;
++  last_ref_pic_.reset();
++  submit_packed_headers_ = false;
++  packed_vps_.reset();
++  packed_sps_.reset();
++  packed_pps_.reset();
++  packed_header_sps_.reset();
++  packed_header_pps_.reset();
++  packed_sequence_data_.clear();
+   bitrate_allocation_ = VideoBitrateAllocation(config.bitrate.mode());
++  uses_constant_quantization_parameter_ =
++      ave_config.uses_constant_quantization_parameter;
++  DVLOGF(1) << "HEVC encoder init uses_cqp="
++            << uses_constant_quantization_parameter_
++            << " initial_qp=" << static_cast<int>(initial_qp_)
++            << " content_type=" << static_cast<int>(content_type_);
+ 
+   if (SupportsPackedHeaders(profile_)) {
+     bool submit_packed_sequence = false;
+@@ -206,8 +310,7 @@ bool H265VaapiVideoEncoderDelegate::Initialize(
+             submit_packed_picture, submit_packed_slice, support_packed_raw)) {
+       DVLOGF(2) << "Failed getting supported packed headers for H265";
+     } else {
+-      submit_packed_headers_ =
+-          submit_packed_sequence && submit_packed_picture;
++      submit_packed_headers_ = submit_packed_sequence && submit_packed_slice;
+     }
+     if (submit_packed_headers_ &&
+         SuppressPackedHeadersForVisibleSizeShmemMain10(config, visible_size_,
+@@ -218,9 +321,9 @@ bool H265VaapiVideoEncoderDelegate::Initialize(
+       submit_packed_headers_ = false;
+     }
+     if (submit_packed_headers_) {
+-      packed_vps_.emplace();
+-      packed_sps_.emplace();
+-      packed_pps_.emplace();
++      packed_vps_.emplace(true);
++      packed_sps_.emplace(true);
++      packed_pps_.emplace(true);
+       if (!UpdatePackedHeaders()) {
+         return false;
+       }
+@@ -252,29 +355,36 @@ bool H265VaapiVideoEncoderDelegate::UpdateRates(
+   bitrate_allocation_ = bitrate_allocation;
+   framerate_ = framerate;
+ 
+-  base::CheckedNumeric<uint32_t> checked_cpb_size(bitrate_allocation.GetSumBps());
+-  checked_cpb_size /= 1000;
++  base::CheckedNumeric<uint64_t> checked_cpb_size(bitrate_allocation.GetSumBps());
+   checked_cpb_size *= kCPBWindowSizeMs;
++  checked_cpb_size /= 1000;
+   if (!checked_cpb_size.AssignIfValid(&cpb_size_bits_)) {
+     DVLOGF(1) << "Invalid CPB size";
+     return false;
+   }
+ 
++  if (submit_packed_headers_ && !UpdatePackedHeaders()) {
++    DVLOGF(1) << "Failed updating packed H265 headers after rate change";
++    return false;
++  }
++
+   return true;
+ }
+ 
+-bool H265VaapiVideoEncoderDelegate::UpdatePackedHeaders() {
++void H265VaapiVideoEncoderDelegate::ResetEncodingState() {
++  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
++
++  frame_num_ = 0;
++  last_ref_pic_.reset();
++}
++
++void H265VaapiVideoEncoderDelegate::BuildParameterSets(H265VPS& vps,
++                                                       H265SPS& sps,
++                                                       H265PPS& pps) const {
+   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
+-  DCHECK(submit_packed_headers_);
+-  DCHECK(packed_vps_);
+-  DCHECK(packed_sps_);
+-  DCHECK(packed_pps_);
+ 
+   const std::optional<uint8_t> profile_idc = ToGeneralProfileIdc(profile_);
+-  if (!profile_idc.has_value()) {
+-    DVLOGF(1) << "Invalid H265 profile";
+-    return false;
+-  }
++  CHECK(profile_idc.has_value());
+ 
+   const uint8_t bit_depth_minus8 = GetBitDepthMinus8(profile_);
+   const uint8_t chroma_format_idc = GetChromaFormatIdc(profile_);
+@@ -285,29 +395,38 @@ bool H265VaapiVideoEncoderDelegate::UpdatePackedHeaders() {
+   DCHECK_GT(crop_unit_x, 0);
+   DCHECK_GT(crop_unit_y, 0);
+ 
+-  H265VPS vps;
+   vps.vps_video_parameter_set_id = 0;
+   vps.vps_base_layer_internal_flag = true;
+   vps.vps_base_layer_available_flag = true;
+   vps.vps_temporal_id_nesting_flag = true;
+   vps.profile_tier_level.general_profile_idc = *profile_idc;
+   vps.profile_tier_level.general_profile_compatibility_flags =
+-      1u << (31 - *profile_idc);
++      MakeGeneralProfileCompatibilityFlags(*profile_idc);
+   vps.profile_tier_level.general_progressive_source_flag = true;
+   vps.profile_tier_level.general_non_packed_constraint_flag = true;
+   vps.profile_tier_level.general_frame_only_constraint_flag = true;
+-  vps.profile_tier_level.general_level_idc = kDefaultHevcLevelIdc;
++  vps.profile_tier_level.general_level_idc = level_idc_;
++  // Keep these syntax-element values aligned with FFmpeg's working HEVC VAAPI
++  // stream layout. In particular, allow buffering for both the current picture
++  // and one reference picture, instead of advertising a one-picture DPB.
+   vps.vps_max_dec_pic_buffering_minus1[0] =
+       base::checked_cast<int>(GetMaxNumOfRefFrames());
+-  vps.vps_max_latency_increase_plus1[0] = 1;
++  vps.vps_max_latency_increase_plus1[0] = 0;
++  vps.vps_timing_info_present_flag = true;
++  vps.vps_num_units_in_tick = 1;
++  vps.vps_time_scale = framerate_;
++  vps.vps_poc_proportional_to_timing_flag = true;
++  vps.vps_num_ticks_poc_diff_one_minus1 = 0;
++  vps.vps_num_hrd_parameters = 0;
+ 
+-  H265SPS sps;
+   sps.sps_video_parameter_set_id = vps.vps_video_parameter_set_id;
+   sps.sps_max_sub_layers_minus1 = vps.vps_max_sub_layers_minus1;
+   sps.sps_temporal_id_nesting_flag = vps.vps_temporal_id_nesting_flag;
+   sps.profile_tier_level = vps.profile_tier_level;
+   sps.sps_seq_parameter_set_id = 0;
+   sps.chroma_format_idc = chroma_format_idc;
++  sps.chroma_array_type =
++      sps.separate_colour_plane_flag ? 0 : sps.chroma_format_idc;
+   sps.pic_width_in_luma_samples = coded_size_.width();
+   sps.pic_height_in_luma_samples = coded_size_.height();
+   DCHECK_EQ(width_padding % crop_unit_x, 0);
+@@ -317,31 +436,91 @@ bool H265VaapiVideoEncoderDelegate::UpdatePackedHeaders() {
+   sps.bit_depth_luma_minus8 = bit_depth_minus8;
+   sps.bit_depth_chroma_minus8 = bit_depth_minus8;
+   sps.log2_max_pic_order_cnt_lsb_minus4 =
+-      base::bits::Log2Ceiling(kIDRPeriod * 2) - 4;
++      kDefaultLog2MaxPicOrderCntLsbMinus4;
+   sps.sps_max_dec_pic_buffering_minus1 = vps.vps_max_dec_pic_buffering_minus1;
+   sps.sps_max_num_reorder_pics = vps.vps_max_num_reorder_pics;
+   std::ranges::copy(vps.vps_max_latency_increase_plus1,
+                     sps.sps_max_latency_increase_plus1.begin());
+   sps.log2_min_luma_coding_block_size_minus3 = 0;
+-  sps.log2_diff_max_min_luma_coding_block_size = 3;
++  sps.log2_diff_max_min_luma_coding_block_size = 2;
+   sps.log2_min_luma_transform_block_size_minus2 = 0;
+   sps.log2_diff_max_min_luma_transform_block_size = 3;
+-  sps.max_transform_hierarchy_depth_inter = 0;
+-  sps.max_transform_hierarchy_depth_intra = 0;
+-  sps.sample_adaptive_offset_enabled_flag = true;
+-  sps.strong_intra_smoothing_enabled_flag = true;
++  sps.max_transform_hierarchy_depth_inter = 3;
++  sps.max_transform_hierarchy_depth_intra = 3;
++  sps.amp_enabled_flag = true;
++  sps.sample_adaptive_offset_enabled_flag = false;
++  sps.strong_intra_smoothing_enabled_flag = false;
++  sps.vui_parameters_present_flag = true;
++  // Don't hardcode HEVC colour-description fields here. FFmpeg only emits
++  // explicit colour signalling when the source actually specifies it, and the
++  // common Chromium H.264 path also avoids forcing BT.709 metadata. Keeping
++  // these fields unspecified prevents the encoder from tinting the entire
++  // picture via incorrect VUI signalling.
++  sps.vui_parameters.video_full_range_flag = false;
++  sps.vui_parameters.colour_description_present_flag = false;
++  sps.vui_parameters.colour_primaries = 0;
++  sps.vui_parameters.transfer_characteristics = 0;
++  sps.vui_parameters.matrix_coeffs = 0;
++  ApplyInputColorSpaceToParameterSets(sps);
++  sps.vui_parameters.timing_info_present_flag = true;
++  sps.vui_parameters.num_units_in_tick = 1;
++  sps.vui_parameters.time_scale = framerate_;
++  sps.vui_parameters.poc_proportional_to_timing_flag = true;
++  sps.vui_parameters.num_ticks_poc_diff_one_minus1 = 0;
++  sps.vui_parameters.bitstream_restriction_flag = true;
++  sps.vui_parameters.restricted_ref_pic_lists_flag = true;
++  sps.vui_parameters.min_spatial_segmentation_idc = 0;
++  sps.vui_parameters.max_bytes_per_pic_denom = 0;
++  sps.vui_parameters.max_bits_per_min_cu_denom = 0;
++  sps.vui_parameters.log2_max_mv_length_horizontal = 15;
++  sps.vui_parameters.log2_max_mv_length_vertical = 15;
+ 
+-  H265PPS pps;
+   pps.pps_pic_parameter_set_id = 0;
+   pps.pps_seq_parameter_set_id = sps.sps_seq_parameter_set_id;
+-  pps.cabac_init_present_flag = true;
+   pps.num_ref_idx_l0_default_active_minus1 = 0;
+   pps.num_ref_idx_l1_default_active_minus1 = 0;
+   pps.init_qp_minus26 = base::checked_cast<int>(initial_qp_) - 26;
+-  pps.cu_qp_delta_enabled_flag = true;
+-  pps.pps_slice_chroma_qp_offsets_present_flag = true;
++  // The dumped HEVC Annex-B stream trips software decoders with
++  // `cu_qp_delta -89 is outside the valid range [-26, 25]`, which means the
++  // current PPS/QP-delta signalling does not match the emitted slice payload.
++  // Keep per-CU QP deltas disabled until the VAAPI/iHD path can prove a valid
++  // bitstream with them enabled.
++  pps.cu_qp_delta_enabled_flag = false;
++  pps.diff_cu_qp_delta_depth = 0;
+   pps.pps_loop_filter_across_slices_enabled_flag = true;
+-  pps.deblocking_filter_control_present_flag = true;
++}
++
++void H265VaapiVideoEncoderDelegate::ApplyInputColorSpaceToParameterSets(
++    H265SPS& sps) const {
++  // Match the FFmpeg VAAPI HEVC stream layout more closely: keep HEVC colour
++  // description unspecified unless the end-to-end RGB->YUV conversion and
++  // signalling path has been validated. The current SHMEM capture path already
++  // uploads limited-range NV12 correctly, so forcing primaries/matrix/transfer
++  // here is more likely to tint the output than to help it.
++  sps.vui_parameters.colour_description_present_flag = false;
++  sps.vui_parameters.colour_primaries = 0;
++  sps.vui_parameters.transfer_characteristics = 0;
++  sps.vui_parameters.matrix_coeffs = 0;
++  sps.vui_parameters.video_full_range_flag = false;
++}
++
++size_t H265VaapiVideoEncoderDelegate::GetIntraPeriod() const {
++  return content_type_ == VideoEncodeAccelerator::Config::ContentType::kDisplay
++             ? kDisplayIntraPeriod
++             : kDefaultIntraPeriod;
++}
++
++bool H265VaapiVideoEncoderDelegate::UpdatePackedHeaders() {
++  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
++  DCHECK(submit_packed_headers_);
++  DCHECK(packed_vps_);
++  DCHECK(packed_sps_);
++  DCHECK(packed_pps_);
++
++  H265VPS vps;
++  H265SPS sps;
++  H265PPS pps;
++  BuildParameterSets(vps, sps, pps);
+ 
+   packed_vps_->Reset();
+   packed_sps_->Reset();
+@@ -349,6 +528,21 @@ bool H265VaapiVideoEncoderDelegate::UpdatePackedHeaders() {
+   BuildPackedH265VPS(*packed_vps_, vps);
+   BuildPackedH265SPS(*packed_sps_, sps);
+   BuildPackedH265PPS(*packed_pps_, pps);
++  packed_sequence_data_.clear();
++  packed_sequence_data_.reserve(packed_vps_->BytesInBuffer() +
++                                packed_sps_->BytesInBuffer() +
++                                packed_pps_->BytesInBuffer());
++  packed_sequence_data_.insert(packed_sequence_data_.end(),
++                               packed_vps_->data().begin(),
++                               packed_vps_->data().end());
++  packed_sequence_data_.insert(packed_sequence_data_.end(),
++                               packed_sps_->data().begin(),
++                               packed_sps_->data().end());
++  packed_sequence_data_.insert(packed_sequence_data_.end(),
++                               packed_pps_->data().begin(),
++                               packed_pps_->data().end());
++  packed_header_sps_.emplace(std::move(sps));
++  packed_header_pps_.emplace(std::move(pps));
+   return true;
+ }
+ 
+@@ -386,38 +580,83 @@ VaapiVideoEncoderDelegate::PrepareEncodeJobResult
+ H265VaapiVideoEncoderDelegate::PrepareEncodeJob(EncodeJob& encode_job) {
+   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
+ 
+-  const bool idr =
+-      encode_job.IsKeyframeRequested() || frame_num_ == 0 ||
+-      ((frame_num_ % kIDRPeriod) == 0);
++  const bool color_space_changed =
++      encode_job.color_space() != input_color_space_;
++  if (color_space_changed) {
++    input_color_space_ = encode_job.color_space();
++    if (submit_packed_headers_ && !UpdatePackedHeaders()) {
++      DVLOGF(1) << "Failed updating H265 packed headers for input color space "
++                << input_color_space_.ToString();
++      return PrepareEncodeJobResult::kFail;
++    }
++  }
++
++  scoped_refptr<H265Picture> pic = GetH265Picture(encode_job);
++  if (!pic) {
++    DVLOGF(1) << "Invalid H265 picture";
++    return PrepareEncodeJobResult::kFail;
++  }
++
++  const size_t intra_period = GetIntraPeriod();
++  const bool keyframe_requested = encode_job.IsKeyframeRequested();
++  bool idr =
++      keyframe_requested || frame_num_ == 0 || ((frame_num_ % intra_period) == 0);
++  if (!idr && !last_ref_pic_) {
++    DVLOGF(2) << "Promoting HEVC frame to IDR because no reference picture "
++                 "is available";
++    idr = true;
++  }
+   if (idr) {
++    last_ref_pic_.reset();
++    // Keep HEVC POC numbering relative to the most recent IDR, matching
++    // FFmpeg's VAAPI path. A forced keyframe in the middle of a GOP must start
++    // a fresh POC sequence at 0 rather than emitting an IDR with a carried-over
++    // POC such as 4, 5, ...
++    frame_num_ = 0;
+     encode_job.ProduceKeyframe();
+   }
+ 
+-  if (!SubmitFrameParameters(encode_job, idr)) {
++  if (!SubmitFrameParameters(encode_job, pic, idr)) {
+     DVLOGF(1) << "Failed submitting H265 frame parameters";
+     return PrepareEncodeJobResult::kFail;
+   }
+ 
++  pic->ref_ = H265Picture::kShortTermCurrBefore;
++  last_ref_pic_ = std::move(pic);
++
+   ++frame_num_;
+-  frame_num_ %= kIDRPeriod;
++  frame_num_ %= intra_period;
+   return PrepareEncodeJobResult::kSuccess;
+ }
+ 
+-bool H265VaapiVideoEncoderDelegate::SubmitFrameParameters(EncodeJob& encode_job,
+-                                                          bool idr) {
++bool H265VaapiVideoEncoderDelegate::SubmitFrameParameters(
++    EncodeJob& encode_job,
++    const scoped_refptr<H265Picture>& pic,
++    bool idr) {
+   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
+-
+-  scoped_refptr<H265Picture> pic = GetH265Picture(encode_job);
+-  if (!pic) {
+-    DVLOGF(1) << "Invalid H265 picture";
+-    return false;
+-  }
++  DCHECK(pic);
+ 
+   const std::optional<uint8_t> profile_idc = ToGeneralProfileIdc(profile_);
+   if (!profile_idc.has_value()) {
+     DVLOGF(1) << "Invalid H265 profile";
+     return false;
+   }
++  const size_t intra_period = GetIntraPeriod();
++  const Bitrate bitrate = bitrate_allocation_.GetSumBitrate();
++  uint32_t bitrate_bps = bitrate.target_bps();
++  uint32_t target_percentage = 100u;
++  if (bitrate.mode() == Bitrate::Mode::kVariable) {
++    bitrate_bps = bitrate.peak_bps();
++    DCHECK_NE(bitrate.peak_bps(), 0u);
++    base::CheckedNumeric<uint64_t> checked_percentage =
++        base::CheckDiv(base::CheckMul<uint64_t>(bitrate.target_bps(), 100u),
++                       bitrate.peak_bps());
++    if (!checked_percentage.AssignIfValid(&target_percentage)) {
++      DVLOGF(1)
++          << "Integer overflow while computing target percentage for bitrate.";
++      return false;
++    }
++  }
+   const uint8_t bit_depth_minus8 = GetBitDepthMinus8(profile_);
+   const uint8_t chroma_format_idc = GetChromaFormatIdc(profile_);
+ 
+@@ -426,34 +665,32 @@ bool H265VaapiVideoEncoderDelegate::SubmitFrameParameters(EncodeJob& encode_job,
+ 
+   VAEncSequenceParameterBufferHEVC seq_param = {};
+   seq_param.general_profile_idc = *profile_idc;
+-  seq_param.general_level_idc = kDefaultHevcLevelIdc;
++  seq_param.general_level_idc = level_idc_;
+   seq_param.general_tier_flag = 0;
+-  seq_param.intra_period = kIDRPeriod;
+-  seq_param.intra_idr_period = kIDRPeriod;
+-  seq_param.ip_period = 1;
+-  seq_param.bits_per_second = bitrate_allocation_.GetSumBps();
++  seq_param.intra_period = intra_period;
++  seq_param.intra_idr_period = intra_period;
++  seq_param.ip_period = kDefaultIPPeriod;
++  seq_param.bits_per_second = bitrate_bps;
+   seq_param.pic_width_in_luma_samples = coded_size_.width();
+   seq_param.pic_height_in_luma_samples = coded_size_.height();
+   seq_param.seq_fields.bits.chroma_format_idc = chroma_format_idc;
+   seq_param.seq_fields.bits.bit_depth_luma_minus8 = bit_depth_minus8;
+   seq_param.seq_fields.bits.bit_depth_chroma_minus8 = bit_depth_minus8;
+-  seq_param.seq_fields.bits.strong_intra_smoothing_enabled_flag = 1;
+-  seq_param.seq_fields.bits.sample_adaptive_offset_enabled_flag = 1;
+-  seq_param.seq_fields.bits.low_delay_seq = 1;
++  seq_param.seq_fields.bits.strong_intra_smoothing_enabled_flag = 0;
++  seq_param.seq_fields.bits.amp_enabled_flag = 1;
++  seq_param.seq_fields.bits.sample_adaptive_offset_enabled_flag = 0;
++  seq_param.seq_fields.bits.low_delay_seq = 0;
+   seq_param.log2_min_luma_coding_block_size_minus3 = 0;
+-  seq_param.log2_diff_max_min_luma_coding_block_size = 3;
++  seq_param.log2_diff_max_min_luma_coding_block_size = 2;
+   seq_param.log2_min_transform_block_size_minus2 = 0;
+   seq_param.log2_diff_max_min_transform_block_size = 3;
+-  seq_param.max_transform_hierarchy_depth_inter = 0;
+-  seq_param.max_transform_hierarchy_depth_intra = 0;
+-  seq_param.pcm_sample_bit_depth_luma_minus1 = 8 + bit_depth_minus8 - 1;
+-  seq_param.pcm_sample_bit_depth_chroma_minus1 = 8 + bit_depth_minus8 - 1;
++  seq_param.max_transform_hierarchy_depth_inter = 3;
++  seq_param.max_transform_hierarchy_depth_intra = 3;
++  seq_param.pcm_sample_bit_depth_luma_minus1 = 0;
++  seq_param.pcm_sample_bit_depth_chroma_minus1 = 0;
+   seq_param.log2_min_pcm_luma_coding_block_size_minus3 = 0;
+   seq_param.log2_max_pcm_luma_coding_block_size_minus3 = 0;
+-  seq_param.vui_parameters_present_flag = 1;
+-  seq_param.vui_fields.bits.vui_timing_info_present_flag = 1;
+-  seq_param.vui_num_units_in_tick = 1;
+-  seq_param.vui_time_scale = framerate_;
++  seq_param.vui_parameters_present_flag = 0;
+ 
+   VAEncPictureParameterBufferHEVC pic_param = {};
+   pic_param.decoded_curr_pic.picture_id =
+@@ -462,18 +699,36 @@ bool H265VaapiVideoEncoderDelegate::SubmitFrameParameters(EncodeJob& encode_job,
+   pic_param.coded_buf = encode_job.coded_buffer_id();
+   pic_param.collocated_ref_pic_index = 0xFF;
+   pic_param.pic_init_qp = initial_qp_;
++  pic_param.diff_cu_qp_delta_depth = 0;
++  pic_param.pps_cb_qp_offset = 0;
++  pic_param.pps_cr_qp_offset = 0;
+   pic_param.log2_parallel_merge_level_minus2 = 0;
+   pic_param.num_ref_idx_l0_default_active_minus1 = 0;
+   pic_param.num_ref_idx_l1_default_active_minus1 = 0;
+   pic_param.slice_pic_parameter_set_id = 0;
+   pic_param.nal_unit_type = base::checked_cast<uint8_t>(pic->nal_unit_type_);
+   pic_param.pic_fields.bits.idr_pic_flag = idr ? 1 : 0;
+-  pic_param.pic_fields.bits.coding_type = 1;
+-  pic_param.pic_fields.bits.reference_pic_flag = 0;
++  pic_param.pic_fields.bits.coding_type = idr ? 1 : 2;
++  // This HEVC path currently emits only reference NALU types
++  // (IDR_W_RADL / TRAIL_R), so the current picture must be marked as
++  // reference for the driver/HAL.
++  pic_param.pic_fields.bits.reference_pic_flag = 1;
++  pic_param.pic_fields.bits.cu_qp_delta_enabled_flag = 0;
+   pic_param.pic_fields.bits.pps_loop_filter_across_slices_enabled_flag = 1;
+   for (VAPictureHEVC& ref_pic : pic_param.reference_frames) {
+     InitVAPictureHEVC(&ref_pic);
+   }
++  if (!idr) {
++    if (!last_ref_pic_) {
++      DVLOGF(1) << "Missing HEVC reference picture for P-frame";
++      return false;
++    }
++    FillVAPictureHEVC(&pic_param.reference_frames[0], last_ref_pic_,
++                      H265Picture::kShortTermCurrBefore);
++    DVLOGF(2) << "Using HEVC short-term reference poc="
++              << last_ref_pic_->pic_order_cnt_val_ << " surface="
++              << last_ref_pic_->AsVaapiH265Picture()->va_surface_id();
++  }
+ 
+   VAEncSliceParameterBufferHEVC slice_param = {};
+   slice_param.slice_segment_address = 0;
+@@ -486,62 +741,156 @@ bool H265VaapiVideoEncoderDelegate::SubmitFrameParameters(EncodeJob& encode_job,
+                           static_cast<uint32_t>(kCTUSizeInPixels)) /
+       kCTUSizeInPixels;
+   slice_param.num_ctu_in_slice = std::max(1u, ctu_cols * ctu_rows);
+-  slice_param.slice_type = 2;
++  slice_param.slice_type =
++      idr ? H265SliceHeader::kSliceTypeI : H265SliceHeader::kSliceTypeP;
+   slice_param.slice_pic_parameter_set_id = 0;
+   slice_param.num_ref_idx_l0_active_minus1 = 0;
+   slice_param.num_ref_idx_l1_active_minus1 = 0;
+   slice_param.max_num_merge_cand = 5;
+-  slice_param.slice_qp_delta =
+-      base::checked_cast<int8_t>(static_cast<int>(initial_qp_) - 26);
++  // FFmpeg and the HEVC syntax model treat slice_qp_delta as a delta from the
++  // PPS init_qp_minus26 value. Keep the initial slice QP anchored to the PPS
++  // init QP instead of double-applying the offset here.
++  slice_param.slice_qp_delta = 0;
+   slice_param.slice_fields.bits.last_slice_of_pic_flag = 1;
+-  slice_param.slice_fields.bits.slice_sao_luma_flag = 1;
+-  slice_param.slice_fields.bits.slice_sao_chroma_flag = 1;
+-  slice_param.slice_fields.bits.slice_loop_filter_across_slices_enabled_flag = 1;
++  slice_param.slice_fields.bits.slice_sao_luma_flag = 0;
++  slice_param.slice_fields.bits.slice_sao_chroma_flag = 0;
++  slice_param.slice_fields.bits.slice_loop_filter_across_slices_enabled_flag =
++      0;
+   for (VAPictureHEVC& ref_pic : slice_param.ref_pic_list0) {
+     InitVAPictureHEVC(&ref_pic);
+   }
+   for (VAPictureHEVC& ref_pic : slice_param.ref_pic_list1) {
+     InitVAPictureHEVC(&ref_pic);
+   }
++  if (!idr) {
++    slice_param.ref_pic_list0[0] = pic_param.reference_frames[0];
++  }
+ 
+   std::vector<VaapiWrapper::VABufferDescriptor> va_buffers = {
+       {VAEncSequenceParameterBufferType, sizeof(seq_param), &seq_param},
+-      {VAEncPictureParameterBufferType, sizeof(pic_param), &pic_param},
+-      {VAEncSliceParameterBufferType, sizeof(slice_param), &slice_param},
+   };
+ 
+-  std::array<VAEncPackedHeaderParameterBuffer, 3> packed_header_params = {};
++  std::array<VAEncPackedHeaderParameterBuffer, 2> packed_header_params = {};
+   size_t num_packed_headers = 0;
+   auto append_packed_header = [&](uint32_t type,
+-                                  const H26xAnnexBBitstreamBuilder& builder) {
++                                  const uint8_t* data,
++                                  size_t size,
++                                  size_t bit_length,
++                                  uint8_t has_emulation_bytes) {
+     CHECK_LT(num_packed_headers, packed_header_params.size());
+     auto& packed_header_param = packed_header_params[num_packed_headers++];
+     packed_header_param.type = type;
+-    packed_header_param.bit_length = builder.BytesInBuffer() * CHAR_BIT;
+-    packed_header_param.has_emulation_bytes = 0;
++    packed_header_param.bit_length = bit_length;
++    packed_header_param.has_emulation_bytes = has_emulation_bytes;
+     va_buffers.push_back({VAEncPackedHeaderParameterBufferType,
+                           sizeof(packed_header_param), &packed_header_param});
+-    va_buffers.push_back({VAEncPackedHeaderDataBufferType,
+-                          builder.BytesInBuffer(), builder.data().data()});
++    va_buffers.push_back({VAEncPackedHeaderDataBufferType, size, data});
+   };
+ 
++  std::array<std::vector<uint8_t>, 3> misc_buffers;
++  std::vector<uint8_t> frame_rate_misc_buffer;
++  if (idr) {
++    if (uses_constant_quantization_parameter_) {
++      auto& frame_rate_param =
++          AllocateMiscParameterBuffer<VAEncMiscParameterFrameRate>(
++              frame_rate_misc_buffer, VAEncMiscParameterTypeFrameRate);
++      frame_rate_param.framerate = (1u << 16) | framerate_;
++      va_buffers.push_back({VAEncMiscParameterBufferType,
++                            frame_rate_misc_buffer.size(),
++                            frame_rate_misc_buffer.data()});
++    } else {
++      CreateVAEncRateControlParams(bitrate_bps, target_percentage,
++                                   kCPBWindowSizeMs, framerate_, cpb_size_bits_,
++                                   misc_buffers);
++      va_buffers.push_back({VAEncMiscParameterBufferType, misc_buffers[0].size(),
++                            misc_buffers[0].data()});
++      va_buffers.push_back({VAEncMiscParameterBufferType, misc_buffers[1].size(),
++                            misc_buffers[1].data()});
++      va_buffers.push_back({VAEncMiscParameterBufferType, misc_buffers[2].size(),
++                            misc_buffers[2].data()});
++    }
++  }
++
++  va_buffers.push_back(
++      {VAEncPictureParameterBufferType, sizeof(pic_param), &pic_param});
++
+   if (idr && submit_packed_headers_) {
+     DCHECK(packed_vps_);
+     DCHECK(packed_sps_);
+     DCHECK(packed_pps_);
+-    append_packed_header(VAEncPackedHeaderSequence, *packed_vps_);
+-    append_packed_header(VAEncPackedHeaderSequence, *packed_sps_);
+-    append_packed_header(VAEncPackedHeaderPicture, *packed_pps_);
++    append_packed_header(VAEncPackedHeaderSequence,
++                         packed_sequence_data_.data(),
++                         packed_sequence_data_.size(),
++                         packed_sequence_data_.size() * CHAR_BIT,
++                         /*has_emulation_bytes=*/1);
+   }
+ 
+-  std::vector<uint8_t> frame_rate_misc_buffer;
+-  auto& frame_rate_param =
+-      AllocateMiscParameterBuffer<VAEncMiscParameterFrameRate>(
+-          frame_rate_misc_buffer, VAEncMiscParameterTypeFrameRate);
+-  frame_rate_param.framerate = framerate_;
+-  va_buffers.push_back({VAEncMiscParameterBufferType,
+-                        frame_rate_misc_buffer.size(),
+-                        frame_rate_misc_buffer.data()});
++  if (submit_packed_headers_) {
++    DCHECK(packed_header_sps_);
++    DCHECK(packed_header_pps_);
++    const H265SPS& sps = *packed_header_sps_;
++    const H265PPS& pps = *packed_header_pps_;
++
++    H265SliceHeader packed_slice_header = {};
++    packed_slice_header.nal_unit_type = pic->nal_unit_type_;
++    packed_slice_header.irap_pic = idr;
++    packed_slice_header.first_slice_segment_in_pic_flag = true;
++    packed_slice_header.no_output_of_prior_pics_flag = false;
++    packed_slice_header.pic_output_flag = true;
++    packed_slice_header.slice_pic_parameter_set_id =
++        pic_param.slice_pic_parameter_set_id;
++    packed_slice_header.slice_type =
++        idr ? H265SliceHeader::kSliceTypeI : H265SliceHeader::kSliceTypeP;
++    const int pic_order_cnt_lsb_bits =
++        sps.log2_max_pic_order_cnt_lsb_minus4 + 4;
++    CHECK_LT(pic_order_cnt_lsb_bits, 32);
++    const uint32_t pic_order_cnt_lsb_mask =
++        (1u << pic_order_cnt_lsb_bits) - 1u;
++    packed_slice_header.slice_pic_order_cnt_lsb = base::checked_cast<int>(
++        base::checked_cast<uint32_t>(pic_param.decoded_curr_pic.pic_order_cnt) &
++        pic_order_cnt_lsb_mask);
++    packed_slice_header.short_term_ref_pic_set_sps_flag = idr;
++    if (!idr) {
++      packed_slice_header.st_ref_pic_set.num_negative_pics = 1;
++      packed_slice_header.st_ref_pic_set.num_positive_pics = 0;
++      packed_slice_header.st_ref_pic_set.delta_poc_s0[0] = -1;
++      packed_slice_header.st_ref_pic_set.used_by_curr_pic_s0[0] = true;
++      packed_slice_header.st_ref_pic_set.num_delta_pocs = 1;
++    }
++    packed_slice_header.slice_sao_luma_flag = false;
++    packed_slice_header.slice_sao_chroma_flag = false;
++    packed_slice_header.num_ref_idx_active_override_flag = false;
++    packed_slice_header.num_ref_idx_l0_active_minus1 =
++        slice_param.num_ref_idx_l0_active_minus1;
++    packed_slice_header.num_ref_idx_l1_active_minus1 =
++        slice_param.num_ref_idx_l1_active_minus1;
++    packed_slice_header.five_minus_max_num_merge_cand = 0;
++    packed_slice_header.slice_qp_delta = slice_param.slice_qp_delta;
++    packed_slice_header.slice_cb_qp_offset = 0;
++    packed_slice_header.slice_cr_qp_offset = 0;
++    packed_slice_header.slice_loop_filter_across_slices_enabled_flag =
++        slice_param.slice_fields.bits.slice_loop_filter_across_slices_enabled_flag;
++
++    // Build a complete packed slice header, including the RBSP stop bit, so
++    // the resulting payload matches FFmpeg's first-slice layout
++    // (`00000001 26 01 AE 80` for the current IDR case) and the driver can
++    // prepend a distinct slice NAL unit to the coded bitstream.
++    H26xAnnexBBitstreamBuilder packed_slice(false);
++    BuildPackedH265SliceHeader(packed_slice, sps, pps, packed_slice_header,
++                               /*add_rbsp_trailing_bits=*/true);
++    encode_job.SetBitstreamInjection(
++        idr ? packed_sequence_data_ : std::vector<uint8_t>{},
++        std::vector<uint8_t>(packed_slice.data().begin(),
++                             packed_slice.data().end()));
++    append_packed_header(VAEncPackedHeaderHEVC_Slice,
++                         packed_slice.data().data(),
++                         packed_slice.BytesInBuffer(),
++                         packed_slice.BitsInBuffer(),
++                         /*has_emulation_bytes=*/1);
++  }
++
++  va_buffers.push_back(
++      {VAEncSliceParameterBufferType, sizeof(slice_param), &slice_param});
+ 
+   return vaapi_wrapper_->SubmitBuffers(va_buffers);
+ }
+diff --git a/media/gpu/vaapi/h265_vaapi_video_encoder_delegate.h b/media/gpu/vaapi/h265_vaapi_video_encoder_delegate.h
+index 2f2a87fc8cc50..89182a71c394c 100644
+--- a/media/gpu/vaapi/h265_vaapi_video_encoder_delegate.h
++++ b/media/gpu/vaapi/h265_vaapi_video_encoder_delegate.h
+@@ -7,11 +7,13 @@
+ 
+ #include <optional>
+ 
++#include "media/base/video_color_space.h"
+ #include "media/filters/h26x_annex_b_bitstream_builder.h"
+-#include "media/parsers/h265_parser.h"
+ #include "media/gpu/vaapi/vaapi_video_encoder_delegate.h"
++#include "media/parsers/h265_parser.h"
+ 
+ namespace media {
++class H265Picture;
+ 
+ class H265VaapiVideoEncoderDelegate : public VaapiVideoEncoderDelegate {
+  public:
+@@ -26,6 +28,7 @@ class H265VaapiVideoEncoderDelegate : public VaapiVideoEncoderDelegate {
+                   const VaapiVideoEncoderDelegate::Config& ave_config) override;
+   bool UpdateRates(const VideoBitrateAllocation& bitrate_allocation,
+                    uint32_t framerate) override;
++  void ResetEncodingState() override;
+   gfx::Size GetCodedSize() const override;
+   size_t GetMaxNumOfRefFrames() const override;
+   std::vector<gfx::Size> GetSVCLayerResolutions() override;
+@@ -37,21 +40,35 @@ class H265VaapiVideoEncoderDelegate : public VaapiVideoEncoderDelegate {
+   void BitrateControlUpdate(
+       const BitstreamBufferMetadata& metadata) override;
+ 
++  void BuildParameterSets(H265VPS& vps, H265SPS& sps, H265PPS& pps) const;
++  void ApplyInputColorSpaceToParameterSets(H265SPS& sps) const;
++  size_t GetIntraPeriod() const;
+   bool UpdatePackedHeaders();
+-  bool SubmitFrameParameters(EncodeJob& encode_job, bool idr);
++  bool SubmitFrameParameters(EncodeJob& encode_job,
++                             const scoped_refptr<H265Picture>& pic,
++                             bool idr);
+ 
+   VideoCodecProfile profile_ = VIDEO_CODEC_PROFILE_UNKNOWN;
+   std::optional<H26xAnnexBBitstreamBuilder> packed_vps_;
+   std::optional<H26xAnnexBBitstreamBuilder> packed_sps_;
+   std::optional<H26xAnnexBBitstreamBuilder> packed_pps_;
++  std::optional<H265SPS> packed_header_sps_;
++  std::optional<H265PPS> packed_header_pps_;
++  std::vector<uint8_t> packed_sequence_data_;
+   bool submit_packed_headers_ = false;
++  bool uses_constant_quantization_parameter_ = false;
++  VideoEncodeAccelerator::Config::ContentType content_type_ =
++      VideoEncodeAccelerator::Config::ContentType::kCamera;
+   gfx::Size visible_size_;
+   gfx::Size coded_size_;
+   VideoBitrateAllocation bitrate_allocation_{Bitrate::Mode::kConstant};
+   uint32_t framerate_ = 0;
+   uint32_t cpb_size_bits_ = 0;
++  uint32_t level_idc_ = 0;
+   uint8_t initial_qp_ = 26;
++  gfx::ColorSpace input_color_space_;
+   size_t frame_num_ = 0;
++  scoped_refptr<H265Picture> last_ref_pic_;
+ };
+ 
+ }  // namespace media
+diff --git a/media/gpu/vaapi/vaapi_video_encode_accelerator.cc b/media/gpu/vaapi/vaapi_video_encode_accelerator.cc
+index 7cd269fcd8931..1ca24e2c81ab1 100644
+--- a/media/gpu/vaapi/vaapi_video_encode_accelerator.cc
++++ b/media/gpu/vaapi/vaapi_video_encode_accelerator.cc
+@@ -14,6 +14,7 @@
+ #include <variant>
+ 
+ #include "base/bits.h"
++#include "base/containers/span.h"
+ #include "base/containers/fixed_flat_map.h"
+ #include "base/feature_list.h"
+ #include "base/functional/bind.h"
+@@ -72,7 +73,92 @@ namespace media {
+ 
+ namespace {
+ 
+-// Keep the current HEVC Main10 SHMEM fallback path at visible size and let any
++constexpr size_t kBitstreamInjectionSearchWindowBytes = 64;
++
++enum class HevcBitstreamInjectionAction {
++  kNoInjectionNeeded,
++  kPrefixMismatch,
++  kInvalidInsertionOffset,
++  kPlaceholderReplaced,
++  kAlreadyPresent,
++  kInjected,
++  kInsufficientCapacity,
++};
++
++HevcBitstreamInjectionAction MaybeInjectExpectedBitstreamBytes(
++    const VaapiVideoEncoderDelegate::EncodeResult& encode_result,
++    base::span<uint8_t> target_data,
++    size_t* data_size_in_out) {
++  const auto& expected_prefix = encode_result.expected_output_prefix_bytes();
++  const auto& injection_bytes = encode_result.bitstream_injection_bytes();
++  if (injection_bytes.empty()) {
++    return HevcBitstreamInjectionAction::kNoInjectionNeeded;
++  }
++
++  size_t data_size = *data_size_in_out;
++  if (!expected_prefix.empty()) {
++    if (data_size < expected_prefix.size() ||
++        target_data.first(expected_prefix.size()) !=
++            base::span<const uint8_t>(expected_prefix)) {
++      return HevcBitstreamInjectionAction::kPrefixMismatch;
++    }
++  }
++
++  const size_t insertion_offset = expected_prefix.size();
++  if (insertion_offset > data_size) {
++    return HevcBitstreamInjectionAction::kInvalidInsertionOffset;
++  }
++
++  // Intel iHD's HEVC path on this system leaves a fixed-size placeholder where
++  // the packed slice header should have been emitted. For IDR frames the gap is
++  // 8 bytes, and for P-frames it is 10 bytes, matching exactly the injected
++  // packed-header sizes we expect. If we prepend the header instead of
++  // replacing the placeholder, the resulting NAL becomes:
++  //   injected_header + placeholder + actual_payload
++  // which still decodes into visibly corrupted frames. Overwrite the
++  // placeholder in place when it is present.
++  if (insertion_offset + injection_bytes.size() <= data_size) {
++    auto placeholder_span =
++        target_data.subspan(insertion_offset, injection_bytes.size());
++    if (std::ranges::all_of(placeholder_span,
++                            [](uint8_t byte) { return byte == 0xEF; })) {
++      placeholder_span.copy_from_nonoverlapping(
++          base::span<const uint8_t>(injection_bytes));
++      DVLOGF(1) << "Replaced HEVC placeholder bytes at offset "
++                << insertion_offset << " size=" << injection_bytes.size();
++      return HevcBitstreamInjectionAction::kPlaceholderReplaced;
++    }
++  }
++
++  const size_t search_end_offset =
++      std::min(data_size,
++               insertion_offset + injection_bytes.size() +
++                   kBitstreamInjectionSearchWindowBytes);
++  const auto search_span =
++      target_data.subspan(insertion_offset, search_end_offset - insertion_offset);
++  if (std::search(search_span.begin(), search_span.end(),
++                  injection_bytes.begin(),
++                  injection_bytes.end()) != search_span.end()) {
++    return HevcBitstreamInjectionAction::kAlreadyPresent;
++  }
++
++  if (data_size + injection_bytes.size() > target_data.size()) {
++    return HevcBitstreamInjectionAction::kInsufficientCapacity;
++  }
++
++  auto source_data = target_data.first(data_size).subspan(insertion_offset);
++  target_data
++      .subspan(insertion_offset + injection_bytes.size(), source_data.size())
++      .copy_from(source_data);
++  target_data.subspan(insertion_offset, injection_bytes.size())
++      .copy_from_nonoverlapping(base::span<const uint8_t>(injection_bytes));
++  *data_size_in_out = data_size + injection_bytes.size();
++  DVLOGF(1) << "Injected missing coded-buffer bytes at offset "
++            << insertion_offset << " size=" << injection_bytes.size();
++  return HevcBitstreamInjectionAction::kInjected;
++}
++
++// Keep the current HEVC 4:2:0 SHMEM fallback paths at visible size and let any
+ // aligned coded size stay internal to the encoder state instead of
+ // materializing as a larger client frame or input surface.
+ //
+@@ -81,13 +167,26 @@ namespace {
+ // SHMEM path would change the long-standing non-native input contract for other
+ // codecs/profiles too, including how aligned coded size vs. visible size are
+ // reflected in codec-specific crop/header signaling. Keep this narrowly scoped
+-// to the reproduced HEVC Main10 fallback path: Main10 profile, SHMEM input,
+-// and a P010-preferred encoder backend.
+-bool UseVisibleSizeMain10ShmemPath(VideoCodecProfile output_profile,
+-                                   uint32_t preferred_image_fourcc,
+-                                   bool native_input_mode) {
+-  return output_profile == HEVCPROFILE_MAIN10 && !native_input_mode &&
+-         preferred_image_fourcc == VA_FOURCC_P010;
++// to the legacy HEVC Main/Main10 I420 fallback paths: HEVC 4:2:0 profiles,
++// SHMEM input, an NV12/P010-preferred encoder backend, and 8-bit I420 client
++// frames. True NV12/P010 input should stay on the normal aligned coded-size
++// path.
++bool UseVisibleSizeHevc420ShmemPath(VideoCodecProfile output_profile,
++                                    uint32_t preferred_image_fourcc,
++                                    bool native_input_mode,
++                                    VideoPixelFormat input_format) {
++  if (native_input_mode || input_format != PIXEL_FORMAT_I420) {
++    return false;
++  }
++
++  switch (output_profile) {
++    case HEVCPROFILE_MAIN:
++      return preferred_image_fourcc == VA_FOURCC_NV12;
++    case HEVCPROFILE_MAIN10:
++      return preferred_image_fourcc == VA_FOURCC_P010;
++    default:
++      return false;
++  }
+ }
+ 
+ std::optional<VideoPixelFormat> GetNativeInputFormatForProfile(
+@@ -457,6 +556,7 @@ void VaapiVideoEncodeAccelerator::InitializeTask(const Config& config) {
+ 
+   output_codec_ = VideoCodecProfileToVideoCodec(config.output_profile);
+   DCHECK_EQ(IsConfiguredForTesting(), !!vaapi_wrapper_);
++  VaapiWrapper::CodecMode actual_mode = VaapiWrapper::kEncodeConstantBitrate;
+   if (!IsConfiguredForTesting()) {
+     VaapiWrapper::CodecMode mode;
+     switch (output_codec_) {
+@@ -472,21 +572,50 @@ void VaapiVideoEncodeAccelerator::InitializeTask(const Config& config) {
+       case VideoCodec::kVP8:
+       case VideoCodec::kVP9:
+       case VideoCodec::kAV1:
+-      case VideoCodec::kHEVC:
+         mode = VaapiWrapper::kEncodeConstantQuantizationParameter;
+         break;
++      case VideoCodec::kHEVC:
++        // Intel's HEVC VAAPI rate-control path still produces visibly degraded
++        // screen/content quality on this SHMEM pipeline, even after the
++        // bitstream/header issues are fixed. Match the working FFmpeg-style
++        // path more closely by using an explicit QP on Intel VAAPI and avoid
++        // the driver's CBR/VBR decisions for now.
++        if (VaapiWrapper::GetImplementationType() == VAImplementation::kInvalid ||
++            VaapiWrapper::GetImplementationType() ==
++                VAImplementation::kIntelIHD ||
++            VaapiWrapper::GetImplementationType() ==
++                VAImplementation::kIntelI965) {
++          mode = VaapiWrapper::kEncodeConstantQuantizationParameter;
++        } else {
++          mode = config.bitrate.mode() == Bitrate::Mode::kConstant
++                     ? VaapiWrapper::kEncodeConstantBitrate
++                     : VaapiWrapper::kEncodeVariableBitrate;
++        }
++        break;
+       default:
+         NotifyError({EncoderStatus::Codes::kEncoderUnsupportedCodec,
+                      "Unsupported codec: " + GetCodecName(output_codec_)});
+         return;
+     }
+ 
+-    vaapi_wrapper_ =
+-        VaapiWrapper::CreateForVideoCodec(
+-            mode, config.output_profile, EncryptionScheme::kUnencrypted,
+-            base::BindRepeating(&ReportVaapiErrorToUMA,
+-                                "Media.VaapiVideoEncodeAccelerator.VAAPIError"))
+-            .value_or(nullptr);
++    auto create_wrapper_for_mode = [&](VaapiWrapper::CodecMode codec_mode) {
++      return VaapiWrapper::CreateForVideoCodec(
++                 codec_mode, config.output_profile,
++                 EncryptionScheme::kUnencrypted,
++                 base::BindRepeating(
++                     &ReportVaapiErrorToUMA,
++                     "Media.VaapiVideoEncodeAccelerator.VAAPIError"))
++          .value_or(nullptr);
++    };
++
++    vaapi_wrapper_ = create_wrapper_for_mode(mode);
++    if (!vaapi_wrapper_ && output_codec_ == VideoCodec::kHEVC &&
++        mode != VaapiWrapper::kEncodeConstantQuantizationParameter) {
++      DVLOGF(1) << "Falling back to HEVC CQP mode for profile "
++                << GetProfileName(config.output_profile);
++      mode = VaapiWrapper::kEncodeConstantQuantizationParameter;
++      vaapi_wrapper_ = create_wrapper_for_mode(mode);
++    }
+ 
+     if (!vaapi_wrapper_) {
+       NotifyError({EncoderStatus::Codes::kEncoderInitializationError,
+@@ -494,6 +623,13 @@ void VaapiVideoEncodeAccelerator::InitializeTask(const Config& config) {
+                        GetProfileName(config.output_profile)});
+       return;
+     }
++
++    actual_mode = mode;
++    if (output_codec_ == VideoCodec::kHEVC) {
++      DVLOGF(1) << "HEVC VAAPI mode=" << static_cast<int>(actual_mode)
++                << " implementation_type="
++                << static_cast<int>(VaapiWrapper::GetImplementationType());
++    }
+   }
+ 
+   DCHECK_EQ(IsConfiguredForTesting(), !!encoder_);
+@@ -509,6 +645,8 @@ void VaapiVideoEncodeAccelerator::InitializeTask(const Config& config) {
+       base::Unretained(this));
+ 
+   VaapiVideoEncoderDelegate::Config ave_config{};
++  ave_config.uses_constant_quantization_parameter =
++      actual_mode == VaapiWrapper::kEncodeConstantQuantizationParameter;
+   switch (output_codec_) {
+     case VideoCodec::kH264:
+       if (!IsConfiguredForTesting()) {
+@@ -578,8 +716,8 @@ void VaapiVideoEncodeAccelerator::InitializeTask(const Config& config) {
+ 
+   visible_rect_ = gfx::Rect(config.input_visible_size);
+   expected_input_coded_size_ =
+-      UseVisibleSizeMain10ShmemPath(output_profile_, preferred_image_fourcc_,
+-                                    native_input_mode_)
++      UseVisibleSizeHevc420ShmemPath(output_profile_, preferred_image_fourcc_,
++                                     native_input_mode_, config.input_format)
+           ? config.input_visible_size
+           : VideoFrame::DetermineAlignedSize(config.input_format,
+                                              config.input_visible_size);
+@@ -660,6 +798,12 @@ void VaapiVideoEncodeAccelerator::TryToReturnBitstreamBuffers() {
+     if (!pending_encode_results_.front()) {
+       // A null job indicates a flush command.
+       pending_encode_results_.pop();
++      encoder_->ResetEncodingState();
++      if (output_codec_ == VideoCodec::kHEVC) {
++        input_surfaces_.clear();
++        available_encode_surfaces_.clear();
++        encode_surfaces_count_.clear();
++      }
+       DVLOGF(2) << "FlushDone";
+       DCHECK(flush_callback_);
+       child_task_runner_->PostTask(
+@@ -688,18 +832,28 @@ void VaapiVideoEncodeAccelerator::ReturnBitstreamBuffer(
+     const base::UnsafeSharedMemoryRegion& shm_region = buffer.region();
+     DCHECK(shm_region.IsValid());
+     base::WritableSharedMemoryMapping shm_mapping = shm_region.Map();
+-    uint8_t* target_data = shm_mapping.GetMemoryAs<uint8_t>();
++    auto target_data = shm_mapping.GetMemoryAsSpan<uint8_t>();
+     size_t data_size = 0;
+     // vaSyncSurface() is not necessary because GetEncodedChunkSize() has been
+     // called in VaapiVideoEncoderDelegate::Encode().
+     if (!vaapi_wrapper_->DownloadFromVABuffer(
+             encode_result.coded_buffer_id(), /*sync_surface_id=*/std::nullopt,
+-            target_data, shm_mapping.size(), &data_size)) {
++            target_data.data(), target_data.size(), &data_size)) {
+       NotifyError({EncoderStatus::Codes::kEncoderHardwareDriverError,
+                    "Failed downloading coded buffer"});
+       return;
+     }
+     CHECK_EQ(metadata.payload_size_bytes, data_size);
++    const HevcBitstreamInjectionAction injection_action =
++        MaybeInjectExpectedBitstreamBytes(encode_result, target_data,
++                                          &data_size);
++    if (injection_action ==
++        HevcBitstreamInjectionAction::kInsufficientCapacity) {
++      NotifyError({EncoderStatus::Codes::kEncoderHardwareDriverError,
++                   "Failed injecting expected HEVC bitstream bytes"});
++      return;
++    }
++    metadata.payload_size_bytes = data_size;
+     DVLOGF(4) << "Returning bitstream buffer "
+               << (metadata.key_frame ? "(keyframe)" : "")
+               << " id: " << buffer.id() << " size: " << data_size;
+@@ -884,12 +1038,13 @@ bool VaapiVideoEncodeAccelerator::CreateSurfacesForShmemEncoding(
+     return false;
+   }
+ 
+-  // Keep Main10 SHMEM input surfaces at visible size so the aligned coded
+-  // size stays internal to the encoder state instead of materializing as a
+-  // larger render target. Reconstructed surfaces remain aligned.
++  // Keep HEVC Main/Main10 SHMEM fallback input surfaces at visible size so the
++  // aligned coded size stays internal to the encoder state instead of
++  // materializing as a larger render target. Reconstructed surfaces remain
++  // aligned.
+   const gfx::Size& input_surface_size =
+-      UseVisibleSizeMain10ShmemPath(output_profile_, preferred_image_fourcc_,
+-                                    native_input_mode_)
++      UseVisibleSizeHevc420ShmemPath(output_profile_, preferred_image_fourcc_,
++                                     native_input_mode_, frame.format())
+           ? frame.coded_size()
+           : encode_size;
+   *input_surface = GetOrCreateInputSurface(
+@@ -1048,6 +1203,7 @@ std::unique_ptr<VaapiVideoEncoderDelegate::EncodeJob>
+ VaapiVideoEncodeAccelerator::CreateEncodeJob(
+     bool force_keyframe,
+     base::TimeDelta frame_timestamp,
++    const gfx::ColorSpace& color_space,
+     uint8_t spatial_index,
+     bool end_of_picture,
+     VASurfaceID input_surface_id,
+@@ -1101,7 +1257,8 @@ VaapiVideoEncodeAccelerator::CreateEncodeJob(
+ 
+   return std::make_unique<EncodeJob>(
+       force_keyframe, frame_timestamp, spatial_index, end_of_picture,
+-      input_surface_id, std::move(picture), std::move(coded_buffer));
++      input_surface_id, std::move(picture), std::move(coded_buffer),
++      color_space);
+ }
+ 
+ void VaapiVideoEncodeAccelerator::EncodePendingInputs() {
+@@ -1171,6 +1328,7 @@ void VaapiVideoEncodeAccelerator::EncodePendingInputs() {
+       const bool end_of_picture = spatial_idx == num_spatial_layers - 1;
+       std::unique_ptr<EncodeJob> job = CreateEncodeJob(
+           force_key, input_frame.frame->timestamp(),
++          input_frame.frame->ColorSpace(),
+           base::checked_cast<uint8_t>(spatial_idx), end_of_picture,
+           input_surfaces[spatial_idx]->surface().id(),
+           std::move(reconstructed_surfaces[spatial_idx]));
+diff --git a/media/gpu/vaapi/vaapi_video_encode_accelerator.h b/media/gpu/vaapi/vaapi_video_encode_accelerator.h
+index a339976adae65..0a351bfec716e 100644
+--- a/media/gpu/vaapi/vaapi_video_encode_accelerator.h
++++ b/media/gpu/vaapi/vaapi_video_encode_accelerator.h
+@@ -189,6 +189,7 @@ class MEDIA_GPU_EXPORT VaapiVideoEncodeAccelerator
+   std::unique_ptr<EncodeJob> CreateEncodeJob(
+       bool force_keyframe,
+       base::TimeDelta frame_timestamp,
++      const gfx::ColorSpace& color_space,
+       uint8_t spatial_index,
+       bool end_of_picture,
+       VASurfaceID input_surface_id,
+diff --git a/media/gpu/vaapi/vaapi_video_encoder_delegate.cc b/media/gpu/vaapi/vaapi_video_encoder_delegate.cc
+index 9b284e647f4b6..2345728b2b2cf 100644
+--- a/media/gpu/vaapi/vaapi_video_encoder_delegate.cc
++++ b/media/gpu/vaapi/vaapi_video_encoder_delegate.cc
+@@ -26,11 +26,13 @@ VaapiVideoEncoderDelegate::EncodeJob::EncodeJob(
+     bool end_of_picture,
+     VASurfaceID input_surface_id,
+     scoped_refptr<CodecPicture> picture,
+-    std::unique_ptr<ScopedVABuffer> coded_buffer)
++    std::unique_ptr<ScopedVABuffer> coded_buffer,
++    gfx::ColorSpace color_space)
+     : keyframe_(keyframe),
+       timestamp_(timestamp),
+       spatial_index_(spatial_index),
+       end_of_picture_(end_of_picture),
++      color_space_(color_space),
+       input_surface_id_(input_surface_id),
+       picture_(std::move(picture)),
+       coded_buffer_(std::move(coded_buffer)) {
+@@ -43,7 +45,9 @@ VaapiVideoEncoderDelegate::EncodeJob::~EncodeJob() = default;
+ VaapiVideoEncoderDelegate::EncodeResult
+ VaapiVideoEncoderDelegate::EncodeJob::CreateEncodeResult(
+     const BitstreamBufferMetadata& metadata) && {
+-  return EncodeResult(std::move(coded_buffer_), metadata);
++  return EncodeResult(std::move(coded_buffer_), metadata,
++                      std::move(expected_output_prefix_bytes_),
++                      std::move(bitstream_injection_bytes_));
+ }
+ 
+ base::TimeDelta VaapiVideoEncoderDelegate::EncodeJob::timestamp() const {
+@@ -74,8 +78,13 @@ VaapiVideoEncoderDelegate::EncodeJob::picture() const {
+ 
+ VaapiVideoEncoderDelegate::EncodeResult::EncodeResult(
+     std::unique_ptr<ScopedVABuffer> coded_buffer,
+-    const BitstreamBufferMetadata& metadata)
+-    : coded_buffer_(std::move(coded_buffer)), metadata_(metadata) {}
++    const BitstreamBufferMetadata& metadata,
++    std::vector<uint8_t> expected_output_prefix_bytes,
++    std::vector<uint8_t> bitstream_injection_bytes)
++    : coded_buffer_(std::move(coded_buffer)),
++      metadata_(metadata),
++      expected_output_prefix_bytes_(std::move(expected_output_prefix_bytes)),
++      bitstream_injection_bytes_(std::move(bitstream_injection_bytes)) {}
+ 
+ VaapiVideoEncoderDelegate::EncodeResult::~EncodeResult() = default;
+ 
+@@ -114,6 +123,10 @@ void VaapiVideoEncoderDelegate::BitrateControlUpdate(
+   DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
+ }
+ 
++void VaapiVideoEncoderDelegate::ResetEncodingState() {
++  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
++}
++
+ bool VaapiVideoEncoderDelegate::Encode(EncodeJob& encode_job) {
+   TRACE_EVENT0("media,gpu", "VAVEDelegate::Encode");
+   PrepareEncodeJobResult result = PrepareEncodeJob(encode_job);
+diff --git a/media/gpu/vaapi/vaapi_video_encoder_delegate.h b/media/gpu/vaapi/vaapi_video_encoder_delegate.h
+index 7c85b738c88cc..95dd773adaa96 100644
+--- a/media/gpu/vaapi/vaapi_video_encoder_delegate.h
++++ b/media/gpu/vaapi/vaapi_video_encoder_delegate.h
+@@ -8,6 +8,7 @@
+ #include <va/va.h>
+ 
+ #include <optional>
++#include <utility>
+ #include <vector>
+ 
+ #include "base/containers/queue.h"
+@@ -20,6 +21,7 @@
+ #include "media/gpu/vaapi/vaapi_utils.h"
+ #include "media/video/video_encode_accelerator.h"
+ #include "media/video/video_encoder_info.h"
++#include "ui/gfx/color_space.h"
+ #include "ui/gfx/geometry/size.h"
+ 
+ namespace media {
+@@ -46,6 +48,10 @@ class VaapiVideoEncoderDelegate {
+     // frames for both the reference picture list 0 (bottom 16 bits) and the
+     // reference picture list 1 (top 16 bits).
+     size_t max_num_ref_frames;
++
++    // True when the underlying VaapiWrapper was created in CQP mode rather
++    // than a bitrate-controlled mode such as CBR/VBR.
++    bool uses_constant_quantization_parameter = false;
+   };
+ 
+   // EncodeResult owns the necessary resource to keep the encoded buffer. The
+@@ -54,7 +60,9 @@ class VaapiVideoEncoderDelegate {
+   class EncodeResult {
+    public:
+     EncodeResult(std::unique_ptr<ScopedVABuffer> coded_buffer,
+-                 const BitstreamBufferMetadata& metadata);
++                 const BitstreamBufferMetadata& metadata,
++                 std::vector<uint8_t> expected_output_prefix_bytes = {},
++                 std::vector<uint8_t> bitstream_injection_bytes = {});
+     ~EncodeResult();
+     EncodeResult(EncodeResult&&);
+     EncodeResult& operator=(EncodeResult&&);
+@@ -63,11 +71,19 @@ class VaapiVideoEncoderDelegate {
+ 
+     VABufferID coded_buffer_id() const;
+     const BitstreamBufferMetadata& metadata() const;
++    const std::vector<uint8_t>& expected_output_prefix_bytes() const {
++      return expected_output_prefix_bytes_;
++    }
++    const std::vector<uint8_t>& bitstream_injection_bytes() const {
++      return bitstream_injection_bytes_;
++    }
+     bool IsFrameDropped() const { return !coded_buffer_; }
+ 
+    private:
+     std::unique_ptr<ScopedVABuffer> coded_buffer_;
+     BitstreamBufferMetadata metadata_;
++    std::vector<uint8_t> expected_output_prefix_bytes_;
++    std::vector<uint8_t> bitstream_injection_bytes_;
+   };
+ 
+   // An abstraction of an encode job for one frame. Parameters required for an
+@@ -90,7 +106,8 @@ class VaapiVideoEncoderDelegate {
+               bool end_of_picture,
+               VASurfaceID input_surface_id,
+               scoped_refptr<CodecPicture> picture,
+-              std::unique_ptr<ScopedVABuffer> coded_buffer);
++              std::unique_ptr<ScopedVABuffer> coded_buffer,
++              gfx::ColorSpace color_space = gfx::ColorSpace());
+ 
+     EncodeJob(const EncodeJob&) = delete;
+     EncodeJob& operator=(const EncodeJob&) = delete;
+@@ -113,16 +130,25 @@ class VaapiVideoEncoderDelegate {
+     void DropFrame() { coded_buffer_.reset(); }
+     bool IsFrameDropped() const { return !coded_buffer_; }
+ 
++    void SetBitstreamInjection(std::vector<uint8_t> expected_output_prefix_bytes,
++                               std::vector<uint8_t> bitstream_injection_bytes) {
++      expected_output_prefix_bytes_ =
++          std::move(expected_output_prefix_bytes);
++      bitstream_injection_bytes_ = std::move(bitstream_injection_bytes);
++    }
++
+     base::TimeDelta timestamp() const;
+     uint8_t spatial_index() const;
+     // This is a frame in the top spatial layer.
+     bool end_of_picture() const;
+     uint8_t spatial_idx() const;
++    const gfx::ColorSpace& color_space() const { return color_space_; }
+ 
+     // VA-API specific methods.
+     VABufferID coded_buffer_id() const;
+     VASurfaceID input_surface_id() const;
+     const scoped_refptr<CodecPicture>& picture() const;
++
+    private:
+     // True if this job is to produce a keyframe.
+     bool keyframe_;
+@@ -130,6 +156,7 @@ class VaapiVideoEncoderDelegate {
+     const base::TimeDelta timestamp_;
+     const uint8_t spatial_index_ = 0;
+     const bool end_of_picture_;
++    const gfx::ColorSpace color_space_;
+ 
+     // VA-API specific members.
+     // Input surface ID and size for video frame data or scaled data.
+@@ -137,6 +164,8 @@ class VaapiVideoEncoderDelegate {
+     const scoped_refptr<CodecPicture> picture_;
+     // Buffer that will contain the output bitstream data for this frame.
+     std::unique_ptr<ScopedVABuffer> coded_buffer_;
++    std::vector<uint8_t> expected_output_prefix_bytes_;
++    std::vector<uint8_t> bitstream_injection_bytes_;
+   };
+ 
+   VaapiVideoEncoderDelegate(scoped_refptr<VaapiWrapper> vaapi_wrapper,
+@@ -155,6 +184,10 @@ class VaapiVideoEncoderDelegate {
+   virtual bool UpdateRates(const VideoBitrateAllocation& bitrate_allocation,
+                            uint32_t framerate) = 0;
+ 
++  // Resets codec-specific reference/frame state so the next submitted frame
++  // starts a fresh stream segment after a completed flush.
++  virtual void ResetEncodingState();
++
+   // Returns coded size for the input buffers required to encode, in pixels;
+   // typically visible size adjusted to match codec alignment requirements.
+   virtual gfx::Size GetCodedSize() const = 0;

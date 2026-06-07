@@ -1,0 +1,1131 @@
+From badb2823707dcb09b547e367a6b5e9a904150b69 Mon Sep 17 00:00:00 2001
+From: Jung-Kwang Lee <ntoskrnl7@gmail.com>
+Date: Sun, 17 May 2026 01:53:06 +0900
+Subject: feat: add initial empty frame preload option
+
+---
+ .../structures/preload-script-registration.md |   3 +
+ docs/api/structures/preload-script.md         |   3 +
+ lib/browser/rpc-server.ts                     |  26 +-
+ lib/preload_realm/init.ts                     |   4 +-
+ lib/renderer/init.ts                          |   7 +-
+ lib/sandboxed_renderer/init.ts                |   5 +-
+ script/fix-preload-typescript-definitions.mjs |  15 +-
+ shell/browser/api/electron_api_session.cc     |   8 +
+ shell/browser/electron_browser_client.cc      |   4 +
+ shell/browser/preload_script.cc               |  11 +
+ shell/browser/preload_script.h                |   2 +
+ shell/browser/session_preferences.cc          |  11 +
+ shell/browser/session_preferences.h           |   1 +
+ shell/common/options_switches.h               |   5 +
+ .../electron_render_frame_observer.cc         | 131 +++++-
+ .../renderer/electron_render_frame_observer.h |   3 +
+ shell/renderer/electron_renderer_client.cc    |   3 +-
+ .../electron_sandboxed_renderer_client.cc     |   3 +-
+ spec/api-session-spec.ts                      | 411 +++++++++++++++++-
+ spec/fixtures/preload-frame-order.js          |  14 +
+ spec/ts-smoke/electron/main.ts                |  16 +-
+ 21 files changed, 645 insertions(+), 41 deletions(-)
+ create mode 100644 spec/fixtures/preload-frame-order.js
+
+diff --git a/docs/api/structures/preload-script-registration.md b/docs/api/structures/preload-script-registration.md
+index ced53203a4..2f7403fce3 100644
+--- a/docs/api/structures/preload-script-registration.md
++++ b/docs/api/structures/preload-script-registration.md
+@@ -8,5 +8,8 @@
+   `type` is `frame`. When omitted, Electron preserves the existing frame preload
+   behavior: main frame injection, plus subframe injection when
+   `nodeIntegrationInSubFrames` enables subframe preloads.
++* `runInInitialEmptyDocument` boolean (optional) - Whether to run this frame
++  preload in an iframe's initial empty document before its real navigation
++  commits. This is only supported when `type` is `frame`. Defaults to `false`.
+ * `id` string (optional) - Unique ID of preload script. Defaults to a random UUID.
+ * `filePath` string - Path of the script file. Must be an absolute path.
+diff --git a/docs/api/structures/preload-script.md b/docs/api/structures/preload-script.md
+index a7f2d63b9b..79423133e6 100644
+--- a/docs/api/structures/preload-script.md
++++ b/docs/api/structures/preload-script.md
+@@ -6,5 +6,8 @@
+ * `scope` string (optional) - Frame scope where the preload script will be
+   executed. Can be `main`, `sub-frames` or `all`. This is only set when `type`
+   is `frame`.
++* `runInInitialEmptyDocument` boolean (optional) - Whether this frame preload
++  runs in an iframe's initial empty document before its real navigation commits.
++  This is only set when `type` is `frame` and the option is enabled.
+ * `id` string - Unique ID of preload script.
+ * `filePath` string - Path of the script file. Must be an absolute path.
+diff --git a/lib/browser/rpc-server.ts b/lib/browser/rpc-server.ts
+index 73276cf453..f34d62fefd 100644
+--- a/lib/browser/rpc-server.ts
++++ b/lib/browser/rpc-server.ts
+@@ -49,13 +49,14 @@ ipcMainUtils.handleSync(IPC_MESSAGES.BROWSER_CLIPBOARD_SYNC, function (event, me
+   return (clipboard as any)[method](...args);
+ });
+
+-const getPreloadScriptsFromEvent = (event: ElectronInternal.IpcMainInternalEvent) => {
++const getPreloadScriptsFromEvent = (event: ElectronInternal.IpcMainInternalEvent, isInitialEmptyDocument = false) => {
+   const session: Electron.Session = event.type === 'service-worker' ? event.session : event.sender.session;
+   let preloadScripts = session.getPreloadScripts();
+
+   if (event.type === 'frame') {
+     const senderFrame = event.senderFrame;
+     const isMainFrame = senderFrame ? senderFrame.parent === null : true;
++    const isInitialEmptySubframe = isInitialEmptyDocument && !isMainFrame;
+     const lastWebPreferences = event.sender.getLastWebPreferences();
+     const allowLegacySubFramePreload = Boolean(lastWebPreferences?.nodeIntegrationInSubFrames);
+     const matchesFrameScope = (script: Extract<Electron.PreloadScript, { type: 'frame' }>) => {
+@@ -64,18 +65,23 @@ const getPreloadScriptsFromEvent = (event: ElectronInternal.IpcMainInternalEvent
+       }
+
+       const scope = script.scope;
+-      return scope === 'all' ||
+-        (scope === 'main' && isMainFrame) ||
+-        (scope === 'sub-frames' && !isMainFrame);
++      return scope === 'all' || (scope === 'main' && isMainFrame) || (scope === 'sub-frames' && !isMainFrame);
+     };
++    const matchesInitialEmptyDocument = (script: Extract<Electron.PreloadScript, { type: 'frame' }>) =>
++      !isInitialEmptySubframe || script.runInInitialEmptyDocument === true;
+
+     preloadScripts = preloadScripts.filter(
+       (script): script is Extract<Electron.PreloadScript, { type: 'frame' }> =>
+-        script.type === 'frame' && matchesFrameScope(script)
++        script.type === 'frame' && matchesFrameScope(script) && matchesInitialEmptyDocument(script)
+     );
+
+     const webPrefPreload = event.sender._getPreloadScript();
+-    if (webPrefPreload && webPrefPreload.type === 'frame' && matchesFrameScope(webPrefPreload)) {
++    if (
++      webPrefPreload &&
++      webPrefPreload.type === 'frame' &&
++      matchesFrameScope(webPrefPreload) &&
++      matchesInitialEmptyDocument(webPrefPreload)
++    ) {
+       preloadScripts.push(webPrefPreload);
+     }
+   } else if (event.type === 'service-worker') {
+@@ -106,8 +112,8 @@ const readPreloadScript = async function (script: Electron.PreloadScript): Promi
+   };
+ };
+
+-ipcMainUtils.handleSync(IPC_MESSAGES.BROWSER_SANDBOX_LOAD, async function (event) {
+-  const preloadScripts = getPreloadScriptsFromEvent(event);
++ipcMainUtils.handleSync(IPC_MESSAGES.BROWSER_SANDBOX_LOAD, async function (event, isInitialEmptyDocument = false) {
++  const preloadScripts = getPreloadScriptsFromEvent(event, isInitialEmptyDocument);
+   return {
+     preloadScripts: await Promise.all(preloadScripts.map(readPreloadScript)),
+     process: {
+@@ -121,8 +127,8 @@ ipcMainUtils.handleSync(IPC_MESSAGES.BROWSER_SANDBOX_LOAD, async function (event
+   };
+ });
+
+-ipcMainUtils.handleSync(IPC_MESSAGES.BROWSER_NONSANDBOX_LOAD, function (event) {
+-  const preloadScripts = getPreloadScriptsFromEvent(event);
++ipcMainUtils.handleSync(IPC_MESSAGES.BROWSER_NONSANDBOX_LOAD, function (event, isInitialEmptyDocument = false) {
++  const preloadScripts = getPreloadScriptsFromEvent(event, isInitialEmptyDocument);
+   return { preloadPaths: preloadScripts.map((script) => script.filePath) };
+ });
+
+diff --git a/lib/preload_realm/init.ts b/lib/preload_realm/init.ts
+index df44043975..1a3a9c5092 100644
+--- a/lib/preload_realm/init.ts
++++ b/lib/preload_realm/init.ts
+@@ -17,10 +17,12 @@ declare const binding: {
+ const ipcRendererUtils =
+   require('@electron/internal/renderer/ipc-renderer-internal-utils') as typeof ipcRendererUtilsModule;
+
++const v8Util = process._linkedBinding('electron_common_v8_util');
++const isInitialEmptyDocument = Boolean(v8Util.getHiddenValue(globalThis, 'isInitialEmptyDocument'));
+ const { preloadScripts, process: processProps } = ipcRendererUtils.invokeSync<{
+   preloadScripts: ElectronInternal.PreloadScript[];
+   process: NodeJS.Process;
+-}>(IPC_MESSAGES.BROWSER_SANDBOX_LOAD);
++}>(IPC_MESSAGES.BROWSER_SANDBOX_LOAD, isInitialEmptyDocument);
+
+ const electron = require('electron');
+
+diff --git a/lib/renderer/init.ts b/lib/renderer/init.ts
+index 6e9a2bb03c..8695b315cc 100644
+--- a/lib/renderer/init.ts
++++ b/lib/renderer/init.ts
+@@ -141,7 +141,12 @@ if (shouldExposeNodeGlobals) {
+ const { appCodeLoaded } = process;
+ delete process.appCodeLoaded;
+
+-const { preloadPaths } = ipcRendererUtils.invokeSync<{ preloadPaths: string[] }>(IPC_MESSAGES.BROWSER_NONSANDBOX_LOAD);
++const v8Util = process._linkedBinding('electron_common_v8_util');
++const isInitialEmptyDocument = Boolean(v8Util.getHiddenValue(globalThis, 'isInitialEmptyDocument'));
++const { preloadPaths } = ipcRendererUtils.invokeSync<{ preloadPaths: string[] }>(
++  IPC_MESSAGES.BROWSER_NONSANDBOX_LOAD,
++  isInitialEmptyDocument
++);
+ const cjsPreloads = preloadPaths.filter((p) => path.extname(p) !== '.mjs');
+ const esmPreloads = preloadPaths.filter((p) => path.extname(p) === '.mjs');
+ if (cjsPreloads.length) {
+diff --git a/lib/sandboxed_renderer/init.ts b/lib/sandboxed_renderer/init.ts
+index 14998ecb27..0020d612a6 100644
+--- a/lib/sandboxed_renderer/init.ts
++++ b/lib/sandboxed_renderer/init.ts
+@@ -17,10 +17,12 @@ declare const binding: {
+ const ipcRendererUtils =
+   require('@electron/internal/renderer/ipc-renderer-internal-utils') as typeof ipcRendererUtilsModule;
+
++const v8Util = process._linkedBinding('electron_common_v8_util');
++const isInitialEmptyDocument = Boolean(v8Util.getHiddenValue(globalThis, 'isInitialEmptyDocument'));
+ const { preloadScripts, process: processProps } = ipcRendererUtils.invokeSync<{
+   preloadScripts: ElectronInternal.PreloadScript[];
+   process: NodeJS.Process;
+-}>(IPC_MESSAGES.BROWSER_SANDBOX_LOAD);
++}>(IPC_MESSAGES.BROWSER_SANDBOX_LOAD, isInitialEmptyDocument);
+
+ const electron = require('electron');
+
+@@ -42,7 +44,6 @@ const loadableModules = new Map<string, Function>([
+ const preloadProcess = createPreloadProcessObject();
+
+ // InvokeEmitProcessEvent in ElectronSandboxedRendererClient will look for this
+-const v8Util = process._linkedBinding('electron_common_v8_util');
+ v8Util.setHiddenValue(global, 'emit-process-event', (event: string) => {
+   (process as events.EventEmitter).emit(event);
+   (preloadProcess as events.EventEmitter).emit(event);
+diff --git a/script/fix-preload-typescript-definitions.mjs b/script/fix-preload-typescript-definitions.mjs
+index c231da7cca..3527a0334e 100644
+--- a/script/fix-preload-typescript-definitions.mjs
++++ b/script/fix-preload-typescript-definitions.mjs
+@@ -24,6 +24,11 @@ const preloadScript = `  type PreloadScript = ({
+      * \`type\` is \`frame\`.
+      */
+     scope?: ${frameScope};
++    /**
++     * Whether to run this frame preload in an iframe's initial empty document
++     * before its real navigation commits.
++     */
++    runInInitialEmptyDocument?: boolean;
+     /**
+      * Context type where the preload script will be executed.
+      */
+@@ -65,6 +70,11 @@ const preloadScriptRegistration = `  type PreloadScriptRegistration = ({
+      * \`nodeIntegrationInSubFrames\` enables subframe preloads.
+      */
+     scope?: ${frameScope};
++    /**
++     * Whether to run this frame preload in an iframe's initial empty document
++     * before its real navigation commits. Defaults to false.
++     */
++    runInInitialEmptyDocument?: boolean;
+     /**
+      * Context type where the preload script will be executed.
+      */
+@@ -93,8 +103,9 @@ function replaceGeneratedInterface(source, name, replacement) {
+     return source.replace(pattern, replacement);
+   }
+
+-  if (source.includes(`  type ${name} = (`)) {
+-    return source;
++  const typePattern = new RegExp(String.raw`^  type ${name} = \(\{[\s\S]*?^  \}\);`, 'm');
++  if (typePattern.test(source)) {
++    return source.replace(typePattern, replacement);
+   }
+
+   throw new Error(`Could not find generated ${name} interface in ${definitionsPath}`);
+diff --git a/shell/browser/api/electron_api_session.cc b/shell/browser/api/electron_api_session.cc
+index 7d30d4934b..d716ecdee9 100644
+--- a/shell/browser/api/electron_api_session.cc
++++ b/shell/browser/api/electron_api_session.cc
+@@ -1135,6 +1135,14 @@ std::string Session::RegisterPreloadScript(
+     return "";
+   }
+
++  if (new_preload_script.has_run_in_initial_empty_document &&
++      new_preload_script.script_type != PreloadScript::ScriptType::kWebFrame) {
++    thrower.ThrowError(
++        "Preload script runInInitialEmptyDocument is only supported for frame "
++        "type");
++    return "";
++  }
++
+   preload_scripts.push_back(new_preload_script);
+   return new_preload_script.id;
+ }
+diff --git a/shell/browser/electron_browser_client.cc b/shell/browser/electron_browser_client.cc
+index 1df769422c..3bb1ac77e5 100644
+--- a/shell/browser/electron_browser_client.cc
++++ b/shell/browser/electron_browser_client.cc
+@@ -699,6 +699,10 @@ void ElectronBrowserClient::AppendExtraCommandLineSwitches(
+       if (session_prefs->HasFramePreloadScriptInSubFrames()) {
+         command_line->AppendSwitch(switches::kFramePreloadInSubFrames);
+       }
++      if (session_prefs->HasFramePreloadScriptInInitialEmptyDocuments()) {
++        command_line->AppendSwitch(
++            switches::kFramePreloadInInitialEmptyDocuments);
++      }
+     }
+   }
+ }
+diff --git a/shell/browser/preload_script.cc b/shell/browser/preload_script.cc
+index 52234d8f76..f28c0278e8 100644
+--- a/shell/browser/preload_script.cc
++++ b/shell/browser/preload_script.cc
+@@ -100,6 +100,10 @@ v8::Local<v8::Value> Converter<PreloadScript>::ToV8(
+   if (script.script_type == PreloadScript::ScriptType::kWebFrame &&
+       script.has_frame_scope)
+     dict.Set("scope", script.frame_scope);
++  if (script.script_type == PreloadScript::ScriptType::kWebFrame &&
++      script.run_in_initial_empty_document) {
++    dict.Set("runInInitialEmptyDocument", true);
++  }
+   return ConvertToV8(isolate, dict).As<v8::Object>();
+ }
+
+@@ -125,6 +129,13 @@ bool Converter<PreloadScript>::FromV8(v8::Isolate* isolate,
+   if (out->has_frame_scope && !options.Get("scope", &out->frame_scope)) {
+     return false;
+   }
++  out->has_run_in_initial_empty_document =
++      options.Has("runInInitialEmptyDocument");
++  if (out->has_run_in_initial_empty_document &&
++      !options.Get("runInInitialEmptyDocument",
++                   &out->run_in_initial_empty_document)) {
++    return false;
++  }
+   if (std::string id; options.Get("id", &id)) {
+     out->id = id;
+   } else {
+diff --git a/shell/browser/preload_script.h b/shell/browser/preload_script.h
+index 56f616a852..4238b4ab4c 100644
+--- a/shell/browser/preload_script.h
++++ b/shell/browser/preload_script.h
+@@ -36,6 +36,8 @@ struct PreloadScript {
+   base::FilePath file_path;
+   FrameScope frame_scope = FrameScope::kMain;
+   bool has_frame_scope = false;
++  bool run_in_initial_empty_document = false;
++  bool has_run_in_initial_empty_document = false;
+
+   // If set, use the deprecated validation behavior of Session.setPreloads
+   bool deprecated = false;
+diff --git a/shell/browser/session_preferences.cc b/shell/browser/session_preferences.cc
+index a52d79ae0c..e3d3a7cca2 100644
+--- a/shell/browser/session_preferences.cc
++++ b/shell/browser/session_preferences.cc
+@@ -50,4 +50,15 @@ bool SessionPreferences::HasFramePreloadScriptInSubFrames() {
+   return it != preloads.end();
+ }
+
++bool SessionPreferences::HasFramePreloadScriptInInitialEmptyDocuments() {
++  const auto& preloads = preload_scripts();
++  auto it = std::find_if(
++      preloads.begin(), preloads.end(), [](const PreloadScript& script) {
++        return script.script_type == PreloadScript::ScriptType::kWebFrame &&
++               script.run_in_initial_empty_document && script.has_frame_scope &&
++               script.frame_scope != PreloadScript::FrameScope::kMain;
++      });
++  return it != preloads.end();
++}
++
+ }  // namespace electron
+diff --git a/shell/browser/session_preferences.h b/shell/browser/session_preferences.h
+index 65d378db7f..5001019122 100644
+--- a/shell/browser/session_preferences.h
++++ b/shell/browser/session_preferences.h
+@@ -30,6 +30,7 @@ class SessionPreferences : public base::SupportsUserData::Data {
+
+   bool HasServiceWorkerPreloadScript();
+   bool HasFramePreloadScriptInSubFrames();
++  bool HasFramePreloadScriptInInitialEmptyDocuments();
+
+  private:
+   SessionPreferences();
+diff --git a/shell/common/options_switches.h b/shell/common/options_switches.h
+index fa219441ad..772d08153f 100644
+--- a/shell/common/options_switches.h
++++ b/shell/common/options_switches.h
+@@ -319,6 +319,11 @@ inline constexpr base::cstring_view kServiceWorkerPreload =
+ inline constexpr base::cstring_view kFramePreloadInSubFrames =
+     "frame-preload-in-sub-frames";
+
++// Indicates that matching frame preloads should run in initial empty subframe
++// documents before the frame's real navigation commits.
++inline constexpr base::cstring_view kFramePreloadInInitialEmptyDocuments =
++    "frame-preload-in-initial-empty-documents";
++
+ // If set, flag node::ProcessInitializationFlags::kNoStdioInitialization would
+ // be set for node initialization.
+ inline constexpr base::cstring_view kNoStdioInit = "no-stdio-init";
+diff --git a/shell/renderer/electron_render_frame_observer.cc b/shell/renderer/electron_render_frame_observer.cc
+index f13ad4ce5c..cb6ba6e8bd 100644
+--- a/shell/renderer/electron_render_frame_observer.cc
++++ b/shell/renderer/electron_render_frame_observer.cc
+@@ -8,6 +8,7 @@
+ #include "base/memory/ref_counted_memory.h"
+ #include "base/trace_event/trace_event.h"
+ #include "content/public/renderer/render_frame.h"
++#include "gin/converter.h"
+ #include "net/base/net_module.h"
+ #include "net/grit/net_resources.h"
+ #include "services/service_manager/public/cpp/interface_provider.h"
+@@ -27,7 +28,10 @@
+ #include "third_party/blink/public/web/web_local_frame.h"
+ #include "third_party/blink/public/web/web_script_source.h"
+ #include "third_party/blink/public/web/web_view.h"
++#include "third_party/blink/renderer/bindings/core/v8/local_window_proxy.h"  // nogncheck
++#include "third_party/blink/renderer/bindings/core/v8/window_proxy_manager.h"  // nogncheck
+ #include "third_party/blink/renderer/core/frame/web_local_frame_impl.h"  // nogncheck
++#include "third_party/blink/renderer/platform/bindings/dom_wrapper_world.h"  // nogncheck
+ #include "ui/base/resource/resource_bundle.h"
+
+ namespace electron {
+@@ -50,6 +54,35 @@ scoped_refptr<base::RefCountedMemory> NetResourceProvider(int key) {
+   return world_id == WorldIDs::ISOLATED_WORLD_ID;
+ }
+
++void SetIsInitialEmptyDocument(v8::Local<v8::Context> context,
++                               bool is_initial_empty_document) {
++  v8::Isolate* isolate = v8::Isolate::GetCurrent();
++  auto private_key = v8::Private::ForApi(
++      isolate, gin::StringToV8(isolate, "isInitialEmptyDocument"));
++  context->Global()
++      ->SetPrivate(context, private_key,
++                   v8::Boolean::New(isolate, is_initial_empty_document))
++      .ToChecked();
++}
++
++v8::Local<v8::Context> GetInitializedScriptContext(
++    blink::WebLocalFrameImpl* web_frame,
++    v8::Isolate* isolate,
++    int world_id) {
++  blink::DOMWrapperWorld* world = nullptr;
++  if (world_id == WorldIDs::MAIN_WORLD_ID) {
++    world = &blink::DOMWrapperWorld::MainWorld(isolate);
++  } else {
++    world = blink::DOMWrapperWorld::EnsureIsolatedWorld(isolate, world_id);
++  }
++
++  auto* window_proxy = static_cast<blink::LocalWindowProxy*>(
++      web_frame->GetFrame()
++          ->GetWindowProxyManager()
++          ->GetWindowProxyMaybeUninitialized(*world));
++  return window_proxy->ContextIfInitialized();
++}
++
+ }  // namespace
+
+ ElectronRenderFrameObserver::ElectronRenderFrameObserver(
+@@ -62,6 +95,62 @@ ElectronRenderFrameObserver::ElectronRenderFrameObserver(
+   net::NetModule::SetResourceProvider(NetResourceProvider);
+ }
+
++void ElectronRenderFrameObserver::MaybeInitializeInitialEmptyDocument() {
++  auto* web_frame =
++      static_cast<blink::WebLocalFrameImpl*>(render_frame_->GetWebFrame());
++  if (render_frame_->IsMainFrame() || !web_frame->IsOnInitialEmptyDocument())
++    return;
++
++  const auto prefs = render_frame_->GetBlinkPreferences();
++  if (prefs.node_integration_in_sub_frames)
++    return;
++
++  auto* command_line = base::CommandLine::ForCurrentProcess();
++  if (!command_line->HasSwitch(switches::kFramePreloadInSubFrames) ||
++      !command_line->HasSwitch(switches::kFramePreloadInInitialEmptyDocuments))
++    return;
++
++  has_delayed_node_initialization_ = true;
++
++  v8::Isolate* isolate = web_frame->GetAgentGroupScheduler()->Isolate();
++  v8::HandleScope handle_scope{isolate};
++
++  if (prefs.context_isolation) {
++    web_frame->ExecuteScript(blink::WebScriptSource("void 0"));
++    if (initialized_initial_empty_document_)
++      return;
++
++    CreateIsolatedWorldContext();
++    if (initialized_initial_empty_document_)
++      return;
++
++    v8::Local<v8::Context> context =
++        GetInitializedScriptContext(web_frame, isolate,
++                                    WorldIDs::ISOLATED_WORLD_ID);
++    if (context.IsEmpty())
++      return;
++
++    v8::MicrotasksScope microtasks_scope(
++        context, v8::MicrotasksScope::kDoNotRunMicrotasks);
++    v8::Context::Scope context_scope(context);
++    DidInstallConditionalFeatures(context, WorldIDs::ISOLATED_WORLD_ID);
++  } else {
++    web_frame->ExecuteScript(blink::WebScriptSource("void 0"));
++    if (initialized_initial_empty_document_)
++      return;
++
++    v8::Local<v8::Context> context =
++        GetInitializedScriptContext(web_frame, isolate, WorldIDs::MAIN_WORLD_ID);
++    if (context.IsEmpty())
++      return;
++
++    v8::MicrotasksScope microtasks_scope(
++        context, v8::MicrotasksScope::kDoNotRunMicrotasks);
++    v8::Context::Scope context_scope(context);
++    DidInstallConditionalFeatures(context, WorldIDs::MAIN_WORLD_ID);
++  }
++}
++
+ void ElectronRenderFrameObserver::DidClearWindowObject() {
+   // Do a delayed Node.js initialization for child window.
+   // Check DidInstallConditionalFeatures below for the background.
+@@ -104,20 +193,32 @@ void ElectronRenderFrameObserver::DidInstallConditionalFeatures(
+   bool allow_preload_in_sub_frames =
+       base::CommandLine::ForCurrentProcess()->HasSwitch(
+           switches::kFramePreloadInSubFrames);
++  bool allow_preload_in_initial_empty_documents =
++      base::CommandLine::ForCurrentProcess()->HasSwitch(
++          switches::kFramePreloadInInitialEmptyDocuments);
++  bool is_initial_empty_document = web_frame->IsOnInitialEmptyDocument();
+
+-  // Browser-side frame-created handlers can synchronously execute JavaScript in
+-  // a newly-created same-origin subframe. That creates a main-world context for
+-  // the initial empty document before the iframe's real navigation commits. Do
+-  // not consume Electron's subframe preload or Node initialization on that
+-  // throwaway document; DidClearWindowObject will retry once the frame has a
+-  // real document.
+-  if (!render_frame_->IsMainFrame() && web_frame->IsOnInitialEmptyDocument() &&
+-      (allow_node_in_sub_frames || allow_preload_in_sub_frames)) {
+-    has_delayed_node_initialization_ = true;
+-    return;
++  bool should_initialize_real_subframe_document = false;
++
++  if (!render_frame_->IsMainFrame() && is_initial_empty_document) {
++    // Browser-side frame-created handlers can synchronously execute JavaScript
++    // in a newly-created same-origin subframe. That creates a main-world
++    // context for the initial empty document before the iframe's real
++    // navigation commits. Keep the legacy default of waiting for the real
++    // document, unless a scoped frame preload explicitly opts into initial
++    // empty subframe documents. Opted-in preloads still get another
++    // initialization pass when the real document commits.
++    if (allow_node_in_sub_frames ||
++        (allow_preload_in_sub_frames &&
++         !allow_preload_in_initial_empty_documents)) {
++      has_delayed_node_initialization_ = true;
++      return;
++    }
++    should_initialize_real_subframe_document =
++        allow_preload_in_sub_frames && allow_preload_in_initial_empty_documents;
+   }
+
+-  if (web_frame->Opener() && web_frame->IsOnInitialEmptyDocument()) {
++  if (web_frame->Opener() && is_initial_empty_document) {
+     // FIXME(zcbenz): Chromium does not do any browser side navigation for
+     // window.open('about:blank'), so there is no way to override WebPreferences
+     // of it. We should not delay Node.js initialization as there will be no
+@@ -130,14 +231,18 @@ void ElectronRenderFrameObserver::DidInstallConditionalFeatures(
+       return;
+     }
+   }
+-  has_delayed_node_initialization_ = false;
++  has_delayed_node_initialization_ = should_initialize_real_subframe_document;
++  SetIsInitialEmptyDocument(context, is_initial_empty_document);
+
+   v8::MicrotasksScope microtasks_scope(
+       context, v8::MicrotasksScope::kDoNotRunMicrotasks);
+
+   v8::Isolate* const isolate = v8::Isolate::GetCurrent();
+-  if (ShouldNotifyClient(world_id))
++  if (ShouldNotifyClient(world_id)) {
++    if (should_initialize_real_subframe_document)
++      initialized_initial_empty_document_ = true;
+     renderer_client_->DidCreateScriptContext(isolate, context, render_frame_);
++  }
+
+   bool use_context_isolation = prefs.context_isolation;
+   // This logic matches the EXPLAINED logic in electron_renderer_client.cc
+diff --git a/shell/renderer/electron_render_frame_observer.h b/shell/renderer/electron_render_frame_observer.h
+index 54582eb68c..02614d8847 100644
+--- a/shell/renderer/electron_render_frame_observer.h
++++ b/shell/renderer/electron_render_frame_observer.h
+@@ -25,6 +25,8 @@ class ElectronRenderFrameObserver : private content::RenderFrameObserver {
+   ElectronRenderFrameObserver& operator=(const ElectronRenderFrameObserver&) =
+       delete;
+
++  void MaybeInitializeInitialEmptyDocument();
++
+  private:
+   // content::RenderFrameObserver:
+   void DidClearWindowObject() override;
+@@ -41,6 +43,7 @@ class ElectronRenderFrameObserver : private content::RenderFrameObserver {
+   void CreateIsolatedWorldContext();
+
+   bool has_delayed_node_initialization_ = false;
++  bool initialized_initial_empty_document_ = false;
+   raw_ptr<content::RenderFrame> render_frame_;
+   raw_ptr<RendererClientBase> renderer_client_;
+ };
+diff --git a/shell/renderer/electron_renderer_client.cc b/shell/renderer/electron_renderer_client.cc
+index f52dadf9a1..1ff5c485cc 100644
+--- a/shell/renderer/electron_renderer_client.cc
++++ b/shell/renderer/electron_renderer_client.cc
+@@ -52,8 +52,9 @@ void ElectronRendererClient::PostIOThreadCreated(
+
+ void ElectronRendererClient::RenderFrameCreated(
+     content::RenderFrame* render_frame) {
+-  new ElectronRenderFrameObserver(render_frame, this);
++  auto* observer = new ElectronRenderFrameObserver(render_frame, this);
+   RendererClientBase::RenderFrameCreated(render_frame);
++  observer->MaybeInitializeInitialEmptyDocument();
+ }
+
+ void ElectronRendererClient::RunScriptsAtDocumentStart(
+diff --git a/shell/renderer/electron_sandboxed_renderer_client.cc b/shell/renderer/electron_sandboxed_renderer_client.cc
+index 242c8cd334..31ea086820 100644
+--- a/shell/renderer/electron_sandboxed_renderer_client.cc
++++ b/shell/renderer/electron_sandboxed_renderer_client.cc
+@@ -92,8 +92,9 @@ void ElectronSandboxedRendererClient::InitializeBindings(
+
+ void ElectronSandboxedRendererClient::RenderFrameCreated(
+     content::RenderFrame* render_frame) {
+-  new ElectronRenderFrameObserver(render_frame, this);
++  auto* observer = new ElectronRenderFrameObserver(render_frame, this);
+   RendererClientBase::RenderFrameCreated(render_frame);
++  observer->MaybeInitializeInitialEmptyDocument();
+ }
+
+ void ElectronSandboxedRendererClient::RunScriptsAtDocumentStart(
+diff --git a/spec/api-session-spec.ts b/spec/api-session-spec.ts
+index 2105d02bdc..63052d826b 100644
+--- a/spec/api-session-spec.ts
++++ b/spec/api-session-spec.ts
+@@ -2143,18 +2143,21 @@ describe('session module', () => {
+     const dedicatedWorker = path.join(fixtures, 'workers', 'plain-preload-worker.js');
+     const sharedWorker = path.join(fixtures, 'workers', 'plain-preload-shared-worker.js');
+     const frameScopePreload = path.join(fixtures, 'preload-frame-scope.js');
++    const frameOrderPreload = path.join(fixtures, 'preload-frame-order.js');
+
+     const collectFramePreloadEvents = async (
+       scope?: 'main' | 'sub-frames' | 'all',
+       nodeIntegrationInSubFrames = false,
+-      setupEarlyFrameAccess?: (w: BrowserWindow) => Promise<void> | void
++      setupEarlyFrameAccess?: (w: BrowserWindow) => Promise<void> | void,
++      runInInitialEmptyDocument = false
+     ) => {
+       const partition = `frame-preload-${scope ?? 'default'}-${crypto.randomUUID()}`;
+       const ses = session.fromPartition(partition);
+       ses.registerPreloadScript({
+         type: 'frame',
+         filePath: frameScopePreload,
+-        ...(scope ? { scope } : {})
++        ...(scope ? { scope } : {}),
++        ...(runInInitialEmptyDocument ? { runInInitialEmptyDocument } : {})
+       });
+
+       const w = new BrowserWindow({
+@@ -2188,7 +2191,14 @@ describe('session module', () => {
+             }
+           })
+         `);
+-        const expectedEventCount = scope === 'all' || (!scope && nodeIntegrationInSubFrames) ? 2 : 1;
++        const expectsInitialEmptySubframe =
++          runInInitialEmptyDocument && Boolean(setupEarlyFrameAccess) && (scope === 'all' || scope === 'sub-frames');
++        const expectsRealSubframe =
++          !expectsInitialEmptySubframe &&
++          (scope === 'all' || scope === 'sub-frames' || (!scope && nodeIntegrationInSubFrames));
++        const expectsMainFrame = scope !== 'sub-frames';
++        const expectedEventCount =
++          (expectsMainFrame ? 1 : 0) + (expectsRealSubframe ? 1 : 0) + (expectsInitialEmptySubframe ? 1 : 0);
+         await waitUntil(() => details.length >= expectedEventCount, { timeout: 5000 });
+       } finally {
+         if (isListening) {
+@@ -2207,6 +2217,11 @@ describe('session module', () => {
+       expect(subframeHrefs[0]).to.match(/\/frame\.html$/);
+     };
+
++    const expectInitialEmptySubframePreload = (details: Array<{ isMainFrame: boolean; href: string }>) => {
++      const subframeHrefs = details.filter(({ isMainFrame }) => !isMainFrame).map(({ href }) => href);
++      expect(subframeHrefs).to.include('about:blank');
++    };
++
+     it('runs frame preload scripts in main frames by default', async () => {
+       const details = await collectFramePreloadEvents();
+       expect(details.map(({ isMainFrame }) => isMainFrame)).to.deep.equal([true]);
+@@ -2231,8 +2246,7 @@ describe('session module', () => {
+
+     it('runs frame preload scripts in main frames and subframes with all scope', async () => {
+       const details = await collectFramePreloadEvents('all');
+-      expect(details.map(({ isMainFrame }) => isMainFrame).sort())
+-        .to.deep.equal([false, true]);
++      expect(details.map(({ isMainFrame }) => isMainFrame).sort()).to.deep.equal([false, true]);
+       expectRealSubframePreload(details);
+     });
+
+@@ -2245,11 +2259,28 @@ describe('session module', () => {
+         });
+       });
+
+-      expect(details.map(({ isMainFrame }) => isMainFrame).sort())
+-        .to.deep.equal([false, true]);
++      expect(details.map(({ isMainFrame }) => isMainFrame).sort()).to.deep.equal([false, true]);
+       expectRealSubframePreload(details);
+     });
+
++    it('runs opted-in frame preload in the initial empty same-origin subframe', async () => {
++      const details = await collectFramePreloadEvents(
++        'all',
++        false,
++        (w) => {
++          w.webContents.on('frame-created', (_event, { frame }) => {
++            if (frame?.parent) {
++              void frame.executeJavaScript('document.hasFocus()').catch(() => {});
++            }
++          });
++        },
++        true
++      );
++
++      expect(details.some(({ isMainFrame }) => isMainFrame)).to.be.true();
++      expectInitialEmptySubframePreload(details);
++    });
++
+     it('runs all-scope frame preload in the real same-origin subframe after CDP new-document access', async () => {
+       const details = await collectFramePreloadEvents('all', false, async (w) => {
+         await w.loadURL('about:blank');
+@@ -2266,11 +2297,362 @@ describe('session module', () => {
+         });
+       });
+
+-      expect(details.map(({ isMainFrame }) => isMainFrame).sort())
+-        .to.deep.equal([false, true]);
++      expect(details.map(({ isMainFrame }) => isMainFrame).sort()).to.deep.equal([false, true]);
+       expectRealSubframePreload(details);
+     });
+
++    it('runs opted-in frame preload in the initial empty subframe after CDP new-document access', async () => {
++      const details = await collectFramePreloadEvents(
++        'all',
++        false,
++        async (w) => {
++          await w.loadURL('about:blank');
++          w.webContents.debugger.attach('1.3');
++          await w.webContents.debugger.sendCommand('Page.enable');
++          await w.webContents.debugger.sendCommand('Page.addScriptToEvaluateOnNewDocument', {
++            source: `
++            new MutationObserver(() => {
++              for (const iframe of document.querySelectorAll('iframe')) {
++                iframe.contentDocument?.hasFocus();
++              }
++            }).observe(document, { childList: true, subtree: true });
++          `
++          });
++        },
++        true
++      );
++
++      expect(details.some(({ isMainFrame }) => isMainFrame)).to.be.true();
++      expectInitialEmptySubframePreload(details);
++    });
++
++    it('runs opted-in frame preload before CDP new-document scripts and keeps it through the real subframe document', async () => {
++      type PreloadOrderRecord = {
++        source: 'preload' | 'cdp';
++        href: string;
++        isMainFrame: boolean;
++        frameElementId: string | null;
++      };
++
++      const ses = session.fromPartition(`frame-preload-order-${crypto.randomUUID()}`);
++      ses.registerPreloadScript({
++        type: 'frame',
++        scope: 'all',
++        runInInitialEmptyDocument: true,
++        filePath: frameOrderPreload
++      });
++
++      const w = new BrowserWindow({
++        show: false,
++        webPreferences: { session: ses }
++      });
++
++      const records: PreloadOrderRecord[] = [];
++      const onConsoleMessage = (event: Electron.Event<Electron.WebContentsConsoleMessageEventParams>) => {
++        if (!event.message.startsWith('__electron_preload_order__')) {
++          return;
++        }
++        records.push(JSON.parse(event.message.slice('__electron_preload_order__'.length)));
++      };
++
++      try {
++        w.webContents.on('console-message', onConsoleMessage);
++        await w.loadURL('about:blank');
++        w.webContents.debugger.attach('1.3');
++        await w.webContents.debugger.sendCommand('Page.enable');
++        await w.webContents.debugger.sendCommand('Page.addScriptToEvaluateOnNewDocument', {
++          source: `
++            (() => {
++              let frameElementId = null;
++              try {
++                frameElementId = frameElement?.id ?? null;
++              } catch {}
++              console.log('__electron_preload_order__' + JSON.stringify({
++                source: 'cdp',
++                href: location.href,
++                isMainFrame: top === self,
++                frameElementId
++              }));
++
++              if (top === self) {
++                new MutationObserver(() => {
++                  for (const iframe of document.querySelectorAll('iframe')) {
++                    iframe.contentDocument?.hasFocus();
++                  }
++                }).observe(document, { childList: true, subtree: true });
++              }
++            })();
++          `
++        });
++
++        await w.loadFile(path.join(fixtures, 'sub-frames', 'frame-container.html'));
++        await w.webContents.executeJavaScript(`
++          new Promise(resolve => {
++            const frame = document.querySelector('iframe');
++            if (!frame || frame.contentDocument?.readyState === 'complete') {
++              resolve();
++            } else {
++              frame.addEventListener('load', () => resolve(), { once: true });
++            }
++          })
++        `);
++
++        await waitUntil(
++          () =>
++            records.some(({ source, isMainFrame, href }) => source === 'preload' && isMainFrame && /\/frame-container\.html$/.test(href)) &&
++            records.some(({ source, isMainFrame, href }) => source === 'cdp' && isMainFrame && /\/frame-container\.html$/.test(href)) &&
++            records.some(({ source, isMainFrame, href }) => source === 'preload' && !isMainFrame && href === 'about:blank') &&
++            records.some(({ source, isMainFrame, href }) => source === 'cdp' && !isMainFrame && href === 'about:blank'),
++          { timeout: 5000 }
++        );
++
++        const frameWindowName = await w.webContents.executeJavaScript(`
++          document.querySelector('iframe')?.contentWindow?.name
++        `);
++        expect(frameWindowName).to.match(/^electron-preload-order:/);
++
++        const mainPreloadIndex = records.findIndex(
++          ({ source, isMainFrame, href }) => source === 'preload' && isMainFrame && /\/frame-container\.html$/.test(href)
++        );
++        const mainCdpIndex = records.findIndex(
++          ({ source, isMainFrame, href }) => source === 'cdp' && isMainFrame && /\/frame-container\.html$/.test(href)
++        );
++        const initialEmptyPreloadIndex = records.findIndex(
++          ({ source, isMainFrame, href }) => source === 'preload' && !isMainFrame && href === 'about:blank'
++        );
++        const initialEmptyCdpIndex = records.findIndex(
++          ({ source, isMainFrame, href }) => source === 'cdp' && !isMainFrame && href === 'about:blank'
++        );
++
++        expect(mainPreloadIndex, 'main frame preload log').to.be.at.least(0);
++        expect(mainCdpIndex, 'main frame CDP log').to.be.at.least(0);
++        expect(initialEmptyPreloadIndex, 'initial empty subframe preload log').to.be.at.least(0);
++        expect(initialEmptyCdpIndex, 'initial empty subframe CDP log').to.be.at.least(0);
++        expect(mainPreloadIndex, 'main frame preload log order').to.be.lessThan(mainCdpIndex);
++        expect(initialEmptyPreloadIndex, 'initial empty subframe preload log order').to.be.lessThan(initialEmptyCdpIndex);
++      } finally {
++        w.webContents.off('console-message', onConsoleMessage);
++        if (!w.isDestroyed() && w.webContents.debugger.isAttached()) {
++          w.webContents.debugger.detach();
++        }
++      }
++    });
++
++    type PreloadOrderRecord = {
++      source: 'preload' | 'cdp';
++      href: string;
++      isMainFrame: boolean;
++      frameElementId: string | null;
++    };
++
++    const collectIsolatedFramePreloadOrderRecords = async ({
++      contextIsolation,
++      runInInitialEmptyDocument = false,
++      touchInitialEmptySubframes = false
++    }: {
++      contextIsolation: boolean;
++      runInInitialEmptyDocument?: boolean;
++      touchInitialEmptySubframes?: boolean;
++    }) => {
++      let port = 0;
++      const server = http.createServer((req, res) => {
++        res.setHeader('Content-Type', 'text/html');
++        if (req.url?.startsWith('/frame')) {
++          res.end('<!DOCTYPE html><html><body>isolated frame</body></html>');
++          return;
++        }
++
++        res.end(`<!DOCTYPE html><html><body>
++          <iframe
++            id="isolated"
++            sandbox="allow-same-origin allow-scripts allow-popups"
++            src="http://localhost:${port}/frame?isolated"></iframe>
++        </body></html>`);
++      });
++      defer(() => {
++        server.close();
++      });
++      const { port: listeningPort, url } = await listen(server);
++      port = listeningPort;
++
++      const ses = session.fromPartition(`frame-preload-isolated-order-${contextIsolation ? 'isolated' : 'main'}-${crypto.randomUUID()}`);
++      ses.registerPreloadScript({
++        type: 'frame',
++        scope: 'all',
++        ...(runInInitialEmptyDocument ? { runInInitialEmptyDocument } : {}),
++        filePath: frameOrderPreload
++      });
++
++      const w = new BrowserWindow({
++        show: false,
++        webPreferences: { session: ses, contextIsolation }
++      });
++
++      const records: PreloadOrderRecord[] = [];
++      const attachedTargets: any[] = [];
++      const onConsoleMessage = (event: Electron.Event<Electron.WebContentsConsoleMessageEventParams>) => {
++        if (!event.message.startsWith('__electron_preload_order__')) {
++          return;
++        }
++        records.push(JSON.parse(event.message.slice('__electron_preload_order__'.length)));
++      };
++      const cdpSource = `
++        (() => {
++          let frameElementId = null;
++          try {
++            frameElementId = frameElement?.id ?? null;
++          } catch {}
++          console.log('__electron_preload_order__' + JSON.stringify({
++            source: 'cdp',
++            href: location.href,
++            isMainFrame: top === self,
++            frameElementId
++          }));
++
++          ${touchInitialEmptySubframes
++            ? `
++          if (top === self) {
++            const touchSubframes = () => {
++              for (const iframe of document.querySelectorAll('iframe')) {
++                try {
++                  iframe.contentDocument?.hasFocus();
++                } catch {}
++              }
++            };
++            touchSubframes();
++            new MutationObserver(touchSubframes).observe(document, { childList: true, subtree: true });
++          }
++          `
++            : ''}
++        })();
++      `;
++
++      try {
++        w.webContents.on('console-message', onConsoleMessage);
++        await w.loadURL('about:blank');
++        w.webContents.debugger.attach('1.3');
++        const childTargetSetupPromises: Array<Promise<void>> = [];
++        w.webContents.debugger.on('message', (_event, method, params) => {
++          if (method !== 'Target.attachedToTarget') {
++            return;
++          }
++
++          const { sessionId, targetInfo } = params;
++          attachedTargets.push(targetInfo);
++          childTargetSetupPromises.push((async () => {
++            await w.webContents.debugger.sendCommand('Page.enable', {}, sessionId);
++            await w.webContents.debugger.sendCommand('Page.addScriptToEvaluateOnNewDocument', {
++              runImmediately: true,
++              source: cdpSource
++            }, sessionId);
++          })());
++        });
++        await w.webContents.debugger.sendCommand('Page.enable');
++        await w.webContents.debugger.sendCommand('Target.setAutoAttach', {
++          autoAttach: true,
++          waitForDebuggerOnStart: false,
++          flatten: true
++        });
++        await w.webContents.debugger.sendCommand('Page.addScriptToEvaluateOnNewDocument', {
++          runImmediately: true,
++          source: cdpSource
++        });
++
++        await Promise.race([
++          w.loadURL(`${url}/main`),
++          setTimeout(10000).then(() => {
++            throw new Error('timed out loading isolated frame test page');
++          })
++        ]);
++        await waitUntil(
++          () =>
++            attachedTargets.some(({ type }) => type === 'iframe') &&
++            records.some(({ source, href, isMainFrame }) => source === 'preload' && /\/frame\?isolated$/.test(href) && !isMainFrame) &&
++            records.some(({ source, href, isMainFrame }) => source === 'cdp' && /\/frame\?isolated$/.test(href) && !isMainFrame),
++          { timeout: 5000 }
++        );
++        await Promise.all(childTargetSetupPromises);
++      } finally {
++        w.webContents.off('console-message', onConsoleMessage);
++        if (!w.isDestroyed() && w.webContents.debugger.isAttached()) {
++          w.webContents.debugger.detach();
++        }
++      }
++
++      return { attachedTargets, records };
++    };
++
++    const getInitialEmptySubframeRecords = (records: PreloadOrderRecord[]) =>
++      records.filter(({ href, isMainFrame }) => href === 'about:blank' && !isMainFrame);
++
++    const getRealIsolatedSubframeIndex = (records: PreloadOrderRecord[], source: PreloadOrderRecord['source']) =>
++      records.findIndex((record) => record.source === source && /\/frame\?isolated$/.test(record.href) && !record.isMainFrame);
++
++    it('does not create initial empty isolated subframe script context when frame preload is not opted in and CDP does not touch it', async () => {
++      const { attachedTargets, records } = await collectIsolatedFramePreloadOrderRecords({
++        contextIsolation: false
++      });
++
++      expect(attachedTargets.some(({ type }) => type === 'iframe'), 'attached isolated iframe target').to.be.true();
++      expect(getInitialEmptySubframeRecords(records)).to.deep.equal([]);
++      expect(getRealIsolatedSubframeIndex(records, 'preload'), 'real isolated frame preload log').to.be.at.least(0);
++      expect(getRealIsolatedSubframeIndex(records, 'cdp'), 'real isolated frame CDP log').to.be.at.least(0);
++      expect(getRealIsolatedSubframeIndex(records, 'preload'), 'real isolated frame preload log order')
++        .to.be.lessThan(getRealIsolatedSubframeIndex(records, 'cdp'));
++    });
++
++    it('keeps initial empty isolated subframe preload disabled without opt-in after CDP early frame access', async () => {
++      const { attachedTargets, records } = await collectIsolatedFramePreloadOrderRecords({
++        contextIsolation: false,
++        touchInitialEmptySubframes: true
++      });
++      const initialEmptyRecords = getInitialEmptySubframeRecords(records);
++
++      expect(attachedTargets.some(({ type }) => type === 'iframe'), 'attached isolated iframe target').to.be.true();
++      expect(initialEmptyRecords.some(({ source }) => source === 'preload'), 'initial empty isolated frame preload log').to.be.false();
++      expect(initialEmptyRecords.some(({ source }) => source === 'cdp'), 'initial empty isolated frame CDP log').to.be.true();
++      expect(getRealIsolatedSubframeIndex(records, 'preload'), 'real isolated frame preload log').to.be.at.least(0);
++      expect(getRealIsolatedSubframeIndex(records, 'cdp'), 'real isolated frame CDP log').to.be.at.least(0);
++      expect(getRealIsolatedSubframeIndex(records, 'preload'), 'real isolated frame preload log order')
++        .to.be.lessThan(getRealIsolatedSubframeIndex(records, 'cdp'));
++    });
++
++    for (const contextIsolation of [true, false]) {
++      it(`runs opted-in frame preload before CDP new-document scripts in initial empty isolated subframes ${contextIsolation ? 'with' : 'without'} context isolation`, async () => {
++        const { attachedTargets, records } = await collectIsolatedFramePreloadOrderRecords({
++          contextIsolation,
++          runInInitialEmptyDocument: true,
++          touchInitialEmptySubframes: true
++        });
++
++        const initialEmptyPreloadIndex = records.findIndex(
++          ({ source, href, isMainFrame }) => source === 'preload' && href === 'about:blank' && !isMainFrame
++        );
++        const initialEmptyCdpIndex = records.findIndex(
++          ({ source, href, isMainFrame }) => source === 'cdp' && href === 'about:blank' && !isMainFrame
++        );
++
++        expect(attachedTargets.some(({ type }) => type === 'iframe'), 'attached isolated iframe target').to.be.true();
++        expect(initialEmptyPreloadIndex, 'initial empty isolated frame preload log').to.be.at.least(0);
++        expect(initialEmptyCdpIndex, 'initial empty isolated frame CDP log').to.be.at.least(0);
++        expect(initialEmptyPreloadIndex, 'initial empty isolated frame preload log order').to.be.lessThan(initialEmptyCdpIndex);
++      });
++    }
++
++    it('returns runInInitialEmptyDocument for opted-in frame preload scripts', () => {
++      const ses = session.fromPartition(`frame-preload-initial-empty-${crypto.randomUUID()}`);
++      const id = ses.registerPreloadScript({
++        type: 'frame',
++        scope: 'all',
++        runInInitialEmptyDocument: true,
++        filePath: frameScopePreload
++      });
++
++      expect(ses.getPreloadScripts().find((script) => script.id === id)).to.deep.include({
++        runInInitialEmptyDocument: true
++      });
++    });
++
+     it('rejects scope for worker preload scripts', () => {
+       const ses = session.fromPartition(`worker-preload-scope-${crypto.randomUUID()}`);
+       expect(() => {
+@@ -2282,6 +2664,17 @@ describe('session module', () => {
+       }).to.throw('Preload script scope is only supported for frame type');
+     });
+
++    it('rejects runInInitialEmptyDocument for worker preload scripts', () => {
++      const ses = session.fromPartition(`worker-preload-initial-empty-${crypto.randomUUID()}`);
++      expect(() => {
++        ses.registerPreloadScript({
++          type: 'shared-worker',
++          filePath: workerPreload,
++          runInInitialEmptyDocument: true
++        } as any);
++      }).to.throw('Preload script runInInitialEmptyDocument is only supported for frame type');
++    });
++
+     it('runs plain JavaScript preload scripts in dedicated workers', async () => {
+       const ses = session.fromPartition(`worker-preload-${crypto.randomUUID()}`);
+       ses.registerPreloadScript({
+diff --git a/spec/fixtures/preload-frame-order.js b/spec/fixtures/preload-frame-order.js
+new file mode 100644
+index 0000000000..7684c1ad8a
+--- /dev/null
++++ b/spec/fixtures/preload-frame-order.js
+@@ -0,0 +1,14 @@
++let frameElementId = null;
++try {
++  frameElementId = frameElement?.id ?? null;
++} catch {}
++
++console.log('__electron_preload_order__' + JSON.stringify({
++  source: 'preload',
++  href: location.href,
++  isMainFrame: top === self,
++  frameElementId
++}));
++
++globalThis.name = `electron-preload-order:${location.href}`;
++document.documentElement?.setAttribute('data-electron-preload-order-href', location.href);
+diff --git a/spec/ts-smoke/electron/main.ts b/spec/ts-smoke/electron/main.ts
+index 890f7214fd..02e299d7dd 100644
+--- a/spec/ts-smoke/electron/main.ts
++++ b/spec/ts-smoke/electron/main.ts
+@@ -1229,10 +1229,21 @@ session.defaultSession.clearStorageData({ storages: ['shadercache', 'cachestorag
+ // @ts-expect-error Invalid type value
+ session.defaultSession.clearStorageData({ storages: ['wrong_path'] });
+
+-session.defaultSession.registerPreloadScript({ type: 'frame', scope: 'all', filePath: '/tmp/preload.js' });
++session.defaultSession.registerPreloadScript({
++  type: 'frame',
++  scope: 'all',
++  runInInitialEmptyDocument: true,
++  filePath: '/tmp/preload.js'
++});
+ session.defaultSession.registerPreloadScript({ type: 'dedicated-worker', filePath: '/tmp/worker-preload.js' });
+ // @ts-expect-error scope is supported only for frame preload scripts
+ session.defaultSession.registerPreloadScript({ type: 'service-worker', scope: 'all', filePath: '/tmp/sw-preload.js' });
++session.defaultSession.registerPreloadScript({
++  type: 'service-worker',
++  // @ts-expect-error runInInitialEmptyDocument is supported only for frame preload scripts
++  runInInitialEmptyDocument: true,
++  filePath: '/tmp/sw-preload.js'
++});
+
+ const preloadScriptRegistration: Electron.PreloadScriptRegistration = {
+   type: 'shared-worker',
+@@ -1243,9 +1254,12 @@ session.defaultSession.registerPreloadScript(preloadScriptRegistration);
+ const preloadScript = session.defaultSession.getPreloadScripts()[0];
+ if (preloadScript.type === 'frame') {
+   console.log(preloadScript.scope);
++  console.log(preloadScript.runInInitialEmptyDocument);
+ } else {
+   // @ts-expect-error worker preload script results do not have a frame scope
+   console.log(preloadScript.scope);
++  // @ts-expect-error worker preload script results do not have an initial empty document option
++  console.log(preloadScript.runInInitialEmptyDocument);
+ }
+
+ session.defaultSession.on('will-download', (event, item, webContents) => {

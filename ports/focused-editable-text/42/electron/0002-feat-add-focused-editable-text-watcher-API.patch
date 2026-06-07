@@ -1,0 +1,1313 @@
+From 92430d94d963ac46b9a0eb668d7a1298919a4e47 Mon Sep 17 00:00:00 2001
+From: Jung-Kwang Lee <ntoskrnl7@gmail.com>
+Date: Wed, 3 Jun 2026 22:04:26 +0900
+Subject: feat: add focused editable text watcher API
+
+---
+ .../focused-editable-text-watch-options.md    |  21 +
+ .../focused-editable-text-watcher.md          |  12 +
+ docs/api/structures/focused-editable-text.md  |   3 +
+ docs/api/web-contents.md                      |  34 +
+ .../browser/api/electron_api_web_contents.cc  | 642 ++++++++++++++----
+ shell/browser/api/electron_api_web_contents.h |   1 +
+ .../gin_helper/wrappable_pointer_tags.h       |   1 +
+ spec/api-web-contents-spec.ts                 | 257 +++++++
+ 8 files changed, 823 insertions(+), 148 deletions(-)
+ create mode 100644 docs/api/structures/focused-editable-text-watch-options.md
+ create mode 100644 docs/api/structures/focused-editable-text-watcher.md
+
+diff --git a/docs/api/structures/focused-editable-text-watch-options.md b/docs/api/structures/focused-editable-text-watch-options.md
+new file mode 100644
+index 0000000000..332af5c271
+--- /dev/null
++++ b/docs/api/structures/focused-editable-text-watch-options.md
+@@ -0,0 +1,21 @@
++# FocusedEditableTextWatchOptions Object
++
++Extends `FocusedEditableTextOptions`.
++
++* `mode` string (optional) - The text range to read. Can be `value`,
++  `surrounding`, or `full`. Default is `surrounding`.
++* `maxLength` number (optional) - Maximum number of UTF-16 code units to return
++  in `text`. Must be between `1` and `1000000`. Default is `100000`.
++* `throttleMs` number (optional) - Minimum interval between callback deliveries
++  for a watcher, in milliseconds. Must be between `0` and `60000`. Default is
++  `50`.
++
++When `mode` is `value`, Electron reads Chromium's current focused input value
++snapshot when available. When `mode` is `surrounding`, Electron reads text
++around the current selection from Blink. When `mode` is `full`, Electron reads
++the full focused editable DOM text on a best-effort basis and truncates around
++the current selection if the text is longer than `maxLength`.
++
++The watcher always coalesces changes while a snapshot is in flight. Setting
++`throttleMs` to `0` disables the extra delivery interval, but does not disable
++coalescing.
+diff --git a/docs/api/structures/focused-editable-text-watcher.md b/docs/api/structures/focused-editable-text-watcher.md
+new file mode 100644
+index 0000000000..123edf627d
+--- /dev/null
++++ b/docs/api/structures/focused-editable-text-watcher.md
+@@ -0,0 +1,12 @@
++# FocusedEditableTextWatcher Object
++
++* `close` Function - Stops the watcher. Calling this more than once has no
++  effect.
++
++The watcher is returned by
++[`webContents.watchFocusedEditableText`](../web-contents.md#contentswatchfocusededitabletextoptions-callback).
++It owns one focused editable text subscription for one `WebContents`.
++
++The watcher remains active even if JavaScript does not retain the returned
++object. Keep the returned object when the watcher should be closed before the
++WebContents is destroyed.
+diff --git a/docs/api/structures/focused-editable-text.md b/docs/api/structures/focused-editable-text.md
+index 2ccb89cdd8..40d8773719 100644
+--- a/docs/api/structures/focused-editable-text.md
++++ b/docs/api/structures/focused-editable-text.md
+@@ -30,3 +30,6 @@
+
+ `selection.start` and `selection.end` are UTF-16 offsets into `text`, so
+ `text.slice(selection.start, selection.end)` returns the selected text.
++
++This object is returned by `webContents.getFocusedEditableText()` and passed to
++callbacks registered with `webContents.watchFocusedEditableText()`.
+diff --git a/docs/api/web-contents.md b/docs/api/web-contents.md
+index e541957660..f5cf295135 100644
+--- a/docs/api/web-contents.md
++++ b/docs/api/web-contents.md
+@@ -1269,6 +1269,40 @@ Password inputs return `null`. Custom editors backed by DOM-editable content are
+ handled on a best-effort basis. Editors backed by canvas, virtual documents, or
+ application-internal models may only expose the focused DOM control.
+
++#### `contents.watchFocusedEditableText([options, ]callback)` _Experimental_
++
++* `options` [FocusedEditableTextWatchOptions](structures/focused-editable-text-watch-options.md) (optional)
++* `callback` Function
++  * `info` [FocusedEditableText | null](structures/focused-editable-text.md) -
++    The current focused editable text snapshot, or `null` if no focused
++    editable text can be read.
++
++Returns [`FocusedEditableTextWatcher`](structures/focused-editable-text-watcher.md) -
++a watcher that can be closed to stop receiving callbacks.
++
++Starts watching the focused editable text state in this WebContents. The
++callback is called asynchronously once with the current snapshot after the
++watcher is created, and then again when Electron observes input state, caret,
++selection, composition, or focus changes that may affect the focused editable
++text snapshot.
++
++Each watcher owns its own `options`, so multiple callers can watch the same
++WebContents with different `mode`, `maxLength`, or `throttleMs` values without
++overwriting each other. Call
++[`watcher.close()`](structures/focused-editable-text-watcher.md) to stop a
++specific watcher. The watcher remains active even if the returned object is not
++retained by JavaScript, but keeping the returned object is the only way to close
++that watcher before the WebContents is destroyed.
++
++The watcher coalesces changes while an asynchronous snapshot is in flight and
++uses `throttleMs` to limit callback frequency. It reports the latest snapshot
++after coalescing rather than queueing every intermediate input state.
++
++Password inputs report `null`. Custom editors backed by DOM-editable content
++are handled on a best-effort basis. The watcher is not a general DOM mutation
++observer; editors backed by canvas, virtual documents, or application-internal
++models may only expose the focused DOM control.
++
+ #### `contents.isLoading()`
+
+ Returns `boolean` - Whether web page is still loading resources.
+diff --git a/shell/browser/api/electron_api_web_contents.cc b/shell/browser/api/electron_api_web_contents.cc
+index 283f1ba4ba..a292c979fe 100644
+--- a/shell/browser/api/electron_api_web_contents.cc
++++ b/shell/browser/api/electron_api_web_contents.cc
+@@ -26,6 +26,7 @@
+ #include "base/files/file_util.h"
+ #include "base/json/json_reader.h"
+ #include "base/json/json_writer.h"
++#include "base/memory/weak_ptr.h"
+ #include "base/no_destructor.h"
+ #include "base/strings/strcat.h"
+ #include "base/strings/string_number_conversions.h"
+@@ -34,6 +35,7 @@
+ #include "base/task/current_thread.h"
+ #include "base/task/single_thread_task_runner.h"
+ #include "base/threading/scoped_blocking_call.h"
++#include "base/timer/timer.h"
+ #include "base/types/expected.h"
+ #include "base/unguessable_token.h"
+ #include "base/uuid.h"
+@@ -59,7 +61,7 @@
+ #include "content/browser/renderer_host/render_widget_host_impl.h"  // nogncheck
+ #include "content/browser/renderer_host/render_widget_host_view_base.h"  // nogncheck
+ #include "content/browser/renderer_host/text_input_manager.h"  // nogncheck
+-#include "content/browser/web_contents/web_contents_impl.h"  // nogncheck
++#include "content/browser/web_contents/web_contents_impl.h"    // nogncheck
+ #include "content/public/browser/child_process_security_policy.h"
+ #include "content/public/browser/context_menu_params.h"
+ #include "content/public/browser/desktop_media_id.h"
+@@ -156,6 +158,7 @@
+ #include "shell/common/gin_helper/object_template_builder.h"
+ #include "shell/common/gin_helper/promise.h"
+ #include "shell/common/gin_helper/reply_channel.h"
++#include "shell/common/gin_helper/wrappable_pointer_tags.h"
+ #include "shell/common/language_util.h"
+ #include "shell/common/node_includes.h"
+ #include "shell/common/node_util.h"
+@@ -191,6 +194,8 @@
+ #include "ui/gfx/range/range.h"
+ #include "ui/gfx/selection_bound.h"
+ #include "ui/latency/latency_info.h"
++#include "v8/include/cppgc/allocation.h"
++#include "v8/include/v8-cppgc.h"
+
+ #if BUILDFLAG(IS_MAC)
+ #include "ui/base/cocoa/defaults_utils.h"
+@@ -2036,8 +2041,7 @@ v8::Local<v8::Value> CreateTextCaretInfo(
+
+   const ui::mojom::TextInputState* text_input_state =
+       text_input_manager->GetTextInputState();
+-  if (!text_input_state ||
+-      text_input_state->type == ui::TEXT_INPUT_TYPE_NONE) {
++  if (!text_input_state || text_input_state->type == ui::TEXT_INPUT_TYPE_NONE) {
+     return v8::Null(isolate);
+   }
+
+@@ -2086,8 +2090,8 @@ v8::Local<v8::Value> CreateTextCaretInfo(
+     details.Set("selection", selection);
+   }
+
+-  const bool has_composition = text_input_state->composition &&
+-                               text_input_state->composition->IsValid();
++  const bool has_composition =
++      text_input_state->composition && text_input_state->composition->IsValid();
+   auto composition = gin_helper::Dictionary::CreateEmpty(isolate);
+   composition.Set("isComposing", has_composition);
+   if (has_composition) {
+@@ -2107,6 +2111,8 @@ v8::Local<v8::Value> CreateTextCaretInfo(
+
+ constexpr uint32_t kDefaultFocusedEditableTextMaxLength = 100000;
+ constexpr uint32_t kMaxFocusedEditableTextMaxLength = 1000000;
++constexpr int kDefaultFocusedEditableTextWatchThrottleMs = 50;
++constexpr int kMaxFocusedEditableTextWatchThrottleMs = 60000;
+
+ enum class FocusedEditableTextMode {
+   kValue,
+@@ -2119,6 +2125,14 @@ struct FocusedEditableTextOptions {
+   uint32_t max_length = kDefaultFocusedEditableTextMaxLength;
+ };
+
++struct FocusedEditableTextWatchOptions {
++  FocusedEditableTextOptions text_options = {
++      FocusedEditableTextMode::kSurrounding,
++      kDefaultFocusedEditableTextMaxLength};
++  base::TimeDelta throttle_interval =
++      base::Milliseconds(kDefaultFocusedEditableTextWatchThrottleMs);
++};
++
+ struct FocusedEditableTextInputState {
+   ui::TextInputType type = ui::TEXT_INPUT_TYPE_NONE;
+   ui::TextInputMode mode = ui::TEXT_INPUT_MODE_DEFAULT;
+@@ -2135,8 +2149,10 @@ struct FocusedEditableTextSnapshot {
+   bool is_partial = false;
+ };
+
+-std::string_view FocusedEditableTextModeToString(
+-    FocusedEditableTextMode mode) {
++using FocusedEditableTextResultCallback =
++    base::OnceCallback<void(v8::Local<v8::Value>)>;
++
++std::string_view FocusedEditableTextModeToString(FocusedEditableTextMode mode) {
+   switch (mode) {
+     case FocusedEditableTextMode::kValue:
+       return "value";
+@@ -2216,8 +2232,8 @@ void ClampFocusedEditableTextSnapshot(FocusedEditableTextSnapshot* snapshot,
+
+   snapshot->text =
+       snapshot->text.substr(window_start, window_end - window_start);
+-  snapshot->selection = gfx::Range(selection_start - window_start,
+-                                  selection_end - window_start);
++  snapshot->selection =
++      gfx::Range(selection_start - window_start, selection_end - window_start);
+   if (snapshot->composition && snapshot->composition->start() >= window_start &&
+       snapshot->composition->end() <= window_end) {
+     snapshot->composition =
+@@ -2257,8 +2273,10 @@ v8::Local<v8::Value> CreateFocusedEditableTextValue(
+   details.SetGetter("frame", render_frame_host);
+   details.Set("url", render_frame_host->GetLastCommittedURL().spec());
+   details.Set("isMainFrame", render_frame_host->GetParent() == nullptr);
+-  details.Set("inputType", std::string(TextInputTypeToString(input_state.type)));
+-  details.Set("inputMode", std::string(TextInputModeToString(input_state.mode)));
++  details.Set("inputType",
++              std::string(TextInputTypeToString(input_state.type)));
++  details.Set("inputMode",
++              std::string(TextInputModeToString(input_state.mode)));
+   details.Set("inputAction",
+               std::string(TextInputActionToString(input_state.action)));
+   details.Set("text", snapshot.text);
+@@ -2282,17 +2300,10 @@ v8::Local<v8::Value> CreateFocusedEditableTextValue(
+   return details.GetHandle();
+ }
+
+-bool ParseFocusedEditableTextOptions(gin::Arguments* args,
+-                                     FocusedEditableTextOptions* options,
+-                                     std::string* error) {
+-  gin_helper::Dictionary dict =
+-      gin_helper::Dictionary::CreateEmpty(args->isolate());
+-  if (args->Length() >= 1 && !args->PeekNext()->IsNullOrUndefined() &&
+-      !args->GetNext(&dict)) {
+-    *error = "options must be an object when provided";
+-    return false;
+-  }
+-
++bool ParseFocusedEditableTextOptionsDictionary(
++    const gin_helper::Dictionary& dict,
++    FocusedEditableTextOptions* options,
++    std::string* error) {
+   if (dict.Has("mode")) {
+     std::string mode;
+     if (!dict.Get("mode", &mode)) {
+@@ -2319,9 +2330,8 @@ bool ParseFocusedEditableTextOptions(gin::Arguments* args,
+     }
+     if (max_length < 1 ||
+         static_cast<uint32_t>(max_length) > kMaxFocusedEditableTextMaxLength) {
+-      *error = base::StringPrintf(
+-          "maxLength must be between 1 and %u",
+-          kMaxFocusedEditableTextMaxLength);
++      *error = base::StringPrintf("maxLength must be between 1 and %u",
++                                  kMaxFocusedEditableTextMaxLength);
+       return false;
+     }
+     options->max_length = static_cast<uint32_t>(max_length);
+@@ -2330,6 +2340,47 @@ bool ParseFocusedEditableTextOptions(gin::Arguments* args,
+   return true;
+ }
+
++bool ParseFocusedEditableTextOptions(gin::Arguments* args,
++                                     FocusedEditableTextOptions* options,
++                                     std::string* error) {
++  gin_helper::Dictionary dict =
++      gin_helper::Dictionary::CreateEmpty(args->isolate());
++  if (args->Length() >= 1 && !args->PeekNext()->IsNullOrUndefined() &&
++      !args->GetNext(&dict)) {
++    *error = "options must be an object when provided";
++    return false;
++  }
++
++  return ParseFocusedEditableTextOptionsDictionary(dict, options, error);
++}
++
++bool ParseFocusedEditableTextWatchOptionsDictionary(
++    const gin_helper::Dictionary& dict,
++    FocusedEditableTextWatchOptions* options,
++    std::string* error) {
++  if (!ParseFocusedEditableTextOptionsDictionary(dict, &options->text_options,
++                                                 error)) {
++    return false;
++  }
++
++  if (dict.Has("throttleMs")) {
++    int throttle_ms = 0;
++    if (!dict.Get("throttleMs", &throttle_ms)) {
++      *error = "throttleMs must be an integer";
++      return false;
++    }
++    if (throttle_ms < 0 ||
++        throttle_ms > kMaxFocusedEditableTextWatchThrottleMs) {
++      *error = base::StringPrintf("throttleMs must be between 0 and %d",
++                                  kMaxFocusedEditableTextWatchThrottleMs);
++      return false;
++    }
++    options->throttle_interval = base::Milliseconds(throttle_ms);
++  }
++
++  return true;
++}
++
+ content::RenderFrameHost* GetFocusedEditableTextFrame(
+     content::WebContents* contents,
+     FocusedEditableTextInputState* input_state,
+@@ -2348,8 +2399,7 @@ content::RenderFrameHost* GetFocusedEditableTextFrame(
+
+   const ui::mojom::TextInputState* text_input_state =
+       text_input_manager->GetTextInputState();
+-  if (!text_input_state ||
+-      text_input_state->type == ui::TEXT_INPUT_TYPE_NONE ||
++  if (!text_input_state || text_input_state->type == ui::TEXT_INPUT_TYPE_NONE ||
+       IsPasswordTextInputType(text_input_state->type)) {
+     return nullptr;
+   }
+@@ -2365,16 +2415,15 @@ content::RenderFrameHost* GetFocusedEditableTextFrame(
+   return render_frame_host;
+ }
+
+-void ResolveFocusedEditableTextNull(
+-    gin_helper::Promise<v8::Local<v8::Value>> promise) {
++void RunFocusedEditableTextNull(FocusedEditableTextResultCallback callback) {
+   v8::Isolate* isolate = JavascriptEnvironment::GetIsolate();
+   v8::HandleScope handle_scope(isolate);
+   v8::Local<v8::Value> null_value = v8::Null(isolate);
+-  promise.Resolve(null_value);
++  std::move(callback).Run(null_value);
+ }
+
+-void ResolveFocusedEditableTextSnapshot(
+-    gin_helper::Promise<v8::Local<v8::Value>> promise,
++void RunFocusedEditableTextSnapshot(
++    FocusedEditableTextResultCallback callback,
+     base::WeakPtr<content::WebContents> contents,
+     content::GlobalRenderFrameHostId frame_id,
+     FocusedEditableTextInputState input_state,
+@@ -2386,16 +2435,16 @@ void ResolveFocusedEditableTextSnapshot(
+   auto* render_frame_host = content::RenderFrameHost::FromID(frame_id);
+   if (!web_contents || !render_frame_host) {
+     v8::Local<v8::Value> null_value = v8::Null(isolate);
+-    promise.Resolve(null_value);
++    std::move(callback).Run(null_value);
+     return;
+   }
+
+-  promise.Resolve(CreateFocusedEditableTextValue(
++  std::move(callback).Run(CreateFocusedEditableTextValue(
+       isolate, render_frame_host, input_state, mode, snapshot));
+ }
+
+ void OnFocusedEditableTextSurroundingSelection(
+-    gin_helper::Promise<v8::Local<v8::Value>> promise,
++    FocusedEditableTextResultCallback callback,
+     base::WeakPtr<content::WebContents> contents,
+     content::GlobalRenderFrameHostId frame_id,
+     FocusedEditableTextInputState input_state,
+@@ -2405,7 +2454,7 @@ void OnFocusedEditableTextSurroundingSelection(
+     uint32_t start_offset,
+     uint32_t end_offset) {
+   if (text.empty()) {
+-    ResolveFocusedEditableTextNull(std::move(promise));
++    RunFocusedEditableTextNull(std::move(callback));
+     return;
+   }
+
+@@ -2418,9 +2467,9 @@ void OnFocusedEditableTextSurroundingSelection(
+   snapshot.source = "surrounding-selection";
+   snapshot.is_partial = true;
+   ClampFocusedEditableTextSnapshot(&snapshot, max_length);
+-  ResolveFocusedEditableTextSnapshot(std::move(promise), std::move(contents),
+-                                      frame_id, input_state, mode,
+-                                      std::move(snapshot));
++  RunFocusedEditableTextSnapshot(std::move(callback), std::move(contents),
++                                 frame_id, input_state, mode,
++                                 std::move(snapshot));
+ }
+
+ std::u16string CreateFocusedEditableTextDomScript(uint32_t max_length) {
+@@ -2536,24 +2585,24 @@ std::u16string CreateFocusedEditableTextDomScript(uint32_t max_length) {
+   return clamp(text, beforeStart.toString().length, beforeEnd.toString().length);
+ })()
+ )JS",
+-                                          max_length));
++                                              max_length));
+ }
+
+ void OnFocusedEditableTextDomResult(
+-    gin_helper::Promise<v8::Local<v8::Value>> promise,
++    FocusedEditableTextResultCallback callback,
+     base::WeakPtr<content::WebContents> contents,
+     content::GlobalRenderFrameHostId frame_id,
+     FocusedEditableTextInputState input_state,
+     FocusedEditableTextMode mode,
+     base::Value value) {
+   if (!value.is_dict()) {
+-    ResolveFocusedEditableTextNull(std::move(promise));
++    RunFocusedEditableTextNull(std::move(callback));
+     return;
+   }
+
+   const base::DictValue& dict = value.GetDict();
+   if (!dict.FindBool("ok").value_or(false)) {
+-    ResolveFocusedEditableTextNull(std::move(promise));
++    RunFocusedEditableTextNull(std::move(callback));
+     return;
+   }
+
+@@ -2562,107 +2611,381 @@ void OnFocusedEditableTextDomResult(
+   std::optional<int> selection_end = dict.FindInt("selectionEnd");
+   if (!text || !selection_start || !selection_end || *selection_start < 0 ||
+       *selection_end < 0) {
+-    ResolveFocusedEditableTextNull(std::move(promise));
++    RunFocusedEditableTextNull(std::move(callback));
+     return;
+   }
+
+   FocusedEditableTextSnapshot snapshot;
+   snapshot.text = base::UTF8ToUTF16(*text);
+-  snapshot.selection =
+-      ClampRangeToText(gfx::Range(*selection_start, *selection_end),
+-                       snapshot.text.length());
++  snapshot.selection = ClampRangeToText(
++      gfx::Range(*selection_start, *selection_end), snapshot.text.length());
+   snapshot.composition =
+       ClampCompositionToText(input_state.composition, snapshot.text.length());
+   snapshot.source = "dom";
+   snapshot.is_partial = dict.FindBool("isPartial").value_or(false);
+-  ResolveFocusedEditableTextSnapshot(std::move(promise), std::move(contents),
+-                                      frame_id, input_state, mode,
+-                                      std::move(snapshot));
++  RunFocusedEditableTextSnapshot(std::move(callback), std::move(contents),
++                                 frame_id, input_state, mode,
++                                 std::move(snapshot));
++}
++
++void RequestFocusedEditableTextSnapshot(
++    content::WebContents* contents,
++    FocusedEditableTextOptions options,
++    FocusedEditableTextResultCallback callback) {
++  v8::Isolate* isolate = JavascriptEnvironment::GetIsolate();
++  v8::HandleScope handle_scope(isolate);
++
++  FocusedEditableTextInputState input_state;
++  const ui::mojom::TextInputState* text_input_state = nullptr;
++  content::RenderFrameHost* render_frame_host =
++      GetFocusedEditableTextFrame(contents, &input_state, &text_input_state);
++  if (!render_frame_host) {
++    std::move(callback).Run(v8::Null(isolate));
++    return;
++  }
++
++  if (options.mode == FocusedEditableTextMode::kValue) {
++    std::optional<FocusedEditableTextSnapshot> snapshot =
++        CreateFocusedEditableTextSnapshotFromInputState(*text_input_state,
++                                                        options.max_length);
++    if (!snapshot) {
++      std::move(callback).Run(v8::Null(isolate));
++      return;
++    }
++    std::move(callback).Run(CreateFocusedEditableTextValue(
++        isolate, render_frame_host, input_state, options.mode, *snapshot));
++    return;
++  }
++
++  content::GlobalRenderFrameHostId frame_id = render_frame_host->GetGlobalId();
++  if (options.mode == FocusedEditableTextMode::kSurrounding) {
++    render_frame_host->RequestTextSurroundingSelection(
++        base::BindOnce(&OnFocusedEditableTextSurroundingSelection,
++                       std::move(callback), contents->GetWeakPtr(), frame_id,
++                       input_state, options.mode, options.max_length),
++        options.max_length);
++    return;
++  }
++
++  render_frame_host->ExecuteJavaScriptForTests(
++      CreateFocusedEditableTextDomScript(options.max_length),
++      base::BindOnce(&OnFocusedEditableTextDomResult, std::move(callback),
++                     contents->GetWeakPtr(), frame_id, input_state,
++                     options.mode),
++      content::ISOLATED_WORLD_ID_GLOBAL);
+ }
+
++class FocusedEditableTextWatcher;
++
+ class TextCaretFrameObserver : public base::SupportsUserData::Data,
+                                public content::WebContentsObserver,
+                                public content::TextInputManager::Observer {
+  public:
+   TextCaretFrameObserver(content::WebContents* web_contents,
+-                         base::WeakPtr<WebContents> api_web_contents)
+-      : content::WebContentsObserver(web_contents),
+-        api_web_contents_(api_web_contents) {
+-    auto* web_contents_impl =
+-        static_cast<content::WebContentsImpl*>(web_contents);
+-    text_input_manager_ = web_contents_impl->GetTextInputManager();
+-    if (text_input_manager_)
+-      text_input_manager_->AddObserver(this);
+-  }
++                         base::WeakPtr<WebContents> api_web_contents);
++  ~TextCaretFrameObserver() override;
+
+-  ~TextCaretFrameObserver() override { StopObservingTextInputManager(); }
+-
+-  static void CreateForWebContents(
++  static TextCaretFrameObserver* FromOrCreate(
+       content::WebContents* web_contents,
+-      base::WeakPtr<WebContents> api_web_contents) {
+-    if (!web_contents ||
+-        web_contents->GetUserData(kTextCaretFrameObserverKey)) {
+-      return;
+-    }
++      base::WeakPtr<WebContents> api_web_contents);
++  static void CreateForWebContents(content::WebContents* web_contents,
++                                   base::WeakPtr<WebContents> api_web_contents);
+
+-    web_contents->SetUserData(kTextCaretFrameObserverKey,
+-                              std::make_unique<TextCaretFrameObserver>(
+-                                  web_contents, api_web_contents));
+-  }
++  void RegisterFocusedEditableTextWatcher(FocusedEditableTextWatcher* watcher);
++  void UnregisterFocusedEditableTextWatcher(
++      FocusedEditableTextWatcher* watcher);
+
+   using content::WebContentsObserver::OnTextSelectionChanged;
+
+  private:
+-  void WebContentsDestroyed() override {
+-    StopObservingTextInputManager();
+-    Observe(nullptr);
+-  }
+-
++  void WebContentsDestroyed() override;
+   void OnUpdateTextInputStateCalled(
+       content::TextInputManager* text_input_manager,
+       content::RenderWidgetHostViewBase* updated_view,
+-      bool did_update_state) override {
+-    if (did_update_state)
+-      EmitCaretInfoChanged(text_input_manager, updated_view, "focus");
+-  }
+-
++      bool did_update_state) override;
+   void OnSelectionBoundsChanged(
+       content::TextInputManager* text_input_manager,
+-      content::RenderWidgetHostViewBase* updated_view) override {
+-    EmitCaretInfoChanged(text_input_manager, updated_view, "caret-move");
+-  }
+-
++      content::RenderWidgetHostViewBase* updated_view) override;
+   void OnTextSelectionChanged(
+       content::TextInputManager* text_input_manager,
+-      content::RenderWidgetHostViewBase* updated_view) override {
+-    EmitCaretInfoChanged(text_input_manager, updated_view, "caret-move");
++      content::RenderWidgetHostViewBase* updated_view) override;
++  void StopObservingTextInputManager();
++  void NotifyFocusedEditableTextWatchers();
++  void CloseFocusedEditableTextWatchers();
++  void EmitCaretInfoChanged(content::TextInputManager* text_input_manager,
++                            content::RenderWidgetHostViewBase* updated_view,
++                            const char* reason);
++
++  base::WeakPtr<WebContents> api_web_contents_;
++  raw_ptr<content::TextInputManager> text_input_manager_ = nullptr;
++  std::set<FocusedEditableTextWatcher*> focused_editable_text_watchers_;
++};
++
++class FocusedEditableTextWatcher final
++    : public gin::Wrappable<FocusedEditableTextWatcher>,
++      public gin_helper::Pinnable<FocusedEditableTextWatcher> {
++ public:
++  using Callback = base::RepeatingCallback<void(v8::Local<v8::Value>)>;
++
++  static const gin::WrapperInfo kWrapperInfo;
++
++  static FocusedEditableTextWatcher* Create(
++      v8::Isolate* isolate,
++      content::WebContents* web_contents,
++      TextCaretFrameObserver* observer,
++      FocusedEditableTextWatchOptions options,
++      Callback callback) {
++    return cppgc::MakeGarbageCollected<FocusedEditableTextWatcher>(
++        isolate->GetCppHeap()->GetAllocationHandle(), web_contents, observer,
++        std::move(options), std::move(callback));
+   }
+
+-  void StopObservingTextInputManager() {
+-    if (text_input_manager_ && text_input_manager_->HasObserver(this))
+-      text_input_manager_->RemoveObserver(this);
+-    text_input_manager_ = nullptr;
++  FocusedEditableTextWatcher(content::WebContents* web_contents,
++                             TextCaretFrameObserver* observer,
++                             FocusedEditableTextWatchOptions options,
++                             Callback callback)
++      : web_contents_(web_contents),
++        observer_(observer),
++        options_(std::move(options)),
++        callback_(std::move(callback)) {
++    if (observer_)
++      observer_->RegisterFocusedEditableTextWatcher(this);
+   }
+
+-  void EmitCaretInfoChanged(content::TextInputManager* text_input_manager,
+-                            content::RenderWidgetHostViewBase* updated_view,
+-                            const char* reason) {
+-    if (!api_web_contents_) {
++  ~FocusedEditableTextWatcher() override { Close(); }
++
++  static const char* GetClassName() { return "FocusedEditableTextWatcher"; }
++
++  const gin::WrapperInfo* wrapper_info() const override {
++    return &kWrapperInfo;
++  }
++
++  const char* GetHumanReadableName() const override {
++    return "Electron / FocusedEditableTextWatcher";
++  }
++
++  gin::ObjectTemplateBuilder GetObjectTemplateBuilder(
++      v8::Isolate* isolate) override {
++    return gin::Wrappable<FocusedEditableTextWatcher>::GetObjectTemplateBuilder(
++               isolate)
++        .SetMethod("close", &FocusedEditableTextWatcher::Close);
++  }
++
++  void Trace(cppgc::Visitor* visitor) const override {
++    gin::Wrappable<FocusedEditableTextWatcher>::Trace(visitor);
++  }
++
++  void PinForCallbacks(v8::Isolate* isolate) { Pin(isolate); }
++
++  void NotifyTextInputChanged() {
++    if (closed_)
+       return;
++    pending_change_ = true;
++    ScheduleSnapshot();
++  }
++
++  void CloseFromObserver() {
++    if (closed_)
++      return;
++    closed_ = true;
++    observer_ = nullptr;
++    timer_.Stop();
++    weak_factory_.InvalidateWeakPtrs();
++    Unpin();
++  }
++
++  void Close() {
++    if (closed_)
++      return;
++    closed_ = true;
++    timer_.Stop();
++    weak_factory_.InvalidateWeakPtrs();
++    if (observer_) {
++      observer_->UnregisterFocusedEditableTextWatcher(this);
++      observer_ = nullptr;
+     }
++    Unpin();
++  }
+
+-    v8::Isolate* isolate = JavascriptEnvironment::GetIsolate();
+-    v8::HandleScope handle_scope(isolate);
+-    v8::Local<v8::Value> details = CreateTextCaretInfo(
+-        isolate, web_contents(), text_input_manager, updated_view, reason);
+-    if (!details->IsNull())
+-      api_web_contents_->Emit("text-caret-info-changed", details);
++ private:
++  void ScheduleSnapshot() {
++    if (snapshot_in_flight_ || timer_.IsRunning())
++      return;
++
++    base::TimeDelta delay;
++    if (!last_emit_time_.is_null() && !options_.throttle_interval.is_zero()) {
++      const base::TimeDelta elapsed = base::TimeTicks::Now() - last_emit_time_;
++      if (elapsed < options_.throttle_interval)
++        delay = options_.throttle_interval - elapsed;
++    }
++
++    timer_.Start(FROM_HERE, delay,
++                 base::BindOnce(&FocusedEditableTextWatcher::StartSnapshot,
++                                weak_factory_.GetWeakPtr()));
+   }
+
+-  base::WeakPtr<WebContents> api_web_contents_;
+-  raw_ptr<content::TextInputManager> text_input_manager_ = nullptr;
++  void StartSnapshot() {
++    if (closed_ || !web_contents_)
++      return;
++
++    pending_change_ = false;
++    snapshot_in_flight_ = true;
++    RequestFocusedEditableTextSnapshot(
++        web_contents_, options_.text_options,
++        base::BindOnce(&FocusedEditableTextWatcher::OnSnapshot,
++                       weak_factory_.GetWeakPtr()));
++  }
++
++  void OnSnapshot(v8::Local<v8::Value> value) {
++    if (closed_)
++      return;
++
++    snapshot_in_flight_ = false;
++    last_emit_time_ = base::TimeTicks::Now();
++    callback_.Run(value);
++    if (closed_)
++      return;
++    if (pending_change_)
++      ScheduleSnapshot();
++  }
++
++  raw_ptr<content::WebContents> web_contents_;
++  raw_ptr<TextCaretFrameObserver> observer_;
++  FocusedEditableTextWatchOptions options_;
++  Callback callback_;
++  bool closed_ = false;
++  bool snapshot_in_flight_ = false;
++  bool pending_change_ = false;
++  base::TimeTicks last_emit_time_;
++  base::OneShotTimer timer_;
++  base::WeakPtrFactory<FocusedEditableTextWatcher> weak_factory_{this};
+ };
+
++const gin::WrapperInfo FocusedEditableTextWatcher::kWrapperInfo =
++    electron::MakeWrapperInfo(electron::kElectronFocusedEditableTextWatcher);
++
++TextCaretFrameObserver::TextCaretFrameObserver(
++    content::WebContents* web_contents,
++    base::WeakPtr<WebContents> api_web_contents)
++    : content::WebContentsObserver(web_contents),
++      api_web_contents_(api_web_contents) {
++  auto* web_contents_impl =
++      static_cast<content::WebContentsImpl*>(web_contents);
++  text_input_manager_ = web_contents_impl->GetTextInputManager();
++  if (text_input_manager_)
++    text_input_manager_->AddObserver(this);
++}
++
++TextCaretFrameObserver::~TextCaretFrameObserver() {
++  CloseFocusedEditableTextWatchers();
++  StopObservingTextInputManager();
++}
++
++TextCaretFrameObserver* TextCaretFrameObserver::FromOrCreate(
++    content::WebContents* web_contents,
++    base::WeakPtr<WebContents> api_web_contents) {
++  if (!web_contents)
++    return nullptr;
++
++  if (auto* observer = static_cast<TextCaretFrameObserver*>(
++          web_contents->GetUserData(kTextCaretFrameObserverKey))) {
++    return observer;
++  }
++
++  auto observer =
++      std::make_unique<TextCaretFrameObserver>(web_contents, api_web_contents);
++  auto* observer_ptr = observer.get();
++  web_contents->SetUserData(kTextCaretFrameObserverKey, std::move(observer));
++  return observer_ptr;
++}
++
++void TextCaretFrameObserver::CreateForWebContents(
++    content::WebContents* web_contents,
++    base::WeakPtr<WebContents> api_web_contents) {
++  FromOrCreate(web_contents, std::move(api_web_contents));
++}
++
++void TextCaretFrameObserver::RegisterFocusedEditableTextWatcher(
++    FocusedEditableTextWatcher* watcher) {
++  focused_editable_text_watchers_.insert(watcher);
++}
++
++void TextCaretFrameObserver::UnregisterFocusedEditableTextWatcher(
++    FocusedEditableTextWatcher* watcher) {
++  focused_editable_text_watchers_.erase(watcher);
++}
++
++void TextCaretFrameObserver::WebContentsDestroyed() {
++  CloseFocusedEditableTextWatchers();
++  StopObservingTextInputManager();
++  Observe(nullptr);
++}
++
++void TextCaretFrameObserver::OnUpdateTextInputStateCalled(
++    content::TextInputManager* text_input_manager,
++    content::RenderWidgetHostViewBase* updated_view,
++    bool did_update_state) {
++  if (!did_update_state)
++    return;
++
++  EmitCaretInfoChanged(text_input_manager, updated_view, "focus");
++  NotifyFocusedEditableTextWatchers();
++}
++
++void TextCaretFrameObserver::OnSelectionBoundsChanged(
++    content::TextInputManager* text_input_manager,
++    content::RenderWidgetHostViewBase* updated_view) {
++  EmitCaretInfoChanged(text_input_manager, updated_view, "caret-move");
++  NotifyFocusedEditableTextWatchers();
++}
++
++void TextCaretFrameObserver::OnTextSelectionChanged(
++    content::TextInputManager* text_input_manager,
++    content::RenderWidgetHostViewBase* updated_view) {
++  EmitCaretInfoChanged(text_input_manager, updated_view, "caret-move");
++  NotifyFocusedEditableTextWatchers();
++}
++
++void TextCaretFrameObserver::StopObservingTextInputManager() {
++  if (text_input_manager_ && text_input_manager_->HasObserver(this))
++    text_input_manager_->RemoveObserver(this);
++  text_input_manager_ = nullptr;
++}
++
++void TextCaretFrameObserver::NotifyFocusedEditableTextWatchers() {
++  std::vector<FocusedEditableTextWatcher*> watchers(
++      focused_editable_text_watchers_.begin(),
++      focused_editable_text_watchers_.end());
++  for (auto* watcher : watchers) {
++    if (focused_editable_text_watchers_.contains(watcher))
++      watcher->NotifyTextInputChanged();
++  }
++}
++
++void TextCaretFrameObserver::CloseFocusedEditableTextWatchers() {
++  std::vector<FocusedEditableTextWatcher*> watchers(
++      focused_editable_text_watchers_.begin(),
++      focused_editable_text_watchers_.end());
++  focused_editable_text_watchers_.clear();
++  for (auto* watcher : watchers)
++    watcher->CloseFromObserver();
++}
++
++void TextCaretFrameObserver::EmitCaretInfoChanged(
++    content::TextInputManager* text_input_manager,
++    content::RenderWidgetHostViewBase* updated_view,
++    const char* reason) {
++  if (!api_web_contents_)
++    return;
++
++  v8::Isolate* isolate = JavascriptEnvironment::GetIsolate();
++  v8::HandleScope handle_scope(isolate);
++  v8::Local<v8::Value> details = CreateTextCaretInfo(
++      isolate, web_contents(), text_input_manager, updated_view, reason);
++  if (!details->IsNull())
++    api_web_contents_->Emit("text-caret-info-changed", details);
++}
++
+ const char kRootName[] = "<root>";
+
+ struct FileSystem {
+@@ -5964,48 +6287,72 @@ v8::Local<v8::Promise> WebContents::GetFocusedEditableText(
+     return handle;
+   }
+
+-  FocusedEditableTextInputState input_state;
+-  const ui::mojom::TextInputState* text_input_state = nullptr;
+-  content::RenderFrameHost* render_frame_host = GetFocusedEditableTextFrame(
+-      web_contents(), &input_state, &text_input_state);
+-  if (!render_frame_host) {
+-    v8::Local<v8::Value> null_value = v8::Null(isolate);
+-    promise.Resolve(null_value);
+-    return handle;
++  RequestFocusedEditableTextSnapshot(
++      web_contents(), options,
++      base::BindOnce([](gin_helper::Promise<v8::Local<v8::Value>> promise,
++                        v8::Local<v8::Value> value) { promise.Resolve(value); },
++                     std::move(promise)));
++  return handle;
++}
++
++v8::Local<v8::Value> WebContents::WatchFocusedEditableText(
++    gin::Arguments* args) {
++  v8::Isolate* isolate = args->isolate();
++  FocusedEditableTextWatchOptions options;
++  base::RepeatingCallback<void(v8::Local<v8::Value>)> callback;
++  std::string error;
++
++  if (args->Length() == 0) {
++    args->ThrowTypeError("callback must be a Function");
++    return v8::Null(isolate);
+   }
+
+-  if (options.mode == FocusedEditableTextMode::kValue) {
+-    std::optional<FocusedEditableTextSnapshot> snapshot =
+-        CreateFocusedEditableTextSnapshotFromInputState(*text_input_state,
+-                                                        options.max_length);
+-    if (!snapshot) {
+-      v8::Local<v8::Value> null_value = v8::Null(isolate);
+-      promise.Resolve(null_value);
+-      return handle;
++  if (args->PeekNext()->IsFunction()) {
++    args->GetNext(&callback);
++  } else {
++    gin_helper::Dictionary dict = gin_helper::Dictionary::CreateEmpty(isolate);
++    if (args->PeekNext()->IsNullOrUndefined()) {
++      v8::Local<v8::Value> ignored;
++      args->GetNext(&ignored);
++    } else if (!args->GetNext(&dict)) {
++      args->ThrowTypeError("options must be an object when provided");
++      return v8::Null(isolate);
++    }
++
++    if (!ParseFocusedEditableTextWatchOptionsDictionary(dict, &options,
++                                                        &error)) {
++      args->ThrowTypeError(error);
++      return v8::Null(isolate);
++    }
++
++    if (!args->GetNext(&callback)) {
++      args->ThrowTypeError("callback must be a Function");
++      return v8::Null(isolate);
+     }
+-    promise.Resolve(CreateFocusedEditableTextValue(
+-        isolate, render_frame_host, input_state, options.mode, *snapshot));
+-    return handle;
+   }
+
+-  content::GlobalRenderFrameHostId frame_id = render_frame_host->GetGlobalId();
+-  if (options.mode == FocusedEditableTextMode::kSurrounding) {
+-    render_frame_host->RequestTextSurroundingSelection(
+-        base::BindOnce(&OnFocusedEditableTextSurroundingSelection,
+-                       std::move(promise), web_contents()->GetWeakPtr(),
+-                       frame_id, input_state, options.mode,
+-                       options.max_length),
+-        options.max_length);
+-    return handle;
++  auto* observer =
++      TextCaretFrameObserver::FromOrCreate(web_contents(), GetWeakPtr());
++  if (!observer) {
++    gin_helper::ErrorThrower{isolate}.ThrowError(
++        "Unable to watch focused editable text");
++    return v8::Null(isolate);
+   }
+
+-  render_frame_host->ExecuteJavaScriptForTests(
+-      CreateFocusedEditableTextDomScript(options.max_length),
+-      base::BindOnce(&OnFocusedEditableTextDomResult, std::move(promise),
+-                     web_contents()->GetWeakPtr(), frame_id, input_state,
+-                     options.mode),
+-      content::ISOLATED_WORLD_ID_GLOBAL);
+-  return handle;
++  auto* watcher = FocusedEditableTextWatcher::Create(
++      isolate, web_contents(), observer, std::move(options),
++      std::move(callback));
++  v8::Local<v8::Object> wrapper;
++  if (!watcher->GetWrapper(isolate).ToLocal(&wrapper) || wrapper.IsEmpty()) {
++    watcher->Close();
++    gin_helper::ErrorThrower{isolate}.ThrowError(
++        "Unable to create focused editable text watcher");
++    return v8::Null(isolate);
++  }
++
++  watcher->PinForCallbacks(isolate);
++  watcher->NotifyTextInputChanged();
++  return wrapper;
+ }
+
+ void WebContents::SendInputEvent(v8::Isolate* isolate,
+@@ -6790,10 +7137,9 @@ void WebContents::RunBeforeUnloadDialog(content::WebContents* web_contents,
+                                         bool is_reload,
+                                         DialogClosedCallback callback) {
+   if (has_javascript_dialog_handler_) {
+-    const std::u16string title =
+-        l10n_util::GetStringUTF16(is_reload
+-                                      ? IDS_BEFORERELOAD_MESSAGEBOX_TITLE
+-                                      : IDS_BEFOREUNLOAD_MESSAGEBOX_TITLE);
++    const std::u16string title = l10n_util::GetStringUTF16(
++        is_reload ? IDS_BEFORERELOAD_MESSAGEBOX_TITLE
++                  : IDS_BEFOREUNLOAD_MESSAGEBOX_TITLE);
+     const std::u16string message_text =
+         l10n_util::GetStringUTF16(IDS_BEFOREUNLOAD_MESSAGEBOX_MESSAGE);
+
+@@ -6820,10 +7166,9 @@ void WebContents::RunBeforeUnloadDialog(content::WebContents* web_contents,
+                              std::u16string());
+ }
+
+-void WebContents::OnBeforeUnloadDialogClosed(
+-    DialogClosedCallback callback,
+-    bool success,
+-    const std::u16string& user_input) {
++void WebContents::OnBeforeUnloadDialogClosed(DialogClosedCallback callback,
++                                             bool success,
++                                             const std::u16string& user_input) {
+   if (pending_unload_url_.has_value() && !success) {
+     Emit("did-fail-load", static_cast<int>(net::ERR_ABORTED),
+          net::ErrorToShortString(net::ERR_ABORTED),
+@@ -7422,8 +7767,9 @@ void WebContents::FillObjectTemplate(v8::Isolate* isolate,
+       .SetMethod("focus", &WebContents::Focus)
+       .SetMethod("isFocused", &WebContents::IsFocused)
+       .SetMethod("getTextCaretInfo", &WebContents::GetTextCaretInfo)
+-      .SetMethod("getFocusedEditableText",
+-                 &WebContents::GetFocusedEditableText)
++      .SetMethod("getFocusedEditableText", &WebContents::GetFocusedEditableText)
++      .SetMethod("watchFocusedEditableText",
++                 &WebContents::WatchFocusedEditableText)
+       .SetMethod("sendInputEvent", &WebContents::SendInputEvent)
+       .SetMethod("dispatchInputEvent", &WebContents::DispatchInputEvent)
+       .SetMethod("beginFrameSubscription", &WebContents::BeginFrameSubscription)
+diff --git a/shell/browser/api/electron_api_web_contents.h b/shell/browser/api/electron_api_web_contents.h
+index a38091b7dd..30c89280ba 100644
+--- a/shell/browser/api/electron_api_web_contents.h
++++ b/shell/browser/api/electron_api_web_contents.h
+@@ -310,6 +310,7 @@ class WebContents final : public ExclusiveAccessContext,
+   bool IsFocused() const;
+   v8::Local<v8::Value> GetTextCaretInfo(v8::Isolate* isolate);
+   v8::Local<v8::Promise> GetFocusedEditableText(gin::Arguments* args);
++  v8::Local<v8::Value> WatchFocusedEditableText(gin::Arguments* args);
+
+   // Send WebInputEvent to the page.
+   void SendInputEvent(v8::Isolate* isolate, v8::Local<v8::Value> input_event);
+diff --git a/shell/common/gin_helper/wrappable_pointer_tags.h b/shell/common/gin_helper/wrappable_pointer_tags.h
+index e7ba3d93c6..0c159272d6 100644
+--- a/shell/common/gin_helper/wrappable_pointer_tags.h
++++ b/shell/common/gin_helper/wrappable_pointer_tags.h
+@@ -17,6 +17,7 @@ enum ElectronWrappablePointerTag : uint16_t {
+   kElectronDebugger,                        // electron::api::Debugger
+   kElectronEvent,                           // gin_helper::internal::Event
+   kElectronExtensions,                      // electron::api::Extensions
++  kElectronFocusedEditableTextWatcher,      // electron::api::FocusedEditableTextWatcher
+   kElectronMenu,                            // electron::api::Menu
+   kElectronNetLog,                          // electron::api::NetLog
+   kElectronPowerMonitor,                    // electron::api::PowerMonitor
+diff --git a/spec/api-web-contents-spec.ts b/spec/api-web-contents-spec.ts
+index 08213124c9..04dc797d2c 100644
+--- a/spec/api-web-contents-spec.ts
++++ b/spec/api-web-contents-spec.ts
+@@ -1600,6 +1600,263 @@ describe('webContents module', () => {
+     });
+   });
+
++  describe('watchFocusedEditableText() API', () => {
++    afterEach(closeAllWindows);
++
++    it('calls back with the current focused editable text snapshot', async () => {
++      const w = new BrowserWindow({ show: false, width: 400, height: 300 });
++      await w.loadURL(
++        `data:text/html;charset=utf-8,${encodeURIComponent(`
++        <!DOCTYPE html>
++        <input id="field" value="hello" style="font-size: 24px; margin: 20px;">
++      `)}`
++      );
++
++      await w.webContents.executeJavaScript(`
++        const field = document.getElementById('field');
++        field.focus();
++        field.setSelectionRange(5, 5);
++      `);
++
++      const info = await new Promise<Electron.FocusedEditableText>((resolve) => {
++        let watcher: Electron.FocusedEditableTextWatcher;
++        watcher = w.webContents.watchFocusedEditableText(snapshot => {
++          if (snapshot?.text === 'hello') {
++            watcher.close();
++            resolve(snapshot);
++          }
++        });
++      });
++
++      expect(info.frame).to.equal(w.webContents.mainFrame);
++      expect(info.text).to.equal('hello');
++      expect(info.mode).to.equal('surrounding');
++      expect(info.source).to.equal('surrounding-selection');
++      expect(info.selection).to.deep.equal({
++        isCollapsed: true,
++        start: 5,
++        end: 5
++      });
++    });
++
++    it('continues watching when the returned watcher is not retained', async () => {
++      const w = new BrowserWindow({ show: false, width: 400, height: 300 });
++      await w.loadURL(
++        `data:text/html;charset=utf-8,${encodeURIComponent(`
++        <!DOCTYPE html>
++        <input id="field" value="hello" style="font-size: 24px; margin: 20px;">
++      `)}`
++      );
++
++      await w.webContents.executeJavaScript(`
++      (() => {
++        const field = document.getElementById('field');
++        field.focus();
++        field.setSelectionRange(field.value.length, field.value.length);
++      })();
++      `);
++
++      const changed = new Promise<Electron.FocusedEditableText>((resolve) => {
++        w.webContents.watchFocusedEditableText({
++          mode: 'full',
++          throttleMs: 0
++        }, snapshot => {
++          if (snapshot?.text === 'hello!') {
++            resolve(snapshot);
++          }
++        });
++      });
++
++      const v8Util = process._linkedBinding('electron_common_v8_util');
++      v8Util.requestGarbageCollectionForTesting();
++      await w.webContents.insertText('!');
++      const info = await changed;
++
++      expect(info.text).to.equal('hello!');
++      expect(info.mode).to.equal('full');
++      expect(info.source).to.equal('dom');
++    });
++
++    it('reports updates and stops after close()', async () => {
++      const w = new BrowserWindow({ show: false, width: 400, height: 300 });
++      await w.loadURL(
++        `data:text/html;charset=utf-8,${encodeURIComponent(`
++        <!DOCTYPE html>
++        <input id="field" value="hello" style="font-size: 24px; margin: 20px;">
++      `)}`
++      );
++
++      await w.webContents.executeJavaScript(`
++      (() => {
++        const field = document.getElementById('field');
++        field.focus();
++        field.setSelectionRange(field.value.length, field.value.length);
++      })();
++      `);
++
++      let callCount = 0;
++      const changed = new Promise<Electron.FocusedEditableText>((resolve) => {
++        let watcher: Electron.FocusedEditableTextWatcher;
++        watcher = w.webContents.watchFocusedEditableText({ throttleMs: 0 }, snapshot => {
++          callCount++;
++          if (snapshot?.text === 'hello!') {
++            watcher.close();
++            resolve(snapshot);
++          }
++        });
++      });
++
++      await w.webContents.insertText('!');
++      const info = await changed;
++      expect(info.text).to.equal('hello!');
++
++      const callsAfterClose = callCount;
++      await w.webContents.insertText('?');
++      await setTimeout(150);
++      expect(callCount).to.equal(callsAfterClose);
++    });
++
++    it('keeps multiple watchers independent', async () => {
++      const w = new BrowserWindow({ show: false, width: 400, height: 300 });
++      await w.loadURL(
++        `data:text/html;charset=utf-8,${encodeURIComponent(`
++        <!DOCTYPE html>
++        <input id="field" value="0123456789" style="font-size: 24px; margin: 20px;">
++      `)}`
++      );
++
++      await w.webContents.executeJavaScript(`
++        const field = document.getElementById('field');
++        field.focus();
++        field.setSelectionRange(5, 6);
++      `);
++
++      let valueWatcher: Electron.FocusedEditableTextWatcher | undefined;
++      let fullWatcher: Electron.FocusedEditableTextWatcher | undefined;
++      const valueSnapshot = new Promise<Electron.FocusedEditableText>((resolve) => {
++        valueWatcher = w.webContents.watchFocusedEditableText({
++          mode: 'value',
++          maxLength: 5,
++          throttleMs: 0
++        }, snapshot => {
++          if (snapshot?.source === 'text-input-state') {
++            resolve(snapshot);
++          }
++        });
++      });
++      const fullSnapshot = new Promise<Electron.FocusedEditableText>((resolve) => {
++        fullWatcher = w.webContents.watchFocusedEditableText({
++          mode: 'full',
++          maxLength: 10,
++          throttleMs: 0
++        }, snapshot => {
++          if (snapshot?.source === 'dom') {
++            resolve(snapshot);
++          }
++        });
++      });
++
++      const [valueInfo, fullInfo] = await Promise.all([valueSnapshot, fullSnapshot]);
++      valueWatcher?.close();
++      fullWatcher?.close();
++
++      expect(valueInfo.mode).to.equal('value');
++      expect(valueInfo.text).to.have.lengthOf(5);
++      expect(valueInfo.isPartial).to.be.true();
++      expect(valueInfo.text.slice(valueInfo.selection.start, valueInfo.selection.end)).to.equal('5');
++
++      expect(fullInfo.mode).to.equal('full');
++      expect(fullInfo.text).to.equal('0123456789');
++      expect(fullInfo.isPartial).to.be.false();
++      expect(fullInfo.text.slice(fullInfo.selection.start, fullInfo.selection.end)).to.equal('5');
++    });
++
++    it('reports null for password inputs and when editable focus is lost', async () => {
++      const w = new BrowserWindow({ show: false, width: 400, height: 300 });
++      await w.loadURL(
++        `data:text/html;charset=utf-8,${encodeURIComponent(`
++        <!DOCTYPE html>
++        <input id="field" value="hello" style="font-size: 24px; margin: 20px;">
++        <input id="password" type="password" value="secret">
++        <button id="button">button</button>
++      `)}`
++      );
++
++      await w.webContents.executeJavaScript(`
++        const field = document.getElementById('field');
++        field.focus();
++        field.setSelectionRange(field.value.length, field.value.length);
++      `);
++
++      const snapshots: Array<Electron.FocusedEditableText | null> = [];
++      let watcher: Electron.FocusedEditableTextWatcher | undefined;
++      const sawText = new Promise<void>((resolve) => {
++        watcher = w.webContents.watchFocusedEditableText({ throttleMs: 0 }, snapshot => {
++          snapshots.push(snapshot);
++          if (snapshot?.text === 'hello') {
++            resolve();
++          }
++        });
++      });
++
++      await sawText;
++      const sawPasswordNull = waitUntil(() => snapshots.length > 0 && snapshots[snapshots.length - 1] === null);
++      await w.webContents.executeJavaScript(`
++        document.getElementById('password').focus();
++      `);
++      await sawPasswordNull;
++      watcher?.close();
++
++      snapshots.length = 0;
++      await w.webContents.executeJavaScript(`
++      (() => {
++        const field = document.getElementById('field');
++        field.focus();
++        field.setSelectionRange(field.value.length, field.value.length);
++      })();
++      `);
++      const sawTextAgain = new Promise<void>((resolve) => {
++        let textWatcher: Electron.FocusedEditableTextWatcher;
++        textWatcher = w.webContents.watchFocusedEditableText({ throttleMs: 0 }, snapshot => {
++          snapshots.push(snapshot);
++          if (snapshot?.text === 'hello') {
++            textWatcher.close();
++            resolve();
++          }
++        });
++      });
++      await sawTextAgain;
++
++      snapshots.length = 0;
++      const focusLostWatcher = w.webContents.watchFocusedEditableText({ throttleMs: 0 }, snapshot => {
++        snapshots.push(snapshot);
++      });
++      await w.webContents.executeJavaScript(`
++        document.getElementById('button').focus();
++      `);
++      await waitUntil(() => snapshots.length > 0 && snapshots[snapshots.length - 1] === null);
++      focusLostWatcher.close();
++    });
++
++    it('throws for invalid options', async () => {
++      const w = new BrowserWindow({ show: false, width: 400, height: 300 });
++      await w.loadURL('about:blank');
++
++      expect(() => {
++        w.webContents.watchFocusedEditableText({ mode: 'invalid' as any }, () => {});
++      }).to.throw("mode must be 'value', 'surrounding', or 'full'");
++      expect(() => {
++        w.webContents.watchFocusedEditableText({ maxLength: 0 }, () => {});
++      }).to.throw('maxLength must be between 1 and 1000000');
++      expect(() => {
++        w.webContents.watchFocusedEditableText({ throttleMs: -1 }, () => {});
++      }).to.throw('throttleMs must be between 0 and 60000');
++      expect(() => {
++        w.webContents.watchFocusedEditableText({} as any);
++      }).to.throw('callback must be a Function');
++    });
++  });
++
+   describe('openDevTools() API', () => {
+     afterEach(closeAllWindows);
+     it('can show window with activation', async () => {

@@ -1,0 +1,740 @@
+From 2cf89420a367507ed18feb0e2838cdd1688de3ff Mon Sep 17 00:00:00 2001
+From: Jung-Kwang Lee <ntoskrnl7@gmail.com>
+Date: Sat, 16 May 2026 06:05:02 +0900
+Subject: Add Picture-in-Picture handle API
+
+---
+ docs/api/app.md                               |  36 ++++
+ docs/api/document-picture-in-picture.md       |  19 ++
+ docs/api/picture-in-picture.md                |  83 +++++++++
+ .../picture-in-picture-source-options.md      |   4 +
+ docs/api/video-picture-in-picture.md          |  23 +++
+ docs/api/web-contents.md                      |  20 +++
+ lib/browser/api/app.ts                        |  11 ++
+ lib/browser/api/web-contents.ts               |   6 +
+ lib/browser/picture-in-picture.ts             | 167 ++++++++++++++++++
+ shell/browser/api/electron_api_app.cc         | 112 ++++++++++++
+ shell/browser/api/electron_api_app.h          |  21 ++-
+ typings/internal-electron.d.ts                |  14 ++
+ 12 files changed, 515 insertions(+), 1 deletion(-)
+ create mode 100644 docs/api/document-picture-in-picture.md
+ create mode 100644 docs/api/picture-in-picture.md
+ create mode 100644 docs/api/structures/picture-in-picture-source-options.md
+ create mode 100644 docs/api/video-picture-in-picture.md
+ create mode 100644 lib/browser/picture-in-picture.ts
+
+diff --git a/docs/api/app.md b/docs/api/app.md
+index 6e5496d420..34d665c78f 100644
+--- a/docs/api/app.md
++++ b/docs/api/app.md
+@@ -47,6 +47,32 @@ to get a Promise that is fulfilled when Electron is initialized.
+ > tick of the event loop. If an Electron API needs to be called before the `ready` event, ensure
+ > that it is called synchronously in the top-level context of the main process.
+
++### Event: 'enter-picture-in-picture'
++
++Returns:
++
++* `event` Event
++* `pip` [VideoPictureInPicture](video-picture-in-picture.md) | [DocumentPictureInPicture](document-picture-in-picture.md)
++
++Emitted when a Picture-in-Picture window becomes active.
++
++For video Picture-in-Picture, `pip.sourceWebContents` is the
++[`WebContents`](web-contents.md) that owns the video element currently shown in
++Picture-in-Picture, and `pip.videoSize` is the intrinsic video frame size.
++
++For Document Picture-in-Picture, `pip.sourceWebContents` is the opener
++[`WebContents`](web-contents.md) and `pip.pipWebContents` is the
++[`WebContents`](web-contents.md) hosted by the Picture-in-Picture window.
++
++### Event: 'leave-picture-in-picture'
++
++Returns:
++
++* `event` Event
++* `pip` [VideoPictureInPicture](video-picture-in-picture.md) | [DocumentPictureInPicture](document-picture-in-picture.md)
++
++Emitted when the active Picture-in-Picture window is closing.
++
+ ### Event: 'window-all-closed'
+
+ Emitted when all windows have been closed.
+@@ -665,6 +691,16 @@ On _Windows_, there are 2 kinds of icons:
+
+ On _Linux_ and _macOS_, icons depend on the application associated with file mime type.
+
++### `app.getCurrentPictureInPicture()`
++
++Returns `VideoPictureInPicture | DocumentPictureInPicture | null` - A handle
++for the active Picture-in-Picture window, or `null` if no video or Document
++Picture-in-Picture window is active.
++
++The returned object is tied to the PiP session that created it. If the PiP
++window is closed and another PiP window is opened later, methods on the old
++handle will not affect the new PiP window.
++
+ ### `app.setPath(name, path)`
+
+ * `name` string
+diff --git a/docs/api/document-picture-in-picture.md b/docs/api/document-picture-in-picture.md
+new file mode 100644
+index 0000000000..fc24f38ea7
+--- /dev/null
++++ b/docs/api/document-picture-in-picture.md
+@@ -0,0 +1,19 @@
++# DocumentPictureInPicture
++
++## Class: DocumentPictureInPicture extends `PictureInPicture`
++
++> A handle for a Document Picture-in-Picture window.
++
++Process: [Main](../glossary.md#main-process)<br />
++_This class is not exported from the `'electron'` module. It is only available as a return value of other methods in the Electron API._
++
++### Instance Properties
++
++#### `pip.type` _Readonly_
++
++A `string` that can be `document`.
++
++#### `pip.pipWebContents` _Readonly_
++
++A [`WebContents`](web-contents.md) hosted inside the Document Picture-in-Picture
++window.
+diff --git a/docs/api/picture-in-picture.md b/docs/api/picture-in-picture.md
+new file mode 100644
+index 0000000000..8dcaa568dc
+--- /dev/null
++++ b/docs/api/picture-in-picture.md
+@@ -0,0 +1,83 @@
++# PictureInPicture
++
++## Class: PictureInPicture
++
++> A handle for the currently active Picture-in-Picture window.
++
++Process: [Main](../glossary.md#main-process)<br />
++_This class is not exported from the `'electron'` module. It is only available as a return value of other methods in the Electron API._
++
++`PictureInPicture` instances are tied to the PiP session that created them. If
++the PiP window is closed and another PiP window is opened later, methods on the
++old handle will not affect the new PiP window.
++
++### Instance Methods
++
++#### `pip.getBounds()`
++
++Returns `Rectangle | null` - The current PiP window
++bounds in screen coordinates, or `null` if this handle is no longer active.
++
++#### `pip.setBounds(bounds)`
++
++* `bounds` [Rectangle](structures/rectangle.md)
++
++Returns `Rectangle | null` - The actual PiP window
++bounds after Chromium and the operating system apply minimum size, maximum
++size, work area, and aspect-ratio constraints. Returns `null` if this handle is
++no longer active.
++
++#### `pip.getSize()`
++
++Returns `Size | null` - The current PiP window size, or
++`null` if this handle is no longer active.
++
++#### `pip.setSize(size)`
++
++* `size` [Size](structures/size.md)
++
++Returns `Size | null` - The actual PiP window size after
++constraints are applied. The current PiP window origin is preserved. Returns
++`null` if this handle is no longer active.
++
++#### `pip.getSourceId()`
++
++Returns `string | null` - The `chromeMediaSourceId` for this PiP window, or
++`null` if one is not available on the current platform or this handle is no
++longer active.
++
++#### `pip.getSource([options])`
++
++* `options` [PictureInPictureSourceOptions](structures/picture-in-picture-source-options.md) (optional)
++
++Returns `Promise<DesktopCapturerSource | null>` - fulfilled with this PiP window
++as a [`DesktopCapturerSource`](structures/desktop-capturer-source.md), or `null`
++if one is not available on the current platform or this handle is no longer
++active.
++
++When the platform desktop source enumerator does not list the PiP window
++directly, Electron may return a source with an empty thumbnail and app icon. Its
++`id` is still usable as a `chromeMediaSourceId` constraint.
++
++#### `pip.close()`
++
++Returns `boolean` - Whether this PiP window was closed.
++
++#### `pip.isDestroyed()`
++
++Returns `boolean` - Whether this handle no longer points to the active PiP
++session.
++
++### Instance Properties
++
++#### `pip.id` _Readonly_
++
++A `number` that identifies the PiP session.
++
++#### `pip.type` _Readonly_
++
++A `string` identifying the PiP kind. Can be `video` or `document`.
++
++#### `pip.sourceWebContents` _Readonly_
++
++A [`WebContents`](web-contents.md) that opened or owns this PiP window.
+diff --git a/docs/api/structures/picture-in-picture-source-options.md b/docs/api/structures/picture-in-picture-source-options.md
+new file mode 100644
+index 0000000000..6b5f7e7be1
+--- /dev/null
++++ b/docs/api/structures/picture-in-picture-source-options.md
+@@ -0,0 +1,4 @@
++# PictureInPictureSourceOptions Object
++
++* `thumbnailSize` [Size](size.md) (optional) - The size that the Picture-in-Picture source thumbnail should be scaled to. Defaults to `150` x `150`. Set width or height to 0 when you do not need a thumbnail.
++* `fetchWindowIcons` boolean (optional) - Set to true to enable fetching the window icon. The default value is false. When false the `appIcon` property of the returned source is null.
+diff --git a/docs/api/video-picture-in-picture.md b/docs/api/video-picture-in-picture.md
+new file mode 100644
+index 0000000000..f2bdc345f3
+--- /dev/null
++++ b/docs/api/video-picture-in-picture.md
+@@ -0,0 +1,23 @@
++# VideoPictureInPicture
++
++## Class: VideoPictureInPicture extends `PictureInPicture`
++
++> A handle for a video Picture-in-Picture window.
++
++Process: [Main](../glossary.md#main-process)<br />
++_This class is not exported from the `'electron'` module. It is only available as a return value of other methods in the Electron API._
++
++### Instance Properties
++
++#### `pip.type` _Readonly_
++
++A `string` that can be `video`.
++
++#### `pip.videoSize` _Readonly_
++
++A [`Size`](structures/size.md) representing the intrinsic size of the video
++frames shown in Picture-in-Picture.
++
++This is the video frame size, not the current PiP window size. Use
++[`pip.getSize()`](picture-in-picture.md#pipgetsize) to read the current PiP
++window size.
+diff --git a/docs/api/web-contents.md b/docs/api/web-contents.md
+index 6b5519d662..40e41341a5 100644
+--- a/docs/api/web-contents.md
++++ b/docs/api/web-contents.md
+@@ -725,6 +725,26 @@ Emitted when media starts playing.
+
+ Emitted when media is paused or done playing.
+
++#### Event: 'enter-picture-in-picture'
++
++Returns:
++
++* `event` Event
++* `pip` [VideoPictureInPicture](video-picture-in-picture.md) | [DocumentPictureInPicture](document-picture-in-picture.md)
++
++Emitted on the opener or owner `WebContents` when a Picture-in-Picture window
++becomes active.
++
++#### Event: 'leave-picture-in-picture'
++
++Returns:
++
++* `event` Event
++* `pip` [VideoPictureInPicture](video-picture-in-picture.md) | [DocumentPictureInPicture](document-picture-in-picture.md)
++
++Emitted on the opener or owner `WebContents` when the active
++Picture-in-Picture window is closing.
++
+ #### Event: 'audio-state-changed'
+
+ Returns:
+diff --git a/lib/browser/api/app.ts b/lib/browser/api/app.ts
+index b60a4e5a95..abb7e7f17e 100644
+--- a/lib/browser/api/app.ts
++++ b/lib/browser/api/app.ts
+@@ -1,3 +1,5 @@
++import { getCurrentPictureInPicture, wrapPictureInPictureEvent } from '@electron/internal/browser/picture-in-picture';
++
+ import { Menu } from 'electron/main';
+
+ import { EventEmitter } from 'events';
+@@ -9,6 +11,11 @@ const { app } = bindings;
+
+ Object.setPrototypeOf(app, EventEmitter.prototype);
+
++const appEmit = app.emit;
++app.emit = function (eventName: string, ...args: any[]) {
++  return appEmit.call(this, eventName, ...wrapPictureInPictureEvent(app, eventName, args));
++};
++
+ // Only one app object permitted.
+ export default app;
+
+@@ -59,6 +66,10 @@ Object.defineProperty(app, 'applicationMenu', {
+   }
+ });
+
++app.getCurrentPictureInPicture = function () {
++  return getCurrentPictureInPicture(app);
++};
++
+ // The native implementation is not provided on non-windows platforms
+ app.setAppUserModelId = app.setAppUserModelId || (() => {});
+
+diff --git a/lib/browser/api/web-contents.ts b/lib/browser/api/web-contents.ts
+index 99660f60f4..58e882be30 100644
+--- a/lib/browser/api/web-contents.ts
++++ b/lib/browser/api/web-contents.ts
+@@ -6,6 +6,7 @@ import {
+ import { IpcMainImpl } from '@electron/internal/browser/ipc-main-impl';
+ import * as ipcMainUtils from '@electron/internal/browser/ipc-main-internal-utils';
+ import { parseFeatures } from '@electron/internal/browser/parse-features-string';
++import { wrapPictureInPictureEvent } from '@electron/internal/browser/picture-in-picture';
+ import * as deprecate from '@electron/internal/common/deprecate';
+ import { IPC_MESSAGES } from '@electron/internal/common/ipc-messages';
+
+@@ -122,6 +123,11 @@ const binding = process._linkedBinding('electron_browser_web_contents');
+ const printing = process._linkedBinding('electron_browser_printing');
+ const { WebContents } = binding as { WebContents: { prototype: Electron.WebContents } };
+
++const webContentsEmit = WebContents.prototype.emit;
++WebContents.prototype.emit = function (eventName: string, ...args: any[]) {
++  return webContentsEmit.call(this, eventName, ...wrapPictureInPictureEvent(app, eventName, args));
++};
++
+ WebContents.prototype.postMessage = function (...args) {
+   return this.mainFrame.postMessage(...args);
+ };
+diff --git a/lib/browser/picture-in-picture.ts b/lib/browser/picture-in-picture.ts
+new file mode 100644
+index 0000000000..39242471da
+--- /dev/null
++++ b/lib/browser/picture-in-picture.ts
+@@ -0,0 +1,167 @@
++const { nativeImage } = process._linkedBinding('electron_common_native_image');
++
++interface PictureInPictureDetails {
++  id: number;
++  type: 'video' | 'document';
++  sourceWebContents: Electron.WebContents;
++  pipWebContents?: Electron.WebContents;
++  bounds: Electron.Rectangle;
++  sourceId?: string;
++  videoSize?: Electron.Size;
++}
++
++type PictureInPictureApp = Electron.App & {
++  _getCurrentPictureInPictureDetails: () => PictureInPictureDetails | null;
++  _setCurrentPictureInPictureBounds: (id: number, bounds: Electron.Rectangle) => Electron.Rectangle | null;
++  _closeCurrentPictureInPicture: (id: number) => boolean;
++  _isCurrentPictureInPicture: (id: number) => boolean;
++};
++
++const getDesktopMediaWindowIdParts = (sourceId: string) => {
++  const [type, nativeWindowId, windowRegistryId] = sourceId.split(':');
++  if (type !== 'window') return null;
++
++  return {
++    nativeWindowId: nativeWindowId && nativeWindowId !== '0' ? nativeWindowId : null,
++    windowRegistryId: windowRegistryId && windowRegistryId !== '0' ? windowRegistryId : null
++  };
++};
++
++const getDetailsForId = (app: PictureInPictureApp, id: number) => {
++  const details = app._getCurrentPictureInPictureDetails();
++  return details?.id === id ? details : null;
++};
++
++const getSourceFromId = async (sourceId: string, options: Electron.PictureInPictureSourceOptions = {}) => {
++  const { getSources } = require('./api/desktop-capturer') as typeof import('./api/desktop-capturer');
++  const sources = await getSources({
++    types: ['window'],
++    thumbnailSize: options.thumbnailSize,
++    fetchWindowIcons: options.fetchWindowIcons
++  });
++
++  const targetWindowIdParts = getDesktopMediaWindowIdParts(sourceId);
++  const source =
++    sources.find((source) => {
++      if (source.id === sourceId) return true;
++
++      const sourceWindowIdParts = getDesktopMediaWindowIdParts(source.id);
++      return (
++        sourceWindowIdParts !== null &&
++        targetWindowIdParts !== null &&
++        ((targetWindowIdParts.nativeWindowId !== null &&
++          sourceWindowIdParts.nativeWindowId === targetWindowIdParts.nativeWindowId) ||
++          (targetWindowIdParts.windowRegistryId !== null &&
++            sourceWindowIdParts.windowRegistryId === targetWindowIdParts.windowRegistryId))
++      );
++    }) ?? null;
++  if (source) return source as Electron.DesktopCapturerSource;
++
++  return {
++    id: sourceId,
++    name: 'Picture-in-Picture',
++    thumbnail: nativeImage.createEmpty(),
++    appIcon: nativeImage.createEmpty(),
++    display_id: ''
++  };
++};
++
++export class PictureInPicture {
++  readonly id: number;
++  readonly type: 'video' | 'document';
++  readonly sourceWebContents: Electron.WebContents;
++
++  protected constructor(
++    protected readonly app: PictureInPictureApp,
++    details: PictureInPictureDetails
++  ) {
++    this.id = details.id;
++    this.type = details.type;
++    this.sourceWebContents = details.sourceWebContents;
++  }
++
++  getBounds() {
++    return getDetailsForId(this.app, this.id)?.bounds ?? null;
++  }
++
++  setBounds(bounds: Electron.Rectangle) {
++    return this.app._setCurrentPictureInPictureBounds(this.id, bounds);
++  }
++
++  getSize() {
++    const bounds = this.getBounds();
++    if (!bounds) return null;
++
++    return { width: bounds.width, height: bounds.height };
++  }
++
++  setSize(size: Electron.Size) {
++    const bounds = this.getBounds();
++    if (!bounds) return null;
++
++    const actualBounds = this.setBounds({ ...bounds, ...size });
++    if (!actualBounds) return null;
++
++    return { width: actualBounds.width, height: actualBounds.height };
++  }
++
++  getSourceId() {
++    return getDetailsForId(this.app, this.id)?.sourceId ?? null;
++  }
++
++  async getSource(options: Electron.PictureInPictureSourceOptions = {}) {
++    const sourceId = this.getSourceId();
++    if (!sourceId) return null;
++
++    return getSourceFromId(sourceId, options);
++  }
++
++  close() {
++    return this.app._closeCurrentPictureInPicture(this.id);
++  }
++
++  isDestroyed() {
++    return !this.app._isCurrentPictureInPicture(this.id);
++  }
++}
++
++export class VideoPictureInPicture extends PictureInPicture {
++  declare readonly type: 'video';
++  readonly videoSize: Electron.Size;
++
++  constructor(app: PictureInPictureApp, details: PictureInPictureDetails) {
++    super(app, details);
++    this.videoSize = details.videoSize ?? { width: 0, height: 0 };
++  }
++}
++
++export class DocumentPictureInPicture extends PictureInPicture {
++  declare readonly type: 'document';
++  readonly pipWebContents: Electron.WebContents;
++
++  constructor(app: PictureInPictureApp, details: PictureInPictureDetails) {
++    super(app, details);
++    this.pipWebContents = details.pipWebContents!;
++  }
++}
++
++export const createPictureInPicture = (app: PictureInPictureApp, details: PictureInPictureDetails) => {
++  if (details.type === 'document') {
++    return new DocumentPictureInPicture(app, details);
++  }
++
++  return new VideoPictureInPicture(app, details);
++};
++
++export const getCurrentPictureInPicture = (app: PictureInPictureApp) => {
++  const details = app._getCurrentPictureInPictureDetails();
++  return details ? createPictureInPicture(app, details) : null;
++};
++
++export const wrapPictureInPictureEvent = (app: PictureInPictureApp, eventName: string, args: any[]) => {
++  if ((eventName === 'enter-picture-in-picture' || eventName === 'leave-picture-in-picture') && args[1]?.id) {
++    return [args[0], createPictureInPicture(app, args[1]), ...args.slice(2)];
++  }
++
++  return args;
++};
+diff --git a/shell/browser/api/electron_api_app.cc b/shell/browser/api/electron_api_app.cc
+index baabc3123f..2a6bacc74a 100644
+--- a/shell/browser/api/electron_api_app.cc
++++ b/shell/browser/api/electron_api_app.cc
+@@ -71,6 +71,7 @@
+ #include "shell/common/gin_converters/callback_converter.h"
+ #include "shell/common/gin_converters/file_path_converter.h"
+ #include "shell/common/gin_converters/gurl_converter.h"
++#include "shell/common/gin_converters/gfx_converter.h"
+ #include "shell/common/gin_converters/image_converter.h"
+ #include "shell/common/gin_converters/login_item_settings_converter.h"
+ #include "shell/common/gin_converters/net_converter.h"
+@@ -559,6 +560,8 @@ App::App() {
+   static_cast<ElectronBrowserClient*>(ElectronBrowserClient::Get())
+       ->set_delegate(this);
+   Browser::Get()->AddObserver(this);
++  picture_in_picture_observation_.Observe(
++      PictureInPictureWindowManager::GetInstance());
+
+   auto unsafe_pid = content::ChildProcessId::FromUnsafeValue(
+       content::ChildProcessHost::kInvalidUniqueID);
+@@ -828,6 +831,44 @@ void App::BrowserChildProcessKilled(
+   BrowserChildProcessCrashedOrKilled(data, info);
+ }
+
++void App::OnEnterPictureInPicture() {
++  v8::Isolate* isolate = JavascriptEnvironment::GetIsolate();
++  v8::HandleScope handle_scope(isolate);
++  v8::Local<v8::Value> details = GetCurrentPictureInPictureDetails(isolate);
++  if (!details->IsNull()) {
++    gin_helper::Handle<WebContents> api_web_contents;
++    content::WebContents* source_web_contents =
++        PictureInPictureWindowManager::GetInstance()->GetWebContents();
++    if (source_web_contents) {
++      api_web_contents = WebContents::FromOrCreate(isolate, source_web_contents);
++    }
++
++    Emit("enter-picture-in-picture", details);
++    if (!api_web_contents.IsEmpty()) {
++      api_web_contents->Emit("enter-picture-in-picture", details);
++    }
++  }
++}
++
++void App::OnExitPictureInPicture() {
++  v8::Isolate* isolate = JavascriptEnvironment::GetIsolate();
++  v8::HandleScope handle_scope(isolate);
++  v8::Local<v8::Value> details = GetCurrentPictureInPictureDetails(isolate);
++  if (!details->IsNull()) {
++    gin_helper::Handle<WebContents> api_web_contents;
++    content::WebContents* source_web_contents =
++        PictureInPictureWindowManager::GetInstance()->GetWebContents();
++    if (source_web_contents) {
++      api_web_contents = WebContents::FromOrCreate(isolate, source_web_contents);
++    }
++
++    Emit("leave-picture-in-picture", details);
++    if (!api_web_contents.IsEmpty()) {
++      api_web_contents->Emit("leave-picture-in-picture", details);
++    }
++  }
++}
++
+ void App::BrowserChildProcessCrashedOrKilled(
+     const content::ChildProcessData& data,
+     const content::ChildProcessTerminationInfo& info) {
+@@ -1267,6 +1308,70 @@ void App::SetAccessibilitySupportFeatures(
+   Browser::Get()->OnAccessibilitySupportChanged();
+ }
+
++v8::Local<v8::Value> App::GetCurrentPictureInPictureDetails(
++    v8::Isolate* isolate) {
++  auto* manager = PictureInPictureWindowManager::GetInstance();
++  int picture_in_picture_id = manager->GetPictureInPictureWindowId();
++  if (picture_in_picture_id == 0) {
++    return v8::Null(isolate);
++  }
++
++  content::WebContents* source_web_contents = manager->GetWebContents();
++  if (!source_web_contents) {
++    return v8::Null(isolate);
++  }
++
++  auto details = gin_helper::Dictionary::CreateEmpty(isolate);
++  content::WebContents* pip_web_contents = manager->GetChildWebContents();
++  details.Set("id", picture_in_picture_id);
++  details.Set("type", std::string(pip_web_contents ? "document" : "video"));
++  details.Set("sourceWebContents",
++              WebContents::FromOrCreate(isolate, source_web_contents));
++  if (pip_web_contents) {
++    details.Set("pipWebContents",
++                WebContents::FromOrCreate(isolate, pip_web_contents));
++  }
++
++  details.Set("bounds",
++              manager->GetPictureInPictureWindowBoundsInScreen().value_or(
++                  gfx::Rect()));
++  if (std::optional<std::string> source_id =
++          manager->GetPictureInPictureWindowSourceId()) {
++    details.Set("sourceId", *source_id);
++  }
++  if (std::optional<gfx::Size> video_size =
++          manager->GetVideoPictureInPictureSize()) {
++    details.Set("videoSize", *video_size);
++  }
++
++  return gin::ConvertToV8(isolate, details);
++}
++
++v8::Local<v8::Value> App::SetCurrentPictureInPictureBounds(
++    v8::Isolate* isolate,
++    int picture_in_picture_id,
++    const gfx::Rect& bounds) {
++  auto* manager = PictureInPictureWindowManager::GetInstance();
++  std::optional<gfx::Rect> actual_bounds =
++      manager->SetPictureInPictureWindowBoundsInScreen(picture_in_picture_id,
++                                                       bounds);
++  if (!actual_bounds) {
++    return v8::Null(isolate);
++  }
++
++  return gin::ConvertToV8(isolate, *actual_bounds);
++}
++
++bool App::CloseCurrentPictureInPicture(int picture_in_picture_id) {
++  return PictureInPictureWindowManager::GetInstance()
++      ->ClosePictureInPictureWindow(picture_in_picture_id);
++}
++
++bool App::IsCurrentPictureInPicture(int picture_in_picture_id) {
++  return PictureInPictureWindowManager::GetInstance()
++      ->IsPictureInPictureWindowIdCurrent(picture_in_picture_id);
++}
++
+ void App::SetAccessibilitySupportEnabled(gin_helper::ErrorThrower thrower,
+                                          bool enabled) {
+   if (!Browser::Get()->is_ready()) {
+@@ -2014,6 +2119,13 @@ gin::ObjectTemplateBuilder App::GetObjectTemplateBuilder(v8::Isolate* isolate) {
+                  &App::SetAccessibilitySupportFeatures)
+       .SetMethod("setAccessibilitySupportEnabled",
+                  &App::SetAccessibilitySupportEnabled)
++      .SetMethod("_getCurrentPictureInPictureDetails",
++                 &App::GetCurrentPictureInPictureDetails)
++      .SetMethod("_setCurrentPictureInPictureBounds",
++                 &App::SetCurrentPictureInPictureBounds)
++      .SetMethod("_closeCurrentPictureInPicture",
++                 &App::CloseCurrentPictureInPicture)
++      .SetMethod("_isCurrentPictureInPicture", &App::IsCurrentPictureInPicture)
+       .SetMethod("disableHardwareAcceleration",
+                  &App::DisableHardwareAcceleration)
+       .SetMethod("isHardwareAccelerationEnabled",
+diff --git a/shell/browser/api/electron_api_app.h b/shell/browser/api/electron_api_app.h
+index 3aee766d9f..2dd3bdc835 100644
+--- a/shell/browser/api/electron_api_app.h
++++ b/shell/browser/api/electron_api_app.h
+@@ -11,7 +11,9 @@
+ #include <vector>
+
+ #include "base/containers/flat_map.h"
++#include "base/scoped_observation.h"
+ #include "base/task/cancelable_task_tracker.h"
++#include "chrome/browser/picture_in_picture/picture_in_picture_window_manager.h"
+ #include "chrome/browser/process_singleton.h"
+ #include "content/public/browser/browser_child_process_observer.h"
+ #include "content/public/browser/gpu_data_manager_observer.h"
+@@ -28,6 +30,7 @@
+ #include "shell/browser/browser_observer.h"
+ #include "shell/browser/electron_browser_client.h"
+ #include "shell/browser/event_emitter_mixin.h"
++#include "ui/gfx/geometry/rect.h"
+ #include "v8/include/cppgc/persistent.h"
+
+ #if BUILDFLAG(USE_NSS_CERTS)
+@@ -63,7 +66,8 @@ class App final : public gin::Wrappable<App>,
+                   public gin_helper::EventEmitterMixin<App>,
+                   private BrowserObserver,
+                   private content::GpuDataManagerObserver,
+-                  private content::BrowserChildProcessObserver {
++                  private content::BrowserChildProcessObserver,
++                  private PictureInPictureWindowManager::Observer {
+  public:
+   static App* Create(v8::Isolate* isolate);
+   static App* Get();
+@@ -177,6 +181,10 @@ class App final : public gin::Wrappable<App>,
+       const content::ChildProcessData& data,
+       const content::ChildProcessTerminationInfo& info) override;
+
++  // PictureInPictureWindowManager::Observer:
++  void OnEnterPictureInPicture() override;
++  void OnExitPictureInPicture() override;
++
+  private:
+   [[nodiscard]] static base::FilePath GetDefaultAppLogPath();
+
+@@ -222,6 +230,14 @@ class App final : public gin::Wrappable<App>,
+       const std::vector<std::string>& features);
+   void SetAccessibilitySupportEnabled(gin_helper::ErrorThrower thrower,
+                                       bool enabled);
++  v8::Local<v8::Value> GetCurrentPictureInPictureDetails(
++      v8::Isolate* isolate);
++  v8::Local<v8::Value> SetCurrentPictureInPictureBounds(
++      v8::Isolate* isolate,
++      int picture_in_picture_id,
++      const gfx::Rect& bounds);
++  bool CloseCurrentPictureInPicture(int picture_in_picture_id);
++  bool IsCurrentPictureInPicture(int picture_in_picture_id);
+   v8::Local<v8::Value> GetLoginItemSettings(gin::Arguments* args);
+ #if BUILDFLAG(USE_NSS_CERTS)
+   void ImportCertificate(gin_helper::ErrorThrower thrower,
+@@ -293,6 +309,9 @@ class App final : public gin::Wrappable<App>,
+   base::flat_map<content::ChildProcessId,
+                  std::unique_ptr<electron::ProcessMetric>>
+       app_metrics_;
++  base::ScopedObservation<PictureInPictureWindowManager,
++                          PictureInPictureWindowManager::Observer>
++      picture_in_picture_observation_{this};
+
+   bool disable_hw_acceleration_ = false;
+   bool disable_domain_blocking_for_3DAPIs_ = false;
+diff --git a/typings/internal-electron.d.ts b/typings/internal-electron.d.ts
+index 7cd128eb74..132b14f70b 100644
+--- a/typings/internal-electron.d.ts
++++ b/typings/internal-electron.d.ts
+@@ -18,9 +18,23 @@ declare namespace Electron {
+     setDesktopName(name: string): void;
+     setAppPath(path: string | null): void;
+     _clientCertRequestPasswordHandler: ((params: ClientCertRequestParams) => Promise<string>) | null;
++    _getCurrentPictureInPictureDetails(): PictureInPictureDetails | null;
++    _setCurrentPictureInPictureBounds(id: number, bounds: Rectangle): Rectangle | null;
++    _closeCurrentPictureInPicture(id: number): boolean;
++    _isCurrentPictureInPicture(id: number): boolean;
+     on(event: '-client-certificate-request-password', listener: (event: Event<ClientCertRequestParams>, callback: (password: string) => void) => Promise<void>): this;
+   }
+
++  interface PictureInPictureDetails {
++    id: number;
++    type: 'video' | 'document';
++    sourceWebContents: WebContents;
++    pipWebContents?: WebContents;
++    bounds: Rectangle;
++    sourceId?: string;
++    videoSize?: Size;
++  }
++
+   interface AutoUpdater {
+     isVersionAllowedForUpdate?(currentVersion: string, targetVersion: string): boolean;
+   }

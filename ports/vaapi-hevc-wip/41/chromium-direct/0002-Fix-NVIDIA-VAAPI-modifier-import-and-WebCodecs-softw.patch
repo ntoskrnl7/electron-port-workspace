@@ -1,0 +1,111 @@
+From a3f2bda490f4742bd4db3dc2c42d1a2789ce8eae Mon Sep 17 00:00:00 2001
+From: Jung-Kwang Lee <ntoskrnl7@gmail.com>
+Date: Fri, 20 Mar 2026 01:10:10 +0900
+Subject: Fix NVIDIA VAAPI modifier import and WebCodecs software fallback
+
+Patch-Dir: src/electron/patches/chromium
+Patch-Filename: fix_nvidia_vaapi_modifier_import_and_webcodecs_software_fallback.patch
+(cherry picked from commit 3d64e7c5f2d052eea6e250e219efba6b1229eef5)
+---
+ .../modules/webcodecs/video_encoder.cc        | 41 ++++++++++++++++---
+ 1 file changed, 36 insertions(+), 5 deletions(-)
+
+diff --git a/third_party/blink/renderer/modules/webcodecs/video_encoder.cc b/third_party/blink/renderer/modules/webcodecs/video_encoder.cc
+index ff960fb50806b..95e98d3f1075a 100644
+--- a/third_party/blink/renderer/modules/webcodecs/video_encoder.cc
++++ b/third_party/blink/renderer/modules/webcodecs/video_encoder.cc
+@@ -110,6 +110,8 @@ namespace blink {
+ 
+ using EncoderType = media::VideoEncodeAccelerator::Config::EncoderType;
+ 
++bool CanCreateSoftwareVideoEncoderForCodec(media::VideoCodec codec);
++
+ namespace {
+ 
+ constexpr const char kCategory[] = "media";
+@@ -584,7 +586,7 @@ bool CanUseGpuMemoryBufferReadback(media::VideoPixelFormat format,
+ EncoderType GetRequiredEncoderType(media::VideoCodecProfile profile,
+                                    HardwarePreference hw_pref) {
+   if (hw_pref != HardwarePreference::kPreferHardware &&
+-      media::MayHaveAndAllowSelectOSSoftwareEncoder(
++      CanCreateSoftwareVideoEncoderForCodec(
+           media::VideoCodecProfileToVideoCodec(profile))) {
+     return hw_pref == HardwarePreference::kPreferSoftware
+                ? EncoderType::kSoftware
+@@ -690,6 +692,24 @@ std::unique_ptr<media::VideoEncoder> CreateOpenH264VideoEncoder() {
+ #endif  // BUILDFLAG(ENABLE_OPENH264)
+ }
+ 
++bool CanCreateSoftwareVideoEncoderForCodec(media::VideoCodec codec) {
++  if (media::MayHaveAndAllowSelectOSSoftwareEncoder(codec)) {
++    return true;
++  }
++
++  switch (codec) {
++    case media::VideoCodec::kAV1:
++      return static_cast<bool>(CreateAv1VideoEncoder());
++    case media::VideoCodec::kVP8:
++    case media::VideoCodec::kVP9:
++      return static_cast<bool>(CreateVpxVideoEncoder());
++    case media::VideoCodec::kH264:
++      return static_cast<bool>(CreateOpenH264VideoEncoder());
++    default:
++      return false;
++  }
++}
++
+ // This method is static and takes |self| in order to make it possible to use it
+ // with a weak |this|. It's needed in to avoid a persistent reference cycle.
+ media::EncoderStatus::Or<std::unique_ptr<media::VideoEncoder>>
+@@ -735,12 +755,23 @@ VideoEncoder::CreateMediaVideoEncoder(
+     media::GpuVideoAcceleratorFactories* gpu_factories,
+     bool& is_platform_encoder) {
+   is_platform_encoder = true;
++  const bool can_fallback_to_software =
++      CanCreateSoftwareVideoEncoderForCodec(config.codec);
+   if (config.hw_pref == HardwarePreference::kPreferHardware ||
+       config.hw_pref == HardwarePreference::kNoPreference ||
+-      media::MayHaveAndAllowSelectOSSoftwareEncoder(config.codec)) {
++      can_fallback_to_software) {
+     auto result = CreateAcceleratedVideoEncoder(config.profile, config.options,
+                                                 gpu_factories, config.hw_pref);
+     if (config.hw_pref == HardwarePreference::kPreferHardware) {
++      if (result.has_value() && can_fallback_to_software) {
++        return std::unique_ptr<media::VideoEncoder>(
++            std::make_unique<media::VideoEncoderFallback>(
++                std::move(result).value(),
++                ConvertToBaseOnceCallback(
++                    CrossThreadBindOnce(&VideoEncoder::CreateSoftwareVideoEncoder,
++                                        MakeUnwrappingCrossThreadWeakHandle(this),
++                                        /*fallback=*/true, config.codec))));
++      }
+       return result;
+     } else if (result.has_value()) {
+       // 'no-preference' or 'prefer-software' and we have OS software encoders.
+@@ -760,7 +791,7 @@ VideoEncoder::CreateMediaVideoEncoder(
+ 
+ void VideoEncoder::ContinueConfigureAfterFlush(Request* request) {
+   if (active_config_->hw_pref == HardwarePreference::kPreferSoftware &&
+-      !media::MayHaveAndAllowSelectOSSoftwareEncoder(active_config_->codec)) {
++      !CanCreateSoftwareVideoEncoderForCodec(active_config_->codec)) {
+     ContinueConfigureWithGpuFactories(request, nullptr);
+     return;
+   }
+@@ -1741,7 +1772,7 @@ ScriptPromise<VideoEncoderSupport> VideoEncoder::isConfigSupported(
+   // register them with HeapBarrierCallback.
+   wtf_size_t num_callbacks = 0;
+   if (parsed_config->hw_pref != HardwarePreference::kPreferSoftware ||
+-      media::MayHaveAndAllowSelectOSSoftwareEncoder(parsed_config->codec)) {
++      CanCreateSoftwareVideoEncoderForCodec(parsed_config->codec)) {
+     ++num_callbacks;
+   }
+   if (parsed_config->hw_pref != HardwarePreference::kPreferHardware) {
+@@ -1755,7 +1786,7 @@ ScriptPromise<VideoEncoderSupport> VideoEncoder::isConfigSupported(
+       num_callbacks, BindOnce(&FindAnySupported, WrapPersistent(resolver)));
+ 
+   if (parsed_config->hw_pref != HardwarePreference::kPreferSoftware ||
+-      media::MayHaveAndAllowSelectOSSoftwareEncoder(parsed_config->codec)) {
++      CanCreateSoftwareVideoEncoderForCodec(parsed_config->codec)) {
+     // Hardware support not denied, detect support by hardware encoders.
+     auto* support = VideoEncoderSupport::Create();
+     support->setConfig(config_copy);

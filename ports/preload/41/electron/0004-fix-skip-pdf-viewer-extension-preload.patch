@@ -1,0 +1,42 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Jung-Kwang Lee <ntoskrnl7@gmail.com>
+Date: Mon, 11 May 2026 17:00:00 +0900
+Subject: fix: skip PDF viewer extension preload
+
+Chromium's built-in PDF viewer is a chrome-extension:// frame, but it is not a
+DevTools extension frame. Exclude the PDF extension origin from the DevTools
+extension preload path so Electron's sandbox preload bundle is not run in the
+PDF viewer subframe.
+
+diff --git a/shell/renderer/renderer_client_base.cc b/shell/renderer/renderer_client_base.cc
+index 452dce5bee..882e5c9214 100644
+--- a/shell/renderer/renderer_client_base.cc
++++ b/shell/renderer/renderer_client_base.cc
+@@ -62,6 +62,8 @@
+ #include "third_party/blink/renderer/platform/media/multi_buffer_data_source.h"  // nogncheck
+ #include "third_party/blink/renderer/platform/weborigin/scheme_registry.h"  // nogncheck
+ #include "third_party/widevine/cdm/buildflags.h"
++#include "url/gurl.h"
++#include "url/origin.h"
+ 
+ #if BUILDFLAG(ENABLE_PDF_VIEWER)
+ #include "components/pdf/renderer/internal_plugin_renderer_helpers.h"
+@@ -194,8 +196,16 @@ bool IsDevTools(content::RenderFrame* render_frame) {
+ }
+ 
+ bool IsDevToolsExtension(content::RenderFrame* render_frame) {
+-  return render_frame->GetWebFrame()->GetDocument().Url().ProtocolIs(
+-      "chrome-extension");
++  const GURL document_url{render_frame->GetWebFrame()->GetDocument().Url()};
++  if (!document_url.SchemeIs("chrome-extension"))
++    return false;
++
++#if BUILDFLAG(ENABLE_PDF_VIEWER)
++  if (IsPdfExtensionOrigin(url::Origin::Create(document_url)))
++    return false;
++#endif  // BUILDFLAG(ENABLE_PDF_VIEWER)
++
++  return true;
+ }
+ 
+ }  // namespace

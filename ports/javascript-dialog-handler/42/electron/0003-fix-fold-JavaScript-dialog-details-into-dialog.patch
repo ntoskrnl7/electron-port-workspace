@@ -1,0 +1,352 @@
+From 1e9e361af7b4ee2fd97ce16965ccbd8e31dfab69 Mon Sep 17 00:00:00 2001
+From: Codex <codex@localhost>
+Date: Wed, 20 May 2026 15:07:05 +0900
+Subject: [PATCH] fix: fold JavaScript dialog details into dialog
+
+---
+ .../api/structures/alert-javascript-dialog.md |  6 +++
+ .../before-unload-javascript-dialog.md        |  8 ++++
+ .../structures/confirm-javascript-dialog.md   |  6 +++
+ .../javascript-dialog-handler-details.md      | 14 -------
+ .../structures/prompt-javascript-dialog.md    |  7 ++++
+ docs/api/web-contents.md                      |  5 +--
+ lib/browser/api/web-contents.ts               | 42 +++++++++----------
+ spec/api-web-contents-spec.ts                 | 12 +++---
+ spec/chromium-spec.ts                         | 14 +++----
+ spec/ts-smoke/electron/main.ts                | 12 ++++--
+ 10 files changed, 72 insertions(+), 54 deletions(-)
+ delete mode 100644 docs/api/structures/javascript-dialog-handler-details.md
+
+diff --git a/docs/api/structures/alert-javascript-dialog.md b/docs/api/structures/alert-javascript-dialog.md
+index 5c9875caf3..3b6e34e5f6 100644
+--- a/docs/api/structures/alert-javascript-dialog.md
++++ b/docs/api/structures/alert-javascript-dialog.md
+@@ -1,5 +1,11 @@
+ # AlertJavaScriptDialog Object
+ 
+ * `type` string - Can be `alert`.
++* `frame` [WebFrameMain](../web-frame-main.md) - The frame that requested the
++  JavaScript dialog.
++* `messageText` string - The dialog message text.
++* `url` string - The last committed URL of the frame that requested the dialog.
++* `isMainFrame` boolean - Whether the frame that requested the dialog is the
++  main frame.
+ * `ok` Function\<boolean\> - Closes the alert dialog. Returns `true` if the
+   dialog was handled by this call, otherwise `false`.
+diff --git a/docs/api/structures/before-unload-javascript-dialog.md b/docs/api/structures/before-unload-javascript-dialog.md
+index 8b444879ea..4bdb71d7e4 100644
+--- a/docs/api/structures/before-unload-javascript-dialog.md
++++ b/docs/api/structures/before-unload-javascript-dialog.md
+@@ -1,6 +1,14 @@
+ # BeforeUnloadJavaScriptDialog Object
+ 
+ * `type` string - Can be `beforeunload`.
++* `frame` [WebFrameMain](../web-frame-main.md) - The frame that requested the
++  JavaScript dialog.
++* `messageText` string - The dialog message text.
++* `url` string - The last committed URL of the frame that requested the dialog.
++* `isMainFrame` boolean - Whether the frame that requested the dialog is the
++  main frame.
++* `isReload` boolean - Whether the `beforeunload` dialog was triggered by a
++  reload.
+ * `leave` Function\<boolean\> - Ignores the page's `beforeunload` prevention and
+   continues unloading the page. Returns `true` if the dialog was handled by this
+   call, otherwise `false`.
+diff --git a/docs/api/structures/confirm-javascript-dialog.md b/docs/api/structures/confirm-javascript-dialog.md
+index 1d51c11144..44e36fc4ae 100644
+--- a/docs/api/structures/confirm-javascript-dialog.md
++++ b/docs/api/structures/confirm-javascript-dialog.md
+@@ -1,6 +1,12 @@
+ # ConfirmJavaScriptDialog Object
+ 
+ * `type` string - Can be `confirm`.
++* `frame` [WebFrameMain](../web-frame-main.md) - The frame that requested the
++  JavaScript dialog.
++* `messageText` string - The dialog message text.
++* `url` string - The last committed URL of the frame that requested the dialog.
++* `isMainFrame` boolean - Whether the frame that requested the dialog is the
++  main frame.
+ * `confirm` Function\<boolean\> - Closes the confirm dialog and returns `true`
+   to the renderer. Returns `true` if the dialog was handled by this call,
+   otherwise `false`.
+diff --git a/docs/api/structures/javascript-dialog-handler-details.md b/docs/api/structures/javascript-dialog-handler-details.md
+deleted file mode 100644
+index 15c1d2b50a..0000000000
+--- a/docs/api/structures/javascript-dialog-handler-details.md
++++ /dev/null
+@@ -1,14 +0,0 @@
+-# JavaScriptDialogHandlerDetails Object
+-
+-* `frame` [WebFrameMain](../web-frame-main.md) - The frame that requested the
+-  JavaScript dialog.
+-* `type` string - The dialog type. Can be `alert`, `confirm`, `prompt`, or
+-  `beforeunload`.
+-* `messageText` string - The dialog message text.
+-* `defaultPromptText` string - The default text for `prompt` dialogs. Empty for
+-  other dialog types.
+-* `url` string - The last committed URL of the frame that requested the dialog.
+-* `isMainFrame` boolean - Whether the frame that requested the dialog is the
+-  main frame.
+-* `isReload` boolean (optional) - Whether the `beforeunload` dialog was
+-  triggered by a reload.
+diff --git a/docs/api/structures/prompt-javascript-dialog.md b/docs/api/structures/prompt-javascript-dialog.md
+index cde07e133e..d4945143b8 100644
+--- a/docs/api/structures/prompt-javascript-dialog.md
++++ b/docs/api/structures/prompt-javascript-dialog.md
+@@ -1,6 +1,13 @@
+ # PromptJavaScriptDialog Object
+ 
+ * `type` string - Can be `prompt`.
++* `frame` [WebFrameMain](../web-frame-main.md) - The frame that requested the
++  JavaScript dialog.
++* `messageText` string - The dialog message text.
++* `defaultPromptText` string - The default text for the prompt dialog.
++* `url` string - The last committed URL of the frame that requested the dialog.
++* `isMainFrame` boolean - Whether the frame that requested the dialog is the
++  main frame.
+ * `submit` Function\<boolean\> - Closes the prompt dialog and returns `value` to
+   the renderer. Returns `true` if the dialog was handled by this call, otherwise
+   `false`.
+diff --git a/docs/api/web-contents.md b/docs/api/web-contents.md
+index fa365741cd..c3c790a8d2 100644
+--- a/docs/api/web-contents.md
++++ b/docs/api/web-contents.md
+@@ -1595,7 +1595,6 @@ mainWindow.webContents.setWindowOpenHandler((details) => {
+ 
+ * `handler` Function | null
+   * `dialog` [AlertJavaScriptDialog](structures/alert-javascript-dialog.md) | [ConfirmJavaScriptDialog](structures/confirm-javascript-dialog.md) | [PromptJavaScriptDialog](structures/prompt-javascript-dialog.md) | [BeforeUnloadJavaScriptDialog](structures/before-unload-javascript-dialog.md)
+-  * `details` [JavaScriptDialogHandlerDetails](structures/javascript-dialog-handler-details.md)
+ 
+ Sets a handler for renderer-initiated JavaScript dialogs. Passing `null` clears
+ the handler and restores Electron's default handling.
+@@ -1615,7 +1614,7 @@ const { BrowserWindow } = require('electron')
+ 
+ const win = new BrowserWindow()
+ 
+-win.webContents.setJavaScriptDialogHandler(async (dialog, details) => {
++win.webContents.setJavaScriptDialogHandler(async (dialog) => {
+   switch (dialog.type) {
+     case 'alert':
+       dialog.ok()
+@@ -1624,7 +1623,7 @@ win.webContents.setJavaScriptDialogHandler(async (dialog, details) => {
+       dialog.confirm()
+       break
+     case 'prompt':
+-      dialog.submit(await getPromptText(details))
++      dialog.submit(await getPromptText(dialog))
+       break
+     case 'beforeunload':
+       dialog.leave()
+diff --git a/lib/browser/api/web-contents.ts b/lib/browser/api/web-contents.ts
+index 0989b77bf9..a3aeefc262 100644
+--- a/lib/browser/api/web-contents.ts
++++ b/lib/browser/api/web-contents.ts
+@@ -445,7 +445,7 @@ type JavaScriptDialog =
+   Electron.ConfirmJavaScriptDialog |
+   Electron.PromptJavaScriptDialog |
+   Electron.BeforeUnloadJavaScriptDialog;
+-type JavaScriptDialogHandler = (dialog: JavaScriptDialog, details: Electron.JavaScriptDialogHandlerDetails) => void | Promise<void>;
++type JavaScriptDialogHandler = (dialog: JavaScriptDialog) => void | Promise<void>;
+ type PendingJavaScriptDialog = { cancel: () => void };
+ type JavaScriptDialogController = PendingJavaScriptDialog & { response: JavaScriptDialog };
+ 
+@@ -457,24 +457,18 @@ const getJavaScriptDialogOrigin = (info: JavaScriptDialogInfo) => {
+   return info.frame.origin === 'file://' ? info.frame.url : info.frame.origin;
+ };
+ 
+-const createJavaScriptDialogDetails = (info: JavaScriptDialogInfo): Electron.JavaScriptDialogHandlerDetails => {
+-  return {
+-    frame: info.frame,
+-    type: info.dialogType,
+-    messageText: info.messageText,
+-    defaultPromptText: info.defaultPromptText,
+-    url: info.frame.url,
+-    isMainFrame: info.frame.parent === null,
+-    ...(info.dialogType === 'beforeunload' ? { isReload: !!info.isReload } : {})
+-  };
+-};
+-
+ const createJavaScriptDialog = (
+-  type: JavaScriptDialogType,
++  info: JavaScriptDialogInfo,
+   callback: JavaScriptDialogCallback,
+   onDone: () => void
+ ): JavaScriptDialogController => {
+   let handled = false;
++  const details = {
++    frame: info.frame,
++    messageText: info.messageText,
++    url: info.frame.url,
++    isMainFrame: info.frame.parent === null
++  };
+ 
+   const respond = (success: boolean, userInput = '') => {
+     if (handled) return false;
+@@ -490,11 +484,12 @@ const createJavaScriptDialog = (
+     onDone();
+   };
+ 
+-  switch (type) {
++  switch (info.dialogType) {
+     case 'alert':
+       return {
+         response: {
+-          type,
++          ...details,
++          type: 'alert',
+           ok: () => respond(true)
+         },
+         cancel
+@@ -502,7 +497,8 @@ const createJavaScriptDialog = (
+     case 'confirm':
+       return {
+         response: {
+-          type,
++          ...details,
++          type: 'confirm',
+           confirm: () => respond(true),
+           cancel: () => respond(false)
+         },
+@@ -511,7 +507,9 @@ const createJavaScriptDialog = (
+     case 'prompt':
+       return {
+         response: {
+-          type,
++          ...details,
++          type: 'prompt',
++          defaultPromptText: info.defaultPromptText,
+           submit: (value: string) => respond(true, `${value}`),
+           cancel: () => respond(false)
+         },
+@@ -520,7 +518,9 @@ const createJavaScriptDialog = (
+     case 'beforeunload':
+       return {
+         response: {
+-          type,
++          ...details,
++          type: 'beforeunload',
++          isReload: !!info.isReload,
+           leave: () => respond(true),
+           stay: () => respond(false)
+         },
+@@ -565,11 +565,11 @@ const runJavaScriptDialogHandler = (
+   const onDone = () => {
+     if (dialog) pending.delete(dialog);
+   };
+-  dialog = createJavaScriptDialog(info.dialogType, callback, onDone);
++  dialog = createJavaScriptDialog(info, callback, onDone);
+   pending.add(dialog);
+ 
+   try {
+-    Promise.resolve(handler(dialog.response, createJavaScriptDialogDetails(info))).catch(error => {
++    Promise.resolve(handler(dialog.response)).catch(error => {
+       cancelJavaScriptDialog(dialog.response);
+       process.nextTick(() => {
+         throw error;
+diff --git a/spec/api-web-contents-spec.ts b/spec/api-web-contents-spec.ts
+index 5c66f37af0..209a8c8672 100644
+--- a/spec/api-web-contents-spec.ts
++++ b/spec/api-web-contents-spec.ts
+@@ -210,11 +210,11 @@ describe('webContents module', () => {
+       w.webContents.on('will-prevent-unload', () => {
+         legacyEventFired = true;
+       });
+-      w.webContents.setJavaScriptDialogHandler((dialog, details) => {
+-        expect(details.type).to.equal('beforeunload');
+-        expect(details.frame).to.equal(w.webContents.mainFrame);
+-        expect(details.isMainFrame).to.equal(true);
++      w.webContents.setJavaScriptDialogHandler((dialog) => {
+         if (dialog.type === 'beforeunload') {
++          expect(dialog.frame).to.equal(w.webContents.mainFrame);
++          expect(dialog.isMainFrame).to.equal(true);
++          expect(dialog.isReload).to.equal(false);
+           setImmediate(() => {
+             expect(dialog.stay()).to.equal(true);
+             expect(dialog.leave()).to.equal(false);
+@@ -240,9 +240,9 @@ describe('webContents module', () => {
+       w.webContents.on('will-prevent-unload', () => {
+         legacyEventFired = true;
+       });
+-      w.webContents.setJavaScriptDialogHandler((dialog, details) => {
+-        expect(details.type).to.equal('beforeunload');
++      w.webContents.setJavaScriptDialogHandler((dialog) => {
+         if (dialog.type === 'beforeunload') {
++          expect(dialog.isReload).to.equal(false);
+           setImmediate(() => {
+             expect(dialog.leave()).to.equal(true);
+             expect(dialog.stay()).to.equal(false);
+diff --git a/spec/chromium-spec.ts b/spec/chromium-spec.ts
+index cda491521e..9a62b0f619 100644
+--- a/spec/chromium-spec.ts
++++ b/spec/chromium-spec.ts
+@@ -3642,11 +3642,11 @@ describe('chromium features', () => {
+         w.loadURL('about:blank');
+ 
+         const seen: string[] = [];
+-        w.webContents.setJavaScriptDialogHandler((dialog, details) => {
+-          seen.push(`${details.type}:${details.messageText}`);
+-          expect(details.frame).to.equal(w.webContents.mainFrame);
+-          expect(details.url).to.equal('about:blank');
+-          expect(details.isMainFrame).to.equal(true);
++        w.webContents.setJavaScriptDialogHandler((dialog) => {
++          seen.push(`${dialog.type}:${dialog.messageText}`);
++          expect(dialog.frame).to.equal(w.webContents.mainFrame);
++          expect(dialog.url).to.equal('about:blank');
++          expect(dialog.isMainFrame).to.equal(true);
+ 
+           switch (dialog.type) {
+             case 'alert':
+@@ -3658,7 +3658,7 @@ describe('chromium features', () => {
+               expect(dialog.cancel()).to.equal(false);
+               break;
+             case 'prompt':
+-              expect(details.defaultPromptText).to.equal('default text');
++              expect(dialog.defaultPromptText).to.equal('default text');
+               setImmediate(() => {
+                 expect(dialog.submit('typed text')).to.equal(true);
+                 expect(dialog.cancel()).to.equal(false);
+@@ -3684,7 +3684,7 @@ describe('chromium features', () => {
+         w.loadURL('about:blank');
+ 
+         let called = false;
+-        w.webContents.setJavaScriptDialogHandler((dialog, details) => {
++        w.webContents.setJavaScriptDialogHandler((dialog) => {
+           called = true;
+           if (dialog.type === 'alert') dialog.ok();
+         });
+diff --git a/spec/ts-smoke/electron/main.ts b/spec/ts-smoke/electron/main.ts
+index d7d0087e12..169e8af282 100644
+--- a/spec/ts-smoke/electron/main.ts
++++ b/spec/ts-smoke/electron/main.ts
+@@ -131,19 +131,25 @@ app.whenReady().then(() => {
+     });
+   });
+   mainWindow.webContents.setPrintRequestHandler(null);
+-  mainWindow.webContents.setJavaScriptDialogHandler((dialog, details) => {
+-    console.log(details.type, details.messageText);
++  mainWindow.webContents.setJavaScriptDialogHandler((dialog) => {
++    console.log(dialog.type, dialog.messageText);
++    console.log(dialog.frame, dialog.url, dialog.isMainFrame);
+     switch (dialog.type) {
+       case 'alert':
+         dialog.ok();
++        // @ts-expect-error Prompt text is only available for prompt dialogs.
++        console.log(dialog.defaultPromptText);
+         break;
+       case 'confirm':
+         dialog.cancel();
+         break;
+       case 'prompt':
+-        dialog.submit(details.defaultPromptText);
++        dialog.submit(dialog.defaultPromptText);
++        // @ts-expect-error Reload state is only available for beforeunload dialogs.
++        console.log(dialog.isReload);
+         break;
+       case 'beforeunload':
++        console.log(dialog.isReload);
+         dialog.leave();
+         break;
+     }
+-- 
+2.53.0
+

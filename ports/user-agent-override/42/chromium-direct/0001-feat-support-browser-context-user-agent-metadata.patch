@@ -1,0 +1,173 @@
+From 264288f82321e8c8e45ccf6c0140e6d19317937c Mon Sep 17 00:00:00 2001
+From: Jung-Kwang Lee <ntoskrnl7@gmail.com>
+Date: Wed, 13 May 2026 15:09:12 +0900
+Subject: feat: support browser-context user agent metadata
+
+---
+ content/browser/renderer_host/navigation_request.cc  | 12 +++++++-----
+ .../renderer_host/render_process_host_impl.cc        |  5 +++--
+ .../browser/service_worker/service_worker_version.cc |  6 ++++--
+ content/browser/worker_host/shared_worker_host.cc    |  8 +++++---
+ content/public/browser/content_browser_client.cc     | 10 ++++++++++
+ content/public/browser/content_browser_client.h      |  9 +++++++++
+ 6 files changed, 38 insertions(+), 12 deletions(-)
+
+diff --git a/content/browser/renderer_host/navigation_request.cc b/content/browser/renderer_host/navigation_request.cc
+index 25b933800ffb4..46f3813e4e979 100644
+--- a/content/browser/renderer_host/navigation_request.cc
++++ b/content/browser/renderer_host/navigation_request.cc
+@@ -348,7 +348,8 @@ bool NeedsHTTPOrigin(const std::string& method) {
+ // Computes the value that should be set for the User-Agent header, if
+ // `user_agent_override` is non-empty, `user_agent_override` is returned as the
+ // header value.
+-std::string ComputeUserAgentValue(const std::string& user_agent_override) {
++std::string ComputeUserAgentValue(BrowserContext* browser_context,
++                                  const std::string& user_agent_override) {
+   if (!user_agent_override.empty()) {
+     base::UmaHistogramEnumeration("Navigation.UserAgentStringType",
+                                   UserAgentStringType::kOverriden);
+@@ -362,7 +363,7 @@ std::string ComputeUserAgentValue(const std::string& user_agent_override) {
+           ? UserAgentStringType::kReducedVersion
+           : UserAgentStringType::kFullVersion);
+
+-  return GetContentClient()->browser()->GetUserAgent();
++  return GetContentClient()->browser()->GetUserAgent(browser_context);
+ }
+
+ void AddAdditionalRequestHeaders(
+@@ -396,7 +397,7 @@ void AddAdditionalRequestHeaders(
+
+   headers->SetHeaderIfMissing(
+       net::HttpRequestHeaders::kUserAgent,
+-      ComputeUserAgentValue(user_agent_override));
++      ComputeUserAgentValue(browser_context, user_agent_override));
+
+   if (!render_prefs.enable_referrers) {
+     *referrer =
+@@ -6148,7 +6149,7 @@ void NavigationRequest::OnRedirectChecksComplete(
+     if (!devtools_user_agent_override_) {
+       modified_headers.SetHeader(
+           net::HttpRequestHeaders::kUserAgent,
+-          ComputeUserAgentValue(GetUserAgentOverride()));
++          ComputeUserAgentValue(browser_context, GetUserAgentOverride()));
+     }
+   }
+
+@@ -10127,7 +10128,8 @@ void NavigationRequest::SetIsOverridingUserAgent(bool override_ua) {
+         common_params_->url);
+   }
+   headers.SetHeader(net::HttpRequestHeaders::kUserAgent,
+-                    ComputeUserAgentValue(GetUserAgentOverride()));
++                    ComputeUserAgentValue(browser_context,
++                                          GetUserAgentOverride()));
+   begin_params_->headers = headers.ToString();
+   // |request_headers_| comes from |begin_params_|. Clear |request_headers_| now
+   // so that if |request_headers_| are needed, they will be updated.
+diff --git a/content/browser/renderer_host/render_process_host_impl.cc b/content/browser/renderer_host/render_process_host_impl.cc
+index 44decfa9d29d1..872fc51290c81 100644
+--- a/content/browser/renderer_host/render_process_host_impl.cc
++++ b/content/browser/renderer_host/render_process_host_impl.cc
+@@ -1905,9 +1905,10 @@ bool RenderProcessHostImpl::Init() {
+   uint64_t trace_id = base::Token::CreateRandom().high();
+   TRACE_EVENT("navigation", "RenderProcessHostImpl::Init",
+               perfetto::Flow::Global(trace_id));
++  BrowserContext* browser_context = storage_partition_impl_->browser_context();
+   GetRendererInterface()->InitializeRenderer(
+-      GetContentClient()->browser()->GetUserAgent(),
+-      GetContentClient()->browser()->GetUserAgentMetadata(),
++      GetContentClient()->browser()->GetUserAgent(browser_context),
++      GetContentClient()->browser()->GetUserAgentMetadata(browser_context),
+       storage_partition_impl_->cors_exempt_header_list(),
+       GetContentClient()->browser()->GetOriginTrialsSettings(),
+       GetContentClient()->browser()->GetCpuPerformanceTier(), trace_id);
+diff --git a/content/browser/service_worker/service_worker_version.cc b/content/browser/service_worker/service_worker_version.cc
+index 8672211976053..5194300387703 100644
+--- a/content/browser/service_worker/service_worker_version.cc
++++ b/content/browser/service_worker/service_worker_version.cc
+@@ -2549,8 +2549,10 @@ void ServiceWorkerVersion::StartWorkerInternal() {
+       outside_fetch_client_settings_object_.Clone();
+
+   ContentBrowserClient* browser_client = GetContentClient()->browser();
+-  params->user_agent = browser_client->GetUserAgent();
+-  params->ua_metadata = browser_client->GetUserAgentMetadata();
++  BrowserContext* browser_context =
++      context_ ? context_->wrapper()->browser_context() : nullptr;
++  params->user_agent = browser_client->GetUserAgent(browser_context);
++  params->ua_metadata = browser_client->GetUserAgentMetadata(browser_context);
+   params->is_installed = IsInstalled(status_);
+   params->script_url_to_skip_throttling = updated_script_url_;
+   params->main_script_load_params = std::move(main_script_load_params_);
+diff --git a/content/browser/worker_host/shared_worker_host.cc b/content/browser/worker_host/shared_worker_host.cc
+index 6f9f06b1e4afd..37bce787b0814 100644
+--- a/content/browser/worker_host/shared_worker_host.cc
++++ b/content/browser/worker_host/shared_worker_host.cc
+@@ -464,8 +464,10 @@ void SharedWorkerHost::Start(
+       instance_.worker_storage_key().origin(),
+       creator_policy_container_host_ &&
+           creator_policy_container_host_->policies().is_web_secure_context,
+-      GetContentClient()->browser()->GetUserAgent(),
+-      GetContentClient()->browser()->GetUserAgentMetadata(),
++      GetContentClient()->browser()->GetUserAgent(
++          GetProcessHost()->GetBrowserContext()),
++      GetContentClient()->browser()->GetUserAgentMetadata(
++          GetProcessHost()->GetBrowserContext()),
+       devtools_handle_->pause_on_start(), devtools_handle_->dev_tools_token(),
+       std::move(renderer_preferences), std::move(preference_watcher_receiver),
+       std::move(content_settings), std::move(container_info),
+@@ -599,7 +601,7 @@ void SharedWorkerHost::CreateLockManager(
+   GetStoragePartitionImpl()->BindLockManager(
+       GetWorkerStorageKey(), token().value(), std::move(receiver));
+   GetStoragePartitionImpl()->GetLockManager()->AddLockObserver(token().value(),
+-                                                            this);
++                                                               this);
+ }
+
+ void SharedWorkerHost::OnLockContention() {
+diff --git a/content/public/browser/content_browser_client.cc b/content/public/browser/content_browser_client.cc
+index d0b3e4bc34892..bf59994f36d72 100644
+--- a/content/public/browser/content_browser_client.cc
++++ b/content/public/browser/content_browser_client.cc
+@@ -1429,10 +1429,20 @@ std::string ContentBrowserClient::GetUserAgent() {
+   return std::string();
+ }
+
++std::string ContentBrowserClient::GetUserAgent(
++    BrowserContext* browser_context) {
++  return GetUserAgent();
++}
++
+ blink::UserAgentMetadata ContentBrowserClient::GetUserAgentMetadata() {
+   return blink::UserAgentMetadata();
+ }
+
++blink::UserAgentMetadata ContentBrowserClient::GetUserAgentMetadata(
++    BrowserContext* browser_context) {
++  return GetUserAgentMetadata();
++}
++
+ std::optional<gfx::ImageSkia> ContentBrowserClient::GetProductLogo() {
+   return std::nullopt;
+ }
+diff --git a/content/public/browser/content_browser_client.h b/content/public/browser/content_browser_client.h
+index 42b6fe4eb2c1d..7f43b7ac4be6e 100644
+--- a/content/public/browser/content_browser_client.h
++++ b/content/public/browser/content_browser_client.h
+@@ -2585,9 +2585,18 @@ class CONTENT_EXPORT ContentBrowserClient {
+   // Returns the user agent. Content may cache this value.
+   virtual std::string GetUserAgent();
+
++  // Returns the user agent for a BrowserContext. Embedders with per-profile
++  // overrides can return a BrowserContext-specific value.
++  virtual std::string GetUserAgent(BrowserContext* browser_context);
++
+   // Returns user agent metadata. Content may cache this value.
+   virtual blink::UserAgentMetadata GetUserAgentMetadata();
+
++  // Returns user agent metadata for a BrowserContext. Embedders with
++  // per-profile overrides can return BrowserContext-specific metadata.
++  virtual blink::UserAgentMetadata GetUserAgentMetadata(
++      BrowserContext* browser_context);
++
+   // Returns a 256x256 transparent background image of the product logo, i.e.
+   // the browser icon, if available.
+   virtual std::optional<gfx::ImageSkia> GetProductLogo();

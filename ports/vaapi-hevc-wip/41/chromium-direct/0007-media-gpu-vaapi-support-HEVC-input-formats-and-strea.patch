@@ -1,0 +1,552 @@
+From 345f1cebb6c952af41a0db33cb1e9c10402ca9a7 Mon Sep 17 00:00:00 2001
+From: Jung-Kwang Lee <ntoskrnl7@gmail.com>
+Date: Thu, 30 Apr 2026 10:02:45 +0900
+Subject: media/gpu/vaapi: support HEVC input formats and stream reset
+
+---
+ media/base/video_frame.cc                     |  14 ++
+ ...265_annex_b_to_hevc_bitstream_converter.cc |  15 +-
+ media/gpu/vaapi/test/hevc_vaapi_smoke_test.py | 235 ++++++++++++++++++
+ media/gpu/vaapi/vaapi_wrapper.cc              |  41 ++-
+ .../video/video_encode_accelerator_adapter.cc |  64 ++++-
+ 5 files changed, 343 insertions(+), 26 deletions(-)
+ create mode 100644 media/gpu/vaapi/test/hevc_vaapi_smoke_test.py
+
+diff --git a/media/base/video_frame.cc b/media/base/video_frame.cc
+index 4b169b37a683f..eb2aabc005dfa 100644
+--- a/media/base/video_frame.cc
++++ b/media/base/video_frame.cc
+@@ -234,6 +234,20 @@ static std::optional<VideoFrameLayout> GetDefaultLayout(
+       break;
+     }
+ 
++    case PIXEL_FORMAT_P010LE: {
++      const int y_stride = coded_size.width() * 2;
++      const int y_size = y_stride * coded_size.height();
++      const int uv_width = (coded_size.width() + 1) / 2;
++      const int uv_height = (coded_size.height() + 1) / 2;
++      const int uv_stride = uv_width * 4;
++      const int uv_size = uv_stride * uv_height;
++      planes = std::vector<ColorPlaneLayout>{
++          ColorPlaneLayout(y_stride, 0, y_size),
++          ColorPlaneLayout(uv_stride, y_size, uv_size),
++      };
++      break;
++    }
++
+     case PIXEL_FORMAT_NV12A: {
+       int uv_width = (coded_size.width() + 1) / 2;
+       int uv_height = (coded_size.height() + 1) / 2;
+diff --git a/media/formats/mp4/h265_annex_b_to_hevc_bitstream_converter.cc b/media/formats/mp4/h265_annex_b_to_hevc_bitstream_converter.cc
+index 900c406fcab16..48a10394899a3 100644
+--- a/media/formats/mp4/h265_annex_b_to_hevc_bitstream_converter.cc
++++ b/media/formats/mp4/h265_annex_b_to_hevc_bitstream_converter.cc
+@@ -4,7 +4,6 @@
+ 
+ #include "media/formats/mp4/h265_annex_b_to_hevc_bitstream_converter.h"
+ 
+-#include "base/compiler_specific.h"
+ #include "base/containers/flat_set.h"
+ #include "base/containers/span.h"
+ #include "base/containers/span_writer.h"
+@@ -53,9 +52,9 @@ MP4Status H265AnnexBToHevcBitstreamConverter::ConvertChunk(
+   //  1. VPS, SPS and PPS. They'll be added to the HEVC configuration `config_`
+   //     and maybe be copied to `output` based on
+   //     `add_parameter_sets_in_bitstream_`.
+-  //  2. Slices. They'll being copied into the output buffer, but also affect
++  //  2. Slices. They'll be copied into the output buffer, but also affect
+   //     what configuration (profile and level) is active now.
+-  // A configure change will only happen on IDR frame. It is expected the
++  // A config change will only happen on an IDR frame. It is expected the
+   // encoder output stream repeats VPS/SPS/PPS on IDR frames.
+   parser_.SetStream(input);
+   while ((result = parser_.AdvanceToNextNALU(&nalu)) != H265Parser::kEOStream) {
+@@ -66,9 +65,8 @@ MP4Status H265AnnexBToHevcBitstreamConverter::ConvertChunk(
+       return MP4Status::Codes::kFailedToParse;
+ 
+     switch (nalu.nal_unit_type) {
+-      case H265NALU::AUD_NUT: {
++      case H265NALU::AUD_NUT:
+         break;
+-      }
+       case H265NALU::SPS_NUT: {
+         int sps_id = -1;
+         result = parser_.ParseSPS(&sps_id);
+@@ -189,7 +187,7 @@ MP4Status H265AnnexBToHevcBitstreamConverter::ConvertChunk(
+ 
+   if (config_changed && add_parameter_sets_in_bitstream_) {
+     // Insert parameter sets, in the order of PPS, SPS and VPS.
+-    for (auto& id : pps_to_include) {
++    for (int id : pps_to_include) {
+       auto it = id2pps_.find(id);
+       if (it == id2pps_.end()) {
+         return MP4Status::Codes::kFailedToLookupPPS;
+@@ -197,7 +195,7 @@ MP4Status H265AnnexBToHevcBitstreamConverter::ConvertChunk(
+       slice_units.insert(slice_units.begin(), it->second);
+       data_size += config_.lengthSizeMinusOne + 1 + it->second.size();
+     }
+-    for (auto& id : sps_to_include) {
++    for (int id : sps_to_include) {
+       auto it = id2sps_.find(id);
+       if (it == id2sps_.end()) {
+         return MP4Status::Codes::kFailedToLookupSPS;
+@@ -205,7 +203,7 @@ MP4Status H265AnnexBToHevcBitstreamConverter::ConvertChunk(
+       slice_units.insert(slice_units.begin(), it->second);
+       data_size += config_.lengthSizeMinusOne + 1 + it->second.size();
+     }
+-    for (auto& id : vps_to_include) {
++    for (int id : vps_to_include) {
+       auto it = id2vps_.find(id);
+       if (it == id2vps_.end()) {
+         return MP4Status::Codes::kFailedToLookupVPS;
+@@ -270,6 +268,7 @@ MP4Status H265AnnexBToHevcBitstreamConverter::ConvertChunk(
+     config_.general_profile_compatibility_flags =
+         ptl.general_profile_compatibility_flags;
+     config_.general_level_idc = ptl.general_level_idc;
++    config_.general_constraint_indicator_flags = 0;
+ 
+     if (ptl.general_progressive_source_flag) {
+       config_.general_constraint_indicator_flags |= 1ull << 47;
+diff --git a/media/gpu/vaapi/test/hevc_vaapi_smoke_test.py b/media/gpu/vaapi/test/hevc_vaapi_smoke_test.py
+new file mode 100644
+index 0000000000000..a562a31f43a92
+--- /dev/null
++++ b/media/gpu/vaapi/test/hevc_vaapi_smoke_test.py
+@@ -0,0 +1,235 @@
++#!/usr/bin/env python3
++
++"""Minimal VAAPI HEVC encoder smoke test.
++
++This script verifies three things:
++1. `vainfo` advertises HEVC encode support.
++2. `ffmpeg` can encode a short synthetic stream with `hevc_vaapi`.
++3. `ffprobe` can parse the generated elementary stream as HEVC.
++"""
++
++from __future__ import annotations
++
++import argparse
++import json
++import shutil
++import subprocess
++import sys
++import tempfile
++from pathlib import Path
++
++
++def run_command(cmd: list[str]) -> subprocess.CompletedProcess[str]:
++    return subprocess.run(
++        cmd,
++        stdout=subprocess.PIPE,
++        stderr=subprocess.STDOUT,
++        text=True,
++        check=False,
++    )
++
++
++def require_tool(name: str) -> str:
++    tool_path = shutil.which(name)
++    if not tool_path:
++        raise RuntimeError(f"Required tool not found in PATH: {name}")
++    return tool_path
++
++
++def advertised_hevc_encode(vainfo_output: str, profile: str) -> bool:
++    target_profile = "VAProfileHEVCMain10" if profile == "main10" else "VAProfileHEVCMain"
++    for line in vainfo_output.splitlines():
++        if target_profile not in line:
++            continue
++        if "VAEntrypointEncSlice" in line or "VAEntrypointEncSliceLP" in line:
++            return True
++    return False
++
++
++def encode_with_ffmpeg(
++    ffmpeg: str,
++    device: str,
++    profile: str,
++    width: int,
++    height: int,
++    fps: int,
++    frames: int,
++    qp: int,
++    output_path: Path,
++) -> subprocess.CompletedProcess[str]:
++    upload_format = "p010le" if profile == "main10" else "nv12"
++    cmd = [
++        ffmpeg,
++        "-hide_banner",
++        "-loglevel",
++        "info",
++        "-y",
++        "-vaapi_device",
++        device,
++        "-f",
++        "lavfi",
++        "-i",
++        f"testsrc2=size={width}x{height}:rate={fps}",
++        "-frames:v",
++        str(frames),
++        "-vf",
++        f"format={upload_format},hwupload",
++        "-c:v",
++        "hevc_vaapi",
++        "-profile:v",
++        profile,
++        "-rc_mode",
++        "CQP",
++        "-qp",
++        str(qp),
++        "-bf",
++        "0",
++        "-f",
++        "hevc",
++        str(output_path),
++    ]
++    return run_command(cmd)
++
++
++def probe_stream(ffprobe: str, input_path: Path) -> dict:
++    cmd = [
++        ffprobe,
++        "-v",
++        "error",
++        "-count_frames",
++        "-show_entries",
++        "stream=codec_name,profile,width,height,pix_fmt,nb_read_frames",
++        "-of",
++        "json",
++        str(input_path),
++    ]
++    proc = run_command(cmd)
++    if proc.returncode != 0:
++        raise RuntimeError(f"ffprobe failed:\n{proc.stdout}")
++    return json.loads(proc.stdout)
++
++
++def parse_args() -> argparse.Namespace:
++    parser = argparse.ArgumentParser(description=__doc__)
++    parser.add_argument("--device", default="/dev/dri/renderD128", help="VAAPI render node")
++    parser.add_argument("--width", type=int, default=128, help="Frame width")
++    parser.add_argument("--height", type=int, default=128, help="Frame height")
++    parser.add_argument("--fps", type=int, default=30, help="Frame rate")
++    parser.add_argument("--frames", type=int, default=8, help="Number of frames to encode")
++    parser.add_argument("--qp", type=int, default=24, help="CQP value")
++    parser.add_argument(
++        "--profile",
++        choices=("main", "main10"),
++        default="main",
++        help="HEVC profile to test",
++    )
++    parser.add_argument(
++        "--output",
++        type=Path,
++        help="Optional output .hevc path. If omitted, a temporary file is used.",
++    )
++    parser.add_argument(
++        "--keep-output",
++        action="store_true",
++        help="Keep the temporary output file instead of deleting it.",
++    )
++    parser.add_argument(
++        "--show-logs",
++        action="store_true",
++        help="Print full vainfo and ffmpeg logs.",
++    )
++    return parser.parse_args()
++
++
++def main() -> int:
++    args = parse_args()
++
++    try:
++        vainfo = require_tool("vainfo")
++        ffmpeg = require_tool("ffmpeg")
++        ffprobe = require_tool("ffprobe")
++    except RuntimeError as exc:
++        print(f"ERROR: {exc}", file=sys.stderr)
++        return 1
++
++    vainfo_proc = run_command([vainfo])
++    if vainfo_proc.returncode != 0:
++        print("ERROR: vainfo failed", file=sys.stderr)
++        print(vainfo_proc.stdout, file=sys.stderr)
++        return 1
++
++    supports_hevc = advertised_hevc_encode(vainfo_proc.stdout, args.profile)
++    if not supports_hevc:
++        print(
++            f"ERROR: vainfo did not advertise HEVC {args.profile} encode support",
++            file=sys.stderr,
++        )
++        print(vainfo_proc.stdout, file=sys.stderr)
++        return 1
++
++    temp_dir_path: Path | None = None
++    output_path: Path
++    if args.output:
++        output_path = args.output.resolve()
++        output_path.parent.mkdir(parents=True, exist_ok=True)
++    else:
++        temp_dir_path = Path(tempfile.mkdtemp(prefix="hevc-vaapi-smoke-"))
++        output_path = temp_dir_path / "smoke_test.hevc"
++
++    ffmpeg_proc = encode_with_ffmpeg(
++        ffmpeg=ffmpeg,
++        device=args.device,
++        profile=args.profile,
++        width=args.width,
++        height=args.height,
++        fps=args.fps,
++        frames=args.frames,
++        qp=args.qp,
++        output_path=output_path,
++    )
++    if ffmpeg_proc.returncode != 0:
++        print("ERROR: ffmpeg encode failed", file=sys.stderr)
++        print(ffmpeg_proc.stdout, file=sys.stderr)
++        if temp_dir_path is not None and not args.keep_output:
++            shutil.rmtree(temp_dir_path, ignore_errors=True)
++        return 1
++
++    if not output_path.exists() or output_path.stat().st_size == 0:
++        print("ERROR: ffmpeg returned success but output file is missing or empty", file=sys.stderr)
++        if temp_dir_path is not None and not args.keep_output:
++            shutil.rmtree(temp_dir_path, ignore_errors=True)
++        return 1
++
++    try:
++        probe = probe_stream(ffprobe, output_path)
++    except RuntimeError as exc:
++        print(f"ERROR: {exc}", file=sys.stderr)
++        if temp_dir_path is not None and not args.keep_output:
++            shutil.rmtree(temp_dir_path, ignore_errors=True)
++        return 1
++
++    stream = probe.get("streams", [{}])[0]
++    summary = {
++        "device": args.device,
++        "profile_requested": args.profile,
++        "output_path": str(output_path),
++        "output_size_bytes": output_path.stat().st_size,
++        "stream": stream,
++    }
++
++    print("HEVC VAAPI smoke test passed.")
++    print(json.dumps(summary, indent=2, sort_keys=True))
++
++    if args.show_logs:
++        print("\n=== vainfo ===")
++        print(vainfo_proc.stdout)
++        print("=== ffmpeg ===")
++        print(ffmpeg_proc.stdout)
++
++    if temp_dir_path is not None and not args.keep_output:
++        shutil.rmtree(temp_dir_path, ignore_errors=True)
++    return 0
++
++
++if __name__ == "__main__":
++    sys.exit(main())
+diff --git a/media/gpu/vaapi/vaapi_wrapper.cc b/media/gpu/vaapi/vaapi_wrapper.cc
+index 8f85f9a5a41a4..05791323ee079 100644
+--- a/media/gpu/vaapi/vaapi_wrapper.cc
++++ b/media/gpu/vaapi/vaapi_wrapper.cc
+@@ -42,7 +42,6 @@
+ #include "base/numerics/safe_conversions.h"
+ #include "base/posix/eintr_wrapper.h"
+ #include "base/strings/pattern.h"
+-#include "base/strings/string_number_conversions.h"
+ #include "base/strings/string_util.h"
+ #include "base/strings/stringprintf.h"
+ #include "base/synchronization/lock.h"
+@@ -1209,10 +1208,21 @@ bool GetRequiredAttribs(const base::Lock* va_lock,
+   if (mode == VaapiWrapper::kEncodeVariableBitrate)
+     required_attribs->push_back({VAConfigAttribRateControl, VA_RC_VBR});
+ 
+-  constexpr VAProfile kSupportedH264VaProfilesForEncoding[] = {
+-      VAProfileH264ConstrainedBaseline, VAProfileH264Main, VAProfileH264High};
+-  // VAConfigAttribEncPackedHeaders is H.264 specific.
+-  if (std::ranges::contains(kSupportedH264VaProfilesForEncoding, profile)) {
++  constexpr VAProfile kSupportedPackedHeaderVaProfilesForEncoding[] = {
++      VAProfileH264ConstrainedBaseline,
++      VAProfileH264Main,
++      VAProfileH264High,
++#if BUILDFLAG(ENABLE_HEVC_PARSER_AND_HW_DECODER)
++      VAProfileHEVCMain,
++      VAProfileHEVCMain10,
++      VAProfileHEVCMain444,
++      VAProfileHEVCMain444_10,
++#endif  // BUILDFLAG(ENABLE_HEVC_PARSER_AND_HW_DECODER)
++  };
++  // Request packed headers only for codecs whose VAAPI encoder path submits
++  // sequence, picture, and slice headers out-of-band.
++  if (std::ranges::contains(kSupportedPackedHeaderVaProfilesForEncoding,
++                            profile)) {
+     // Encode with Packed header if the driver supports.
+     VAConfigAttrib attrib{};
+     attrib.type = VAConfigAttribEncPackedHeaders;
+@@ -3218,6 +3228,27 @@ bool VaapiWrapper::UploadVideoFrameToSurface(const VideoFrame& frame,
+             UNSAFE_TODO(image_ptr + image.offsets[0]), image.pitches[0],
+             UNSAFE_TODO(image_ptr + image.offsets[1]), image.pitches[1],
+             visible_size.width(), visible_size.height());
++      } else if (frame.format() == PIXEL_FORMAT_NV12) {
++        libyuv::CopyPlane(
++            frame.visible_data(VideoFrame::Plane::kY),
++            frame.stride(VideoFrame::Plane::kY),
++            UNSAFE_TODO(image_ptr + image.offsets[0]), image.pitches[0],
++            base::checked_cast<int>(VideoFrame::RowBytes(
++                VideoFrame::Plane::kY, PIXEL_FORMAT_NV12,
++                visible_size.width())),
++            base::checked_cast<int>(VideoFrame::Rows(
++                VideoFrame::Plane::kY, PIXEL_FORMAT_NV12,
++                visible_size.height())));
++        libyuv::CopyPlane(
++            frame.visible_data(VideoFrame::Plane::kUV),
++            frame.stride(VideoFrame::Plane::kUV),
++            UNSAFE_TODO(image_ptr + image.offsets[1]), image.pitches[1],
++            base::checked_cast<int>(VideoFrame::RowBytes(
++                VideoFrame::Plane::kUV, PIXEL_FORMAT_NV12,
++                visible_size.width())),
++            base::checked_cast<int>(VideoFrame::Rows(
++                VideoFrame::Plane::kUV, PIXEL_FORMAT_NV12,
++                visible_size.height())));
+       } else {
+         LOG(ERROR) << "Unsupported pixel format: "
+                    << VideoPixelFormatToString(frame.format());
+diff --git a/media/video/video_encode_accelerator_adapter.cc b/media/video/video_encode_accelerator_adapter.cc
+index faf2d548dd8bb..6b0cc79359f95 100644
+--- a/media/video/video_encode_accelerator_adapter.cc
++++ b/media/video/video_encode_accelerator_adapter.cc
+@@ -39,6 +39,7 @@
+ #endif  // BUILDFLAG(USE_PROPRIETARY_CODECS)
+ #include "media/video/gpu_video_accelerator_factories.h"
+ #include "media/video/video_encoder_info.h"
++#include "third_party/libyuv/include/libyuv/planar_functions.h"
+ 
+ namespace media {
+ 
+@@ -89,11 +90,12 @@ Bitrate CreateBitrate(
+ 
+ VideoPixelFormat GetCpuInputPixelFormatForProfile(VideoCodecProfile profile) {
+ #if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)
+-  // This returns the CPU-upload fallback format for the current platform path,
+-  // not the ideal hardware-native format in the abstract.
++  // This returns the CPU-upload fallback format for the current platform path.
++  // For HEVC Main10 prefer true 10-bit P010 so SHMEM uploads keep the encoder
++  // contract aligned with the hardware-native path.
+   switch (profile) {
+     case HEVCPROFILE_MAIN10:
+-      return PIXEL_FORMAT_I420;
++      return PIXEL_FORMAT_P010LE;
+     case HEVCPROFILE_REXT:
+       return PIXEL_FORMAT_I444;
+     case HEVCPROFILE_HIGH_THROUGHPUT:
+@@ -158,13 +160,27 @@ bool UsesGpuInputBuffers(
+              gpu_supported_pixel_formats.end();
+ }
+ 
+-// Keep the Main10 SHMEM fallback path at visible size so codec-specific aligned
+-// coded size stays implicit inside the encoder/upload path instead of
+-// materializing as input-frame padding. Other CPU-uploaded HEVC profiles keep
+-// the aligned coded size contract until they demonstrate the same artifact.
++// Keep the legacy Main10 I420 SHMEM fallback path at visible size so
++// codec-specific aligned coded size stays implicit inside the encoder/upload
++// path instead of materializing as input-frame padding. True P010 input should
++// follow the normal aligned coded-size contract.
+ bool UsesVisibleSizeCpuFrames(VideoCodecProfile profile,
+-                              bool uses_cpu_input_buffers) {
+-  return profile == HEVCPROFILE_MAIN10 && uses_cpu_input_buffers;
++                              bool uses_cpu_input_buffers,
++                              VideoPixelFormat input_format) {
++  return profile == HEVCPROFILE_MAIN10 && uses_cpu_input_buffers &&
++         input_format == PIXEL_FORMAT_I420;
++}
++
++void InitializeNeutralNv12Frame(VideoFrame& frame) {
++  DCHECK_EQ(frame.format(), PIXEL_FORMAT_NV12);
++  libyuv::SetPlane(frame.writable_data(VideoFrame::Plane::kY),
++                   frame.stride(VideoFrame::Plane::kY),
++                   frame.row_bytes(VideoFrame::Plane::kY),
++                   frame.rows(VideoFrame::Plane::kY), 0);
++  libyuv::SetPlane(frame.writable_data(VideoFrame::Plane::kUV),
++                   frame.stride(VideoFrame::Plane::kUV),
++                   frame.row_bytes(VideoFrame::Plane::kUV),
++                   frame.rows(VideoFrame::Plane::kUV), 128);
+ }
+ 
+ VideoEncodeAccelerator::Config SetUpVeaConfig(
+@@ -761,7 +777,11 @@ void VideoEncodeAcceleratorAdapter::ChangeOptionsOnAcceleratorThread(
+   if (VideoCodecProfileToVideoCodec(profile_) == VideoCodec::kHEVC) {
+     if (options.hevc.produce_annexb) {
+       h265_converter_.reset();
+-    } else if (!h265_converter_) {
++    } else {
++      // Flush()+ChangeOptions() starts a new HEVC stream segment. Recreate the
++      // AnnexB->hvcC converter so the next output derives decoder config from
++      // fresh VPS/SPS/PPS instead of silently reusing the previous segment's
++      // cached hvcc state.
+       h265_converter_ = std::make_unique<H265AnnexBToHevcBitstreamConverter>(
+           /*add_parameter_sets_in_bitstream=*/false);
+     }
+@@ -827,7 +847,7 @@ void VideoEncodeAcceleratorAdapter::RequireBitstreamBuffers(
+   CHECK(state_ == State::kInitializing || state_ == State::kReconfiguring);
+ 
+   input_coded_size_ =
+-      UsesVisibleSizeCpuFrames(profile_, uses_cpu_input_buffers_)
++      UsesVisibleSizeCpuFrames(profile_, uses_cpu_input_buffers_, input_format_)
+           ? options_.frame_size
+           : input_coded_size;
+ 
+@@ -1130,7 +1150,7 @@ VideoEncodeAcceleratorAdapter::PrepareCpuFrame(
+   TRACE_EVENT0("media", "VideoEncodeAcceleratorAdapter::PrepareCpuFrame");
+ 
+   const auto dest_coded_size =
+-      UsesVisibleSizeCpuFrames(profile_, uses_cpu_input_buffers_)
++      UsesVisibleSizeCpuFrames(profile_, uses_cpu_input_buffers_, input_format_)
+           ? options_.frame_size
+           : input_coded_size_;
+   const auto dest_visible_rect = gfx::Rect(options_.frame_size);
+@@ -1139,9 +1159,17 @@ VideoEncodeAcceleratorAdapter::PrepareCpuFrame(
+   // STORAGE_UNOWNED_MEMORY is copied here, not in mojo_video_frame_traits.
+   // It is because VEAAdapter recycles the SharedMemoryRegion, but
+   // mojo_video_frame_traits doesn't.
++  // HEVC Main is sensitive to the legacy "I420 SHMEM in, convert to NV12 only
++  // inside the VA upload" path during codec switches. Force the adapter to
++  // materialize an NV12 CPU frame first so VEA sees the normal aligned NV12
++  // input contract instead of an implicit I420->NV12 upload conversion.
++  const bool allow_legacy_i420_cpu_passthrough =
++      input_format_ == PIXEL_FORMAT_NV12 &&
++      src_frame->format() == PIXEL_FORMAT_I420 &&
++      profile_ != HEVCPROFILE_MAIN;
+   if (src_frame->storage_type() == VideoFrame::STORAGE_SHMEM &&
+       (src_frame->format() == input_format_ ||
+-       src_frame->format() == PIXEL_FORMAT_I420) &&
++       allow_legacy_i420_cpu_passthrough) &&
+       src_frame->visible_rect() == dest_visible_rect &&
+       src_frame->coded_size() == dest_coded_size) {
+     // Nothing to do here, the input frame is already what we need.
+@@ -1170,6 +1198,11 @@ VideoEncodeAcceleratorAdapter::PrepareCpuFrame(
+   if (!shared_frame || !mapped_src_frame)
+     return EncoderStatus(EncoderStatus::Codes::kSystemAPICallError);
+ 
++  if (profile_ == HEVCPROFILE_MAIN && input_format_ == PIXEL_FORMAT_NV12 &&
++      dest_coded_size != dest_visible_rect.size()) {
++    InitializeNeutralNv12Frame(*shared_frame);
++  }
++
+   auto status =
+       frame_converter_.ConvertAndScale(*mapped_src_frame, *shared_frame);
+   if (!status.is_ok()) {
+@@ -1232,6 +1265,11 @@ VideoEncodeAcceleratorAdapter::PrepareGpuFrame(
+   if (!mapped_gpu_frame || !mapped_src_frame)
+     return EncoderStatus(EncoderStatus::Codes::kSystemAPICallError);
+ 
++  if (profile_ == HEVCPROFILE_MAIN && input_format_ == PIXEL_FORMAT_NV12 &&
++      dest_coded_size != dest_visible_rect.size()) {
++    InitializeNeutralNv12Frame(*mapped_gpu_frame);
++  }
++
+   auto status =
+       frame_converter_.ConvertAndScale(*mapped_src_frame, *mapped_gpu_frame);
+   if (!status.is_ok()) {

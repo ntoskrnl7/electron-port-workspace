@@ -1,0 +1,26 @@
+# Generated Electron/Chromium workspaces
+/[0-9]*/
+/main/
+
+# Local workspace snapshots and scratch directories
+/.linux/
+/.win32/
+/.tmp/
+/.log/
+
+# Logs
+*.log
+ports/*/*/export-local.log
+ports/*/*/export-provenance.local
+
+# Build/package artifacts
+out/
+dist/
+*.tgz
+*.tar
+*.tar.gz
+*.zip
+*.crx
+*.exe
+*.dll
+*.pdb

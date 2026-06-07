@@ -1,0 +1,159 @@
+From 3938b5e8ed8c0f19e80a8c964bb75c2de0fcb451 Mon Sep 17 00:00:00 2001
+From: Jung-Kwang Lee <ntoskrnl7@gmail.com>
+Date: Sun, 3 May 2026 17:09:35 +0900
+Subject: fix: normalize sandbox flags for late no-sandbox switch
+
+Keep sandbox-related switches consistent when no-sandbox is applied late.
+Avoid duplicated or conflicting sandbox flags in child process command lines.
+---
+ shell/browser/electron_browser_client.cc      | 35 ++++++++++++++++++-
+ shell/browser/web_contents_preferences.cc     | 14 ++++++--
+ shell/common/api/electron_api_command_line.cc | 13 +++++++
+ 3 files changed, 58 insertions(+), 4 deletions(-)
+
+diff --git a/shell/browser/electron_browser_client.cc b/shell/browser/electron_browser_client.cc
+index e846019773..ded8bd2e93 100644
+--- a/shell/browser/electron_browser_client.cc
++++ b/shell/browser/electron_browser_client.cc
+@@ -62,6 +62,7 @@
+ #include "net/ssl/ssl_cert_request_info.h"
+ #include "net/ssl/ssl_private_key.h"
+ #include "printing/buildflags/buildflags.h"
++#include "sandbox/policy/switches.h"
+ #include "services/device/public/cpp/geolocation/geolocation_system_permission_manager.h"
+ #include "services/device/public/cpp/geolocation/location_provider.h"
+ #include "services/network/public/cpp/features.h"
+@@ -560,9 +561,10 @@ void ElectronBrowserClient::AppendExtraCommandLineSwitches(
+   if (process_type == ::switches::kUtilityProcess ||
+       process_type == ::switches::kRendererProcess) {
+     // Copy following switches to child process.
+-    static constexpr std::array<const char*, 11U> kCommonSwitchNames = {
++    static constexpr const char* const kCommonSwitchNames[] = {
+         switches::kStandardSchemes.c_str(),
+         switches::kEnableSandbox.c_str(),
++        sandbox::policy::switches::kNoSandbox,
+         switches::kSecureSchemes.c_str(),
+         switches::kBypassCSPSchemes.c_str(),
+         switches::kCORSSchemes.c_str(),
+@@ -578,6 +580,16 @@ void ElectronBrowserClient::AppendExtraCommandLineSwitches(
+         content::RenderProcessHost::FromID(process_id)) {
+       MaybeAppendSecureOriginsAllowlistSwitch(command_line);
+     }
++
++    // Keep no-sandbox authoritative if both switches are present.
++    if (command_line->HasSwitch(sandbox::policy::switches::kNoSandbox))
++      command_line->RemoveSwitch(switches::kEnableSandbox);
++
++    // Canonicalize repeated no-sandbox from multiple append paths.
++    if (command_line->HasSwitch(sandbox::policy::switches::kNoSandbox)) {
++      command_line->RemoveSwitch(sandbox::policy::switches::kNoSandbox);
++      command_line->AppendSwitch(sandbox::policy::switches::kNoSandbox);
++    }
+   }
+ 
+   if (process_type == ::switches::kRendererProcess) {
+@@ -596,6 +608,12 @@ void ElectronBrowserClient::AppendExtraCommandLineSwitches(
+       command_line->AppendSwitchPath(switches::kAppPath, app_path);
+     }
+ 
++    // no-sandbox renderers must bypass zygote.
++    if (command_line->HasSwitch(sandbox::policy::switches::kNoSandbox) &&
++        !command_line->HasSwitch(::switches::kNoZygote)) {
++      command_line->AppendSwitch(::switches::kNoZygote);
++    }
++
+     auto env = base::Environment::Create();
+     if (env->HasVar("ELECTRON_PROFILE_INIT_SCRIPTS")) {
+       command_line->AppendSwitch("profile-electron-init");
+@@ -623,6 +641,21 @@ void ElectronBrowserClient::AppendExtraCommandLineSwitches(
+         command_line->AppendSwitch(switches::kServiceWorkerPreload);
+       }
+     }
++
++    // Renderer command-line assembly also pulls selected browser switches.
++    // Drop local copies here so these flags appear only once.
++    const base::CommandLine& browser_command_line =
++        *base::CommandLine::ForCurrentProcess();
++    if (browser_command_line.HasSwitch(sandbox::policy::switches::kNoSandbox))
++      command_line->RemoveSwitch(sandbox::policy::switches::kNoSandbox);
++    if (browser_command_line.HasSwitch(::switches::kNoZygote))
++      command_line->RemoveSwitch(::switches::kNoZygote);
++
++    // Canonicalize repeated no-zygote from multiple append paths.
++    if (command_line->HasSwitch(::switches::kNoZygote)) {
++      command_line->RemoveSwitch(::switches::kNoZygote);
++      command_line->AppendSwitch(::switches::kNoZygote);
++    }
+   }
+ }
+ 
+diff --git a/shell/browser/web_contents_preferences.cc b/shell/browser/web_contents_preferences.cc
+index da2fe80b8a..788a1ace87 100644
+--- a/shell/browser/web_contents_preferences.cc
++++ b/shell/browser/web_contents_preferences.cc
+@@ -318,11 +318,19 @@ void WebContentsPreferences::AppendCommandLineSwitches(
+   // unless nodeIntegrationInSubFrames is enabled
+   bool can_sandbox_frame = is_subframe && !node_integration_in_sub_frames_;
+ 
++  // Keep no-sandbox authoritative once it is present on the process command
++  // line; avoid conflicting sandbox flags on child command lines.
++  if (command_line->HasSwitch(sandbox::policy::switches::kNoSandbox))
++    command_line->RemoveSwitch(switches::kEnableSandbox);
++
+   if (IsSandboxed() || can_sandbox_frame) {
+-    command_line->AppendSwitch(switches::kEnableSandbox);
++    if (!command_line->HasSwitch(sandbox::policy::switches::kNoSandbox))
++      command_line->AppendSwitch(switches::kEnableSandbox);
+   } else if (!command_line->HasSwitch(switches::kEnableSandbox)) {
+-    command_line->AppendSwitch(sandbox::policy::switches::kNoSandbox);
+-    command_line->AppendSwitch(::switches::kNoZygote);
++    if (!command_line->HasSwitch(sandbox::policy::switches::kNoSandbox))
++      command_line->AppendSwitch(sandbox::policy::switches::kNoSandbox);
++    if (!command_line->HasSwitch(::switches::kNoZygote))
++      command_line->AppendSwitch(::switches::kNoZygote);
+   }
+ 
+ #if BUILDFLAG(IS_MAC)
+diff --git a/shell/common/api/electron_api_command_line.cc b/shell/common/api/electron_api_command_line.cc
+index 98bbf60351..839757bff7 100644
+--- a/shell/common/api/electron_api_command_line.cc
++++ b/shell/common/api/electron_api_command_line.cc
+@@ -5,11 +5,14 @@
+ #include "base/command_line.h"
+ #include "base/files/file_path.h"
+ #include "base/strings/string_util.h"
++#include "content/public/common/content_switches.h"
++#include "sandbox/policy/switches.h"
+ #include "services/network/public/cpp/network_switches.h"
+ #include "shell/common/gin_converters/base_converter.h"
+ #include "shell/common/gin_converters/file_path_converter.h"
+ #include "shell/common/gin_helper/dictionary.h"
+ #include "shell/common/node_includes.h"
++#include "shell/common/options_switches.h"
+ #include "third_party/abseil-cpp/absl/strings/ascii.h"
+ 
+ namespace {
+@@ -32,6 +35,8 @@ void AppendSwitch(const std::string& switch_string,
+                   gin::Arguments* const args) {
+   auto switch_str = base::ToLowerASCII(switch_string);
+   auto* command_line = base::CommandLine::ForCurrentProcess();
++  const bool had_no_sandbox =
++      command_line->HasSwitch(sandbox::policy::switches::kNoSandbox);
+   if (base::EndsWith(switch_string, "-path",
+                      base::CompareCase::INSENSITIVE_ASCII) ||
+       switch_string == network::switches::kLogNetLog) {
+@@ -46,6 +51,14 @@ void AppendSwitch(const std::string& switch_string,
+     command_line->AppendSwitchNative(switch_str, value);
+   else
+     command_line->AppendSwitch(switch_str);
++
++  // When --no-sandbox is added at runtime, keep switch state consistent for
++  // future children: avoid mixed sandbox flags and avoid zygote reuse.
++  if (switch_str == sandbox::policy::switches::kNoSandbox) {
++    command_line->RemoveSwitch(electron::switches::kEnableSandbox);
++    if (!had_no_sandbox && !command_line->HasSwitch(switches::kNoZygote))
++      command_line->AppendSwitch(switches::kNoZygote);
++  }
+ }
+ 
+ void RemoveSwitch(const std::string& switch_string) {

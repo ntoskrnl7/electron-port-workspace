@@ -1,0 +1,7 @@
+schema_version=1
+name=user-agent-override
+target=42
+electronized_chromium_patches=true
+electron_patch_stack_source=chromium-direct
+electron_patch_files=electron/*.patch
+chromium_direct_archive=chromium-direct

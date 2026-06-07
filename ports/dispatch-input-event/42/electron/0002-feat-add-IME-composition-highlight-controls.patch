@@ -1,0 +1,463 @@
+From 651de813927c8965362f5988372265c9d8604af7 Mon Sep 17 00:00:00 2001
+From: Jung-Kwang Lee <ntoskrnl7@gmail.com>
+Date: Thu, 4 Jun 2026 00:23:28 +0900
+Subject: [PATCH] feat: add IME composition highlight controls
+
+---
+ ...tch-input-composition-highlight-options.md |  15 ++
+ ...-input-ime-set-composition-event-params.md |   1 +
+ .../browser/api/electron_api_web_contents.cc  | 187 +++++++++++++++++-
+ spec/api-web-contents-spec.ts                 | 173 ++++++++++++++++
+ 4 files changed, 373 insertions(+), 3 deletions(-)
+ create mode 100644 docs/api/structures/dispatch-input-composition-highlight-options.md
+
+diff --git a/docs/api/structures/dispatch-input-composition-highlight-options.md b/docs/api/structures/dispatch-input-composition-highlight-options.md
+new file mode 100644
+index 0000000000..545a139dcb
+--- /dev/null
++++ b/docs/api/structures/dispatch-input-composition-highlight-options.md
+@@ -0,0 +1,15 @@
++# DispatchInputCompositionHighlightOptions Object
++
++* `backgroundColor` string (optional) - CSS color used to fill the composition
++  range. Defaults to transparent.
++* `underlineColor` string (optional) - CSS color used to draw the composition
++  underline. Defaults to transparent.
++* `textColor` string (optional) - CSS color used to draw the composition text
++  when Chromium composition foreground markers are enabled. Defaults to
++  transparent.
++* `underlineStyle` string (optional) - Can be `none`, `solid`, `dot`, `dash`, or
++  `squiggle`. Defaults to `solid` when `underlineColor`, `underlineStyle`, or
++  `thickness` is specified, otherwise `none`.
++* `thickness` string (optional) - Can be `none`, `thin`, or `thick`. Defaults to
++  `thin` when `underlineColor`, `underlineStyle`, or `thickness` is specified,
++  otherwise `none`.
+diff --git a/docs/api/structures/dispatch-input-ime-set-composition-event-params.md b/docs/api/structures/dispatch-input-ime-set-composition-event-params.md
+index 09d6b55aa8..ed3517ce41 100644
+--- a/docs/api/structures/dispatch-input-ime-set-composition-event-params.md
++++ b/docs/api/structures/dispatch-input-ime-set-composition-event-params.md
+@@ -8,3 +8,4 @@
+   Must be provided together with `replacementEnd`.
+ * `replacementEnd` Integer (optional) - End offset of the replacement range.
+   Must be provided together with `replacementStart`.
++* `highlight` boolean | [DispatchInputCompositionHighlightOptions](dispatch-input-composition-highlight-options.md) (optional) - Controls how Chromium paints the composition range. If omitted or `true`, Chromium's default composition highlight is used. If `false`, the composition range is kept active but its background, underline, and text highlight are transparent. If an object is provided, its style is applied to the composition range.
+diff --git a/shell/browser/api/electron_api_web_contents.cc b/shell/browser/api/electron_api_web_contents.cc
+index a292c979fe..5a6bd8121a 100644
+--- a/shell/browser/api/electron_api_web_contents.cc
++++ b/shell/browser/api/electron_api_web_contents.cc
+@@ -181,6 +181,7 @@
+ #include "third_party/blink/public/mojom/renderer_preferences.mojom.h"
+ #include "ui/base/cursor/cursor.h"
+ #include "ui/base/cursor/mojom/cursor_type.mojom-shared.h"
++#include "ui/base/ime/ime_text_span.h"
+ #include "ui/base/ime/text_input_action.h"
+ #include "ui/base/ime/text_input_mode.h"
+ #include "ui/base/ime/text_input_type.h"
+@@ -758,6 +759,178 @@ bool SetKeyboardEventText(
+   return true;
+ }
+ 
++base::expected<ui::ImeTextSpan::UnderlineStyle, std::string>
++GetDispatchCompositionUnderlineStyle(const std::string& style) {
++  using UnderlineStyle = ui::ImeTextSpan::UnderlineStyle;
++  static constexpr auto Lookup =
++      base::MakeFixedFlatMap<std::string_view, UnderlineStyle>({
++          {"none", UnderlineStyle::kNone},
++          {"solid", UnderlineStyle::kSolid},
++          {"dot", UnderlineStyle::kDot},
++          {"dash", UnderlineStyle::kDash},
++          {"squiggle", UnderlineStyle::kSquiggle},
++      });
++  const auto* value = base::FindOrNull(Lookup, style);
++  if (!value)
++    return base::unexpected("Invalid 'highlight.underlineStyle' parameter");
++  return *value;
++}
++
++base::expected<ui::ImeTextSpan::Thickness, std::string>
++GetDispatchCompositionThickness(const std::string& thickness) {
++  using Thickness = ui::ImeTextSpan::Thickness;
++  static constexpr auto Lookup =
++      base::MakeFixedFlatMap<std::string_view, Thickness>({
++          {"none", Thickness::kNone},
++          {"thin", Thickness::kThin},
++          {"thick", Thickness::kThick},
++      });
++  const auto* value = base::FindOrNull(Lookup, thickness);
++  if (!value)
++    return base::unexpected("Invalid 'highlight.thickness' parameter");
++  return *value;
++}
++
++base::expected<SkColor, std::string> GetDispatchCompositionHighlightColor(
++    const gin_helper::Dictionary& dict,
++    std::string_view key) {
++  std::string color_string;
++  if (!dict.Get(key, &color_string)) {
++    return base::unexpected(
++        base::StringPrintf("Invalid 'highlight.%s' parameter",
++                           std::string(key).c_str()));
++  }
++
++  const std::optional<SkColor> color = ParseCSSColor(color_string);
++  if (!color.has_value()) {
++    return base::unexpected(
++        base::StringPrintf("Invalid 'highlight.%s' parameter",
++                           std::string(key).c_str()));
++  }
++  return color.value();
++}
++
++base::expected<ui::ImeTextSpan, std::string>
++CreateDispatchCompositionHighlightSpan(
++    const gin_helper::Dictionary& highlight_options,
++    size_t text_length) {
++  SkColor background_color = SK_ColorTRANSPARENT;
++  SkColor underline_color = SK_ColorTRANSPARENT;
++  SkColor text_color = SK_ColorTRANSPARENT;
++  ui::ImeTextSpan::Thickness thickness = ui::ImeTextSpan::Thickness::kNone;
++  ui::ImeTextSpan::UnderlineStyle underline_style =
++      ui::ImeTextSpan::UnderlineStyle::kNone;
++
++  const bool has_underline_options =
++      highlight_options.Has("underlineColor") ||
++      highlight_options.Has("underlineStyle") ||
++      highlight_options.Has("thickness");
++  if (has_underline_options) {
++    thickness = ui::ImeTextSpan::Thickness::kThin;
++    underline_style = ui::ImeTextSpan::UnderlineStyle::kSolid;
++  }
++
++  if (highlight_options.Has("backgroundColor")) {
++    auto parsed =
++        GetDispatchCompositionHighlightColor(highlight_options,
++                                             "backgroundColor");
++    if (!parsed.has_value())
++      return base::unexpected(parsed.error());
++    background_color = parsed.value();
++  }
++
++  if (highlight_options.Has("underlineColor")) {
++    auto parsed =
++        GetDispatchCompositionHighlightColor(highlight_options,
++                                             "underlineColor");
++    if (!parsed.has_value())
++      return base::unexpected(parsed.error());
++    underline_color = parsed.value();
++  }
++
++  if (highlight_options.Has("textColor")) {
++    auto parsed =
++        GetDispatchCompositionHighlightColor(highlight_options, "textColor");
++    if (!parsed.has_value())
++      return base::unexpected(parsed.error());
++    text_color = parsed.value();
++  }
++
++  if (highlight_options.Has("underlineStyle")) {
++    std::string style;
++    if (!highlight_options.Get("underlineStyle", &style)) {
++      return base::unexpected("Invalid 'highlight.underlineStyle' parameter");
++    }
++    auto parsed = GetDispatchCompositionUnderlineStyle(style);
++    if (!parsed.has_value())
++      return base::unexpected(parsed.error());
++    underline_style = parsed.value();
++  }
++
++  if (highlight_options.Has("thickness")) {
++    std::string value;
++    if (!highlight_options.Get("thickness", &value)) {
++      return base::unexpected("Invalid 'highlight.thickness' parameter");
++    }
++    auto parsed = GetDispatchCompositionThickness(value);
++    if (!parsed.has_value())
++      return base::unexpected(parsed.error());
++    thickness = parsed.value();
++  }
++
++  ui::ImeTextSpan span(ui::ImeTextSpan::Type::kComposition, 0, text_length,
++                       thickness, underline_style, background_color,
++                       SK_ColorTRANSPARENT, std::vector<std::string>(),
++                       text_color);
++  span.underline_color = underline_color;
++  return span;
++}
++
++base::expected<std::vector<ui::ImeTextSpan>, std::string>
++CreateDispatchCompositionHighlightSpans(
++    v8::Isolate* isolate,
++    const gin_helper::Dictionary& input_event,
++    size_t text_length) {
++  std::vector<ui::ImeTextSpan> spans;
++
++  v8::Local<v8::Value> value;
++  if (!input_event.GetHandle()
++           ->GetRealNamedProperty(
++               isolate->GetCurrentContext(),
++               gin::StringToV8(isolate, "highlight").As<v8::String>())
++           .ToLocal(&value))
++    return spans;
++
++  if (value->IsBoolean()) {
++    if (value.As<v8::Boolean>()->Value())
++      return spans;
++
++    auto span =
++        CreateDispatchCompositionHighlightSpan(
++            gin_helper::Dictionary::CreateEmpty(isolate), text_length);
++    if (!span.has_value())
++      return base::unexpected(span.error());
++    spans.push_back(span.value());
++    return spans;
++  }
++
++  if (!value->IsObject() || value->IsArray()) {
++    return base::unexpected("'highlight' must be a boolean or an object");
++  }
++
++  gin_helper::Dictionary highlight_options;
++  if (!gin::ConvertFromV8(isolate, value, &highlight_options)) {
++    return base::unexpected("'highlight' must be a boolean or an object");
++  }
++
++  auto span =
++      CreateDispatchCompositionHighlightSpan(highlight_options, text_length);
++  if (!span.has_value())
++    return base::unexpected(span.error());
++  spans.push_back(span.value());
++  return spans;
++}
++
+ ui::KeyboardCode InferWindowsVirtualKeyCode(ui::DomCode dom_code,
+                                             ui::DomKey dom_key) {
+   if (dom_code != ui::DomCode::NONE) {
+@@ -6679,6 +6852,15 @@ v8::Local<v8::Promise> WebContents::DispatchInputEvent(
+       replacement_range.set_end(replacement_end);
+     }
+ 
++    std::u16string text16 = base::UTF8ToUTF16(text);
++    auto maybe_ime_text_spans =
++        CreateDispatchCompositionHighlightSpans(isolate, input_event,
++                                                text16.length());
++    if (!maybe_ime_text_spans.has_value()) {
++      promise.RejectWithErrorMessage(maybe_ime_text_spans.error());
++      return handle;
++    }
++
+     auto* target_widget = GetFocusedRenderWidgetHost(web_contents());
+     if (!target_widget) {
+       promise.RejectWithErrorMessage("Unable to find a focused frame");
+@@ -6690,9 +6872,8 @@ v8::Local<v8::Promise> WebContents::DispatchInputEvent(
+     auto target_widget_weak = target_widget->GetWeakPtr();
+     target_widget->Focus();
+     target_widget->GetWidgetInputHandler()->ImeSetComposition(
+-        base::UTF8ToUTF16(text), std::vector<ui::ImeTextSpan>(),
+-        replacement_range, selection_start, selection_end,
+-        blink::mojom::ImeState::kNone,
++        text16, maybe_ime_text_spans.value(), replacement_range,
++        selection_start, selection_end, blink::mojom::ImeState::kNone,
+         base::BindOnce(
+             [](InputDispatchRequest* request,
+                base::WeakPtr<content::RenderWidgetHostImpl> target_widget) {
+diff --git a/spec/api-web-contents-spec.ts b/spec/api-web-contents-spec.ts
+index 04dc797d2c..6c75e6a435 100644
+--- a/spec/api-web-contents-spec.ts
++++ b/spec/api-web-contents-spec.ts
+@@ -2305,6 +2305,84 @@ describe('webContents module', () => {
+       await expect(w.webContents.dispatchInputEvent(inputEvent)).to.eventually.be.rejectedWith(message);
+     };
+ 
++    const countPixels = (image: Electron.NativeImage, matches: (r: number, g: number, b: number, a: number) => boolean) => {
++      const bitmap = image.toBitmap();
++      let count = 0;
++      for (let i = 0; i < bitmap.length; i += 4) {
++        const b = bitmap[i];
++        const g = bitmap[i + 1];
++        const r = bitmap[i + 2];
++        const a = bitmap[i + 3];
++        if (matches(r, g, b, a)) count++;
++      }
++      return count;
++    };
++
++    const loadCompositionHighlightFixture = async () => {
++      const w = new BrowserWindow({
++        show: false,
++        width: 320,
++        height: 160,
++        webPreferences: {
++          backgroundThrottling: false
++        }
++      });
++      const ready = once(w, 'ready-to-show');
++      await w.loadURL(
++        `data:text/html,${encodeURIComponent(`
++        <html>
++          <head>
++            <style>
++              html, body {
++                background: white;
++                height: 100%;
++                margin: 0;
++                overflow: hidden;
++              }
++
++              #target {
++                background: white;
++                border: 0;
++                caret-color: transparent;
++                color: transparent;
++                font: 64px Arial, sans-serif;
++                height: 96px;
++                line-height: 96px;
++                margin: 24px;
++                outline: none;
++                padding: 0;
++                white-space: pre;
++                width: 272px;
++              }
++            </style>
++          </head>
++          <body>
++            <div id="target" contenteditable="true"></div>
++            <script>
++              window.events = [];
++              const target = document.getElementById('target');
++              for (const type of ['compositionstart', 'compositionupdate', 'input']) {
++                target.addEventListener(type, event => {
++                  window.events.push({
++                    type,
++                    data: event.data ?? null,
++                    inputType: event.inputType ?? null,
++                    text: target.textContent
++                  });
++                });
++              }
++              target.focus();
++            </script>
++          </body>
++        </html>
++      `)}`
++      );
++      await ready;
++      w.show();
++      await w.webContents.executeJavaScript('document.getElementById("target").focus()');
++      return w;
++    };
++
+     it('rejects invalid input event parameters before dispatching', async () => {
+       const w = new BrowserWindow({ show: false });
+       await w.loadURL('about:blank');
+@@ -2405,6 +2483,49 @@ describe('webContents module', () => {
+         { kind: 'imeSetComposition', text: 'a', selectionStart: 0, selectionEnd: 1, replacementStart: 0 },
+         'Either both replacementStart/replacementEnd are specified or neither'
+       );
++      await expectDispatchInputEventRejected(
++        w,
++        { kind: 'imeSetComposition', text: 'a', selectionStart: 0, selectionEnd: 1, highlight: 'hidden' },
++        "'highlight' must be a boolean or an object"
++      );
++      await expectDispatchInputEventRejected(
++        w,
++        { kind: 'imeSetComposition', text: 'a', selectionStart: 0, selectionEnd: 1, highlight: [] },
++        "'highlight' must be a boolean or an object"
++      );
++      await expectDispatchInputEventRejected(
++        w,
++        {
++          kind: 'imeSetComposition',
++          text: 'a',
++          selectionStart: 0,
++          selectionEnd: 1,
++          highlight: { backgroundColor: 'definitely-not-a-color' }
++        },
++        "Invalid 'highlight.backgroundColor' parameter"
++      );
++      await expectDispatchInputEventRejected(
++        w,
++        {
++          kind: 'imeSetComposition',
++          text: 'a',
++          selectionStart: 0,
++          selectionEnd: 1,
++          highlight: { underlineStyle: 'double' }
++        },
++        "Invalid 'highlight.underlineStyle' parameter"
++      );
++      await expectDispatchInputEventRejected(
++        w,
++        {
++          kind: 'imeSetComposition',
++          text: 'a',
++          selectionStart: 0,
++          selectionEnd: 1,
++          highlight: { thickness: 'wide' }
++        },
++        "Invalid 'highlight.thickness' parameter"
++      );
+     });
+ 
+     it('reports consumed keyboard events when the page prevents default', async () => {
+@@ -2773,6 +2894,58 @@ describe('webContents module', () => {
+       expect(value).to.equal('compose');
+     });
+ 
++    it('sets IME composition text without painting a composition highlight', async () => {
++      const w = await loadCompositionHighlightFixture();
++
++      const result = await w.webContents.dispatchInputEvent({
++        kind: 'imeSetComposition',
++        text: 'compose',
++        selectionStart: 7,
++        selectionEnd: 7,
++        highlight: false
++      });
++
++      expect(result.inputEventId).to.be.a('string').and.not.be.empty();
++      await waitUntil(async () => {
++        return w.webContents.executeJavaScript('window.events.some(event => event.type === "compositionupdate")');
++      });
++
++      const state = await w.webContents.executeJavaScript('({ text: document.getElementById("target").textContent, events: window.events })');
++      expect(state.text).to.equal('compose');
++      expect(state.events.map((event: any) => event.type)).to.include.members(['compositionstart', 'compositionupdate', 'input']);
++
++      await setTimeout(100);
++      const image = await w.webContents.capturePage({ x: 0, y: 0, width: 320, height: 160 });
++      const visiblePixels = countPixels(image, (r, g, b, a) => a > 0 && (r < 245 || g < 245 || b < 245));
++      expect(visiblePixels).to.be.lessThan(50);
++    });
++
++    it('paints a custom IME composition highlight', async () => {
++      const w = await loadCompositionHighlightFixture();
++
++      const result = await w.webContents.dispatchInputEvent({
++        kind: 'imeSetComposition',
++        text: 'compose',
++        selectionStart: 7,
++        selectionEnd: 7,
++        highlight: {
++          backgroundColor: '#ff00ff',
++          underlineStyle: 'none',
++          thickness: 'none'
++        }
++      });
++
++      expect(result.inputEventId).to.be.a('string').and.not.be.empty();
++      await waitUntil(async () => {
++        return w.webContents.executeJavaScript('document.getElementById("target").textContent === "compose"');
++      });
++
++      await setTimeout(100);
++      const image = await w.webContents.capturePage({ x: 0, y: 0, width: 320, height: 160 });
++      const magentaPixels = countPixels(image, (r, g, b, a) => a > 0 && r > 200 && g < 80 && b > 200);
++      expect(magentaPixels).to.be.greaterThan(100);
++    });
++
+     it('sets IME composition text with a replacement range', async () => {
+       const w = new BrowserWindow({ show: false });
+       await w.loadURL(
+-- 
+2.53.0
+

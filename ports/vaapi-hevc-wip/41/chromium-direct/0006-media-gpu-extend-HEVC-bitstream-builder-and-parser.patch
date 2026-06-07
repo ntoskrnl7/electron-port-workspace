@@ -1,0 +1,695 @@
+From 444dbb643a0e13409b25bd20cf4b2b09f9e80cd2 Mon Sep 17 00:00:00 2001
+From: Jung-Kwang Lee <ntoskrnl7@gmail.com>
+Date: Thu, 30 Apr 2026 10:02:31 +0900
+Subject: media/gpu: extend HEVC bitstream builder and parser
+
+---
+ media/gpu/h265_builder.cc          | 211 +++++++++++++++++++++--
+ media/gpu/h265_builder.h           |   7 +
+ media/gpu/h265_builder_unittest.cc | 263 +++++++++++++++++++++++++++++
+ media/parsers/h265_parser.cc       |  64 ++++---
+ media/parsers/h265_parser.h        |  12 ++
+ 5 files changed, 516 insertions(+), 41 deletions(-)
+
+diff --git a/media/gpu/h265_builder.cc b/media/gpu/h265_builder.cc
+index b6583e982c74f..65d64c1fc4750 100644
+--- a/media/gpu/h265_builder.cc
++++ b/media/gpu/h265_builder.cc
+@@ -2,10 +2,33 @@
+ // Use of this source code is governed by a BSD-style license that can be
+ // found in the LICENSE file.
+ #include "media/gpu/h265_builder.h"
++
++#include "base/check.h"
+ #include "media/filters/h26x_annex_b_bitstream_builder.h"
+ 
+ namespace media {
+ 
++namespace {
++
++void AppendExplicitShortTermRefPicSet(H26xAnnexBBitstreamBuilder& builder,
++                                      const H265StRefPicSet& st_ref_pic_set) {
++  // Keep packed non-IDR slice headers constrained to the single backward
++  // reference pattern used by the current VAAPI encoder path.
++  CHECK_LE(st_ref_pic_set.num_negative_pics, 1);
++  CHECK_EQ(st_ref_pic_set.num_positive_pics, 0);
++
++  builder.AppendUE(st_ref_pic_set.num_negative_pics);
++  builder.AppendUE(st_ref_pic_set.num_positive_pics);
++
++  if (st_ref_pic_set.num_negative_pics == 1) {
++    CHECK_EQ(st_ref_pic_set.delta_poc_s0[0], -1);
++    builder.AppendUE(0);  // delta_poc_s0_minus1
++    builder.AppendBool(st_ref_pic_set.used_by_curr_pic_s0[0]);
++  }
++}
++
++}  // namespace
++
+ void BuildPackedH265ProfileTierLevel(
+     H26xAnnexBBitstreamBuilder& builder,
+     const H265ProfileTierLevel& profile_tier_level,
+@@ -64,7 +87,17 @@ void BuildPackedH265VPS(H26xAnnexBBitstreamBuilder& builder,
+   CHECK_EQ(vps.vps_num_layer_sets_minus1, 0);
+   builder.AppendUE(vps.vps_num_layer_sets_minus1);
+ 
+-  builder.AppendBits(1, 0);  // vps_timing_info_present_flag
++  builder.AppendBits(1, vps.vps_timing_info_present_flag);
++  if (vps.vps_timing_info_present_flag) {
++    builder.AppendBits(32, vps.vps_num_units_in_tick);
++    builder.AppendBits(32, vps.vps_time_scale);
++    builder.AppendBits(1, vps.vps_poc_proportional_to_timing_flag);
++    if (vps.vps_poc_proportional_to_timing_flag) {
++      builder.AppendUE(vps.vps_num_ticks_poc_diff_one_minus1);
++    }
++    builder.AppendUE(vps.vps_num_hrd_parameters);
++    CHECK_EQ(vps.vps_num_hrd_parameters, 0);
++  }
+   builder.AppendBits(1, 0);  // vps_extension_flag
+ 
+   builder.FinishNALU();
+@@ -148,28 +181,61 @@ void BuildPackedH265SPS(H26xAnnexBBitstreamBuilder& builder,
+   builder.AppendBits(1, sps.sps_temporal_mvp_enabled_flag);
+   builder.AppendBits(1, sps.strong_intra_smoothing_enabled_flag);
+   builder.AppendBits(1, sps.vui_parameters_present_flag);
+-  // The assumption here is that for now, only for Rec.601 and Rec.709 that
+-  // VEA will set vui_parameters_present_flag & colour_description_present_flag
+-  // to true.
+-  if (sps.vui_parameters_present_flag &&
+-      sps.vui_parameters.colour_description_present_flag) {
++  if (sps.vui_parameters_present_flag) {
+     // E.2.1 VUI parameters syntax
+     builder.AppendBits(1, 0);  // aspect_ratio_info_present_flag
+     builder.AppendBits(1, 0);  // overscan_info_present_flag
+-    builder.AppendBits(1, 1);  // video_signal_type_present_flag
+-    builder.AppendBits(3, 5);  // video_format = Unspecified.
+-    builder.AppendBits(1, sps.vui_parameters.video_full_range_flag);
+-    builder.AppendBits(1, 1);  // colour_description_present_flag
+-    builder.AppendBits(8, sps.vui_parameters.colour_primaries);
+-    builder.AppendBits(8, sps.vui_parameters.transfer_characteristics);
+-    builder.AppendBits(8, sps.vui_parameters.matrix_coeffs);
++    const bool video_signal_type_present_flag =
++        sps.vui_parameters.video_full_range_flag ||
++        sps.vui_parameters.colour_description_present_flag;
++    builder.AppendBits(1, video_signal_type_present_flag);
++    if (video_signal_type_present_flag) {
++      builder.AppendBits(3, 5);  // video_format = Unspecified.
++      builder.AppendBits(1, sps.vui_parameters.video_full_range_flag);
++      builder.AppendBits(1, sps.vui_parameters.colour_description_present_flag);
++      if (sps.vui_parameters.colour_description_present_flag) {
++        builder.AppendBits(8, sps.vui_parameters.colour_primaries);
++        builder.AppendBits(8, sps.vui_parameters.transfer_characteristics);
++        builder.AppendBits(8, sps.vui_parameters.matrix_coeffs);
++      }
++    }
+     builder.AppendBits(1, 0);  // chroma_loc_info_present_flag
+     builder.AppendBits(1, 0);  // neutral_chroma_indication_flag
+     builder.AppendBits(1, 0);  // field_seq_flag
+     builder.AppendBits(1, 0);  // frame_field_info_present_flag
+-    builder.AppendBits(1, 0);  // default_display_window_flag
+-    builder.AppendBits(1, 0);  // vui_timing_info_present_flag
+-    builder.AppendBits(1, 0);  // bitstream_restriction_flag
++    const bool default_display_window_flag =
++        sps.vui_parameters.def_disp_win_left_offset != 0 ||
++        sps.vui_parameters.def_disp_win_right_offset != 0 ||
++        sps.vui_parameters.def_disp_win_top_offset != 0 ||
++        sps.vui_parameters.def_disp_win_bottom_offset != 0;
++    builder.AppendBits(1, default_display_window_flag);
++    if (default_display_window_flag) {
++      builder.AppendUE(sps.vui_parameters.def_disp_win_left_offset);
++      builder.AppendUE(sps.vui_parameters.def_disp_win_right_offset);
++      builder.AppendUE(sps.vui_parameters.def_disp_win_top_offset);
++      builder.AppendUE(sps.vui_parameters.def_disp_win_bottom_offset);
++    }
++    builder.AppendBits(1, sps.vui_parameters.timing_info_present_flag);
++    if (sps.vui_parameters.timing_info_present_flag) {
++      builder.AppendBits(32, sps.vui_parameters.num_units_in_tick);
++      builder.AppendBits(32, sps.vui_parameters.time_scale);
++      builder.AppendBits(1, sps.vui_parameters.poc_proportional_to_timing_flag);
++      if (sps.vui_parameters.poc_proportional_to_timing_flag) {
++        builder.AppendUE(sps.vui_parameters.num_ticks_poc_diff_one_minus1);
++      }
++      builder.AppendBits(1, 0);  // vui_hrd_parameters_present_flag
++    }
++    builder.AppendBits(1, sps.vui_parameters.bitstream_restriction_flag);
++    if (sps.vui_parameters.bitstream_restriction_flag) {
++      builder.AppendBits(1, 0);  // tiles_fixed_structure_flag
++      builder.AppendBits(1, 1);  // motion_vectors_over_pic_boundaries_flag
++      builder.AppendBits(1, sps.vui_parameters.restricted_ref_pic_lists_flag);
++      builder.AppendUE(sps.vui_parameters.min_spatial_segmentation_idc);
++      builder.AppendUE(sps.vui_parameters.max_bytes_per_pic_denom);
++      builder.AppendUE(sps.vui_parameters.max_bits_per_min_cu_denom);
++      builder.AppendUE(sps.vui_parameters.log2_max_mv_length_horizontal);
++      builder.AppendUE(sps.vui_parameters.log2_max_mv_length_vertical);
++    }
+   }
+   builder.AppendBits(1, 0);  // sps_extension_present_flag
+ 
+@@ -250,4 +316,117 @@ void BuildPackedH265PPS(H26xAnnexBBitstreamBuilder& builder,
+   builder.FinishNALU();
+ }
+ 
++void BuildPackedH265SliceHeader(H26xAnnexBBitstreamBuilder& builder,
++                                const H265SPS& sps,
++                                const H265PPS& pps,
++                                const H265SliceHeader& slice_header,
++                                bool add_rbsp_trailing_bits) {
++  // 7.3.6 Slice segment header syntax.
++  DCHECK(slice_header.first_slice_segment_in_pic_flag);
++  DCHECK(!slice_header.dependent_slice_segment_flag);
++
++  builder.BeginNALU(static_cast<H265NALU::Type>(slice_header.nal_unit_type));
++
++  builder.AppendBool(slice_header.first_slice_segment_in_pic_flag);
++  if (slice_header.irap_pic) {
++    builder.AppendBool(slice_header.no_output_of_prior_pics_flag);
++  }
++  builder.AppendUE(slice_header.slice_pic_parameter_set_id);
++
++  if (pps.num_extra_slice_header_bits > 0) {
++    builder.AppendBits(pps.num_extra_slice_header_bits, 0);
++  }
++  builder.AppendUE(slice_header.slice_type);
++
++  if (pps.output_flag_present_flag) {
++    builder.AppendBool(slice_header.pic_output_flag);
++  }
++  if (sps.separate_colour_plane_flag) {
++    builder.AppendBits(2, slice_header.colour_plane_id);
++  }
++
++  if (slice_header.nal_unit_type != H265NALU::IDR_W_RADL &&
++      slice_header.nal_unit_type != H265NALU::IDR_N_LP) {
++    builder.AppendBits(sps.log2_max_pic_order_cnt_lsb_minus4 + 4,
++                       slice_header.slice_pic_order_cnt_lsb);
++    builder.AppendBool(slice_header.short_term_ref_pic_set_sps_flag);
++    if (slice_header.short_term_ref_pic_set_sps_flag) {
++      CHECK_LE(sps.num_short_term_ref_pic_sets, 1);
++    } else {
++      AppendExplicitShortTermRefPicSet(builder, slice_header.st_ref_pic_set);
++    }
++    if (sps.sps_temporal_mvp_enabled_flag) {
++      builder.AppendBool(slice_header.slice_temporal_mvp_enabled_flag);
++    }
++  }
++
++  CHECK(!slice_header.IsBSlice());
++  if (sps.sample_adaptive_offset_enabled_flag) {
++    const int chroma_array_type =
++        sps.separate_colour_plane_flag ? 0 : sps.chroma_format_idc;
++    builder.AppendBool(slice_header.slice_sao_luma_flag);
++    if (chroma_array_type != 0) {
++      builder.AppendBool(slice_header.slice_sao_chroma_flag);
++    }
++  }
++
++  if (!slice_header.IsISlice()) {
++    builder.AppendBool(slice_header.num_ref_idx_active_override_flag);
++    if (slice_header.num_ref_idx_active_override_flag) {
++      builder.AppendUE(slice_header.num_ref_idx_l0_active_minus1);
++      CHECK(!slice_header.IsPSlice());
++      builder.AppendUE(slice_header.num_ref_idx_l1_active_minus1);
++    }
++    CHECK(!pps.lists_modification_present_flag);
++    if (pps.cabac_init_present_flag) {
++      builder.AppendBool(slice_header.cabac_init_flag);
++    }
++    if (slice_header.slice_temporal_mvp_enabled_flag) {
++      if (slice_header.IsBSlice()) {
++        builder.AppendBool(slice_header.collocated_from_l0_flag);
++      }
++      builder.AppendUE(slice_header.collocated_ref_idx);
++    }
++    CHECK(!pps.weighted_pred_flag);
++    CHECK(!pps.weighted_bipred_flag);
++    builder.AppendUE(slice_header.five_minus_max_num_merge_cand);
++  }
++
++  builder.AppendSE(slice_header.slice_qp_delta);
++
++  if (pps.pps_slice_chroma_qp_offsets_present_flag) {
++    builder.AppendSE(slice_header.slice_cb_qp_offset);
++    builder.AppendSE(slice_header.slice_cr_qp_offset);
++  }
++
++  if (pps.chroma_qp_offset_list_enabled_flag) {
++    builder.AppendBool(false);  // cu_chroma_qp_offset_enabled_flag
++  }
++
++  const bool deblocking_filter_disabled =
++      pps.deblocking_filter_override_enabled_flag
++          ? slice_header.slice_deblocking_filter_disabled_flag
++          : pps.pps_deblocking_filter_disabled_flag;
++  if (pps.deblocking_filter_override_enabled_flag) {
++    CHECK_EQ(slice_header.slice_deblocking_filter_disabled_flag,
++             pps.pps_deblocking_filter_disabled_flag);
++    builder.AppendBool(false);  // deblocking_filter_override_flag
++  }
++
++  if (pps.pps_loop_filter_across_slices_enabled_flag &&
++      (slice_header.slice_sao_luma_flag || slice_header.slice_sao_chroma_flag ||
++       !deblocking_filter_disabled)) {
++    builder.AppendBool(slice_header.slice_loop_filter_across_slices_enabled_flag);
++  }
++
++  if (add_rbsp_trailing_bits) {
++    builder.FinishNALU();
++    return;
++  }
++
++  // Some packed-header paths want only the header bits without a terminating
++  // RBSP stop bit so the caller can control exact bit length explicitly.
++  builder.Flush();
++}
++
+ }  // namespace media
+diff --git a/media/gpu/h265_builder.h b/media/gpu/h265_builder.h
+index 975eb5022fb1f..094c23a0ef7f5 100644
+--- a/media/gpu/h265_builder.h
++++ b/media/gpu/h265_builder.h
+@@ -27,6 +27,13 @@ MEDIA_GPU_EXPORT void BuildPackedH265SPS(H26xAnnexBBitstreamBuilder& builder,
+ MEDIA_GPU_EXPORT void BuildPackedH265PPS(H26xAnnexBBitstreamBuilder& builder,
+                                          const H265PPS& pps);
+ 
++MEDIA_GPU_EXPORT void BuildPackedH265SliceHeader(
++    H26xAnnexBBitstreamBuilder& builder,
++    const H265SPS& sps,
++    const H265PPS& pps,
++    const H265SliceHeader& slice_header,
++    bool add_rbsp_trailing_bits = false);
++
+ }  // namespace media
+ 
+ #endif  // MEDIA_GPU_H265_BUILDER_H_
+diff --git a/media/gpu/h265_builder_unittest.cc b/media/gpu/h265_builder_unittest.cc
+index 2e0744db3810e..1d6459479be54 100644
+--- a/media/gpu/h265_builder_unittest.cc
++++ b/media/gpu/h265_builder_unittest.cc
+@@ -14,9 +14,109 @@ class H265BuilderTest : public testing::Test {
+  protected:
+   void SetUp() override { parser_ = std::make_unique<H265Parser>(); }
+ 
++  static H265VPS MakeTestVPS() {
++    H265VPS vps;
++    vps.vps_video_parameter_set_id = 0;
++    vps.vps_base_layer_internal_flag = true;
++    vps.vps_base_layer_available_flag = true;
++    vps.vps_max_layers_minus1 = 0;
++    vps.vps_max_sub_layers_minus1 = 0;
++    vps.vps_temporal_id_nesting_flag = true;
++    vps.profile_tier_level.general_profile_idc = 1;
++    vps.profile_tier_level.general_profile_compatibility_flags = 0x40000000;
++    vps.profile_tier_level.general_progressive_source_flag = 1;
++    vps.profile_tier_level.general_non_packed_constraint_flag = 1;
++    vps.profile_tier_level.general_frame_only_constraint_flag = 1;
++    vps.profile_tier_level.general_level_idc = 120;
++    vps.vps_max_dec_pic_buffering_minus1[0] = 1;
++    vps.vps_max_num_reorder_pics[0] = 0;
++    vps.vps_max_latency_increase_plus1[0] = 0;
++    return vps;
++  }
++
++  static H265SPS MakeTestSPS() {
++    H265SPS sps = {};
++    sps.sps_video_parameter_set_id = 0;
++    sps.sps_max_sub_layers_minus1 = 0;
++    sps.sps_temporal_id_nesting_flag = 1;
++    sps.profile_tier_level.general_profile_idc = 1;
++    sps.profile_tier_level.general_profile_compatibility_flags = 0x40000000;
++    sps.profile_tier_level.general_progressive_source_flag = 1;
++    sps.profile_tier_level.general_non_packed_constraint_flag = 1;
++    sps.profile_tier_level.general_frame_only_constraint_flag = 1;
++    sps.profile_tier_level.general_level_idc = 120;
++    sps.sps_seq_parameter_set_id = 0;
++    sps.chroma_format_idc = 1;
++    sps.chroma_array_type = 1;
++    sps.pic_width_in_luma_samples = 1344;
++    sps.pic_height_in_luma_samples = 592;
++    sps.bit_depth_luma_minus8 = 0;
++    sps.bit_depth_chroma_minus8 = 0;
++    sps.log2_max_pic_order_cnt_lsb_minus4 = 8;
++    sps.sps_max_dec_pic_buffering_minus1[0] = 1;
++    sps.sps_max_num_reorder_pics[0] = 0;
++    sps.sps_max_latency_increase_plus1[0] = 1;
++    sps.log2_min_luma_coding_block_size_minus3 = 0;
++    sps.log2_diff_max_min_luma_coding_block_size = 3;
++    sps.log2_min_luma_transform_block_size_minus2 = 0;
++    sps.log2_diff_max_min_luma_transform_block_size = 3;
++    sps.max_transform_hierarchy_depth_inter = 0;
++    sps.max_transform_hierarchy_depth_intra = 0;
++    sps.sample_adaptive_offset_enabled_flag = true;
++    sps.strong_intra_smoothing_enabled_flag = true;
++    return sps;
++  }
++
++  static H265PPS MakeTestPPS() {
++    H265PPS pps = {};
++    pps.pps_pic_parameter_set_id = 0;
++    pps.pps_seq_parameter_set_id = 0;
++    pps.cabac_init_present_flag = true;
++    pps.num_ref_idx_l0_default_active_minus1 = 0;
++    pps.num_ref_idx_l1_default_active_minus1 = 0;
++    pps.init_qp_minus26 = 0;
++    pps.cu_qp_delta_enabled_flag = true;
++    pps.pps_slice_chroma_qp_offsets_present_flag = true;
++    pps.pps_loop_filter_across_slices_enabled_flag = true;
++    pps.deblocking_filter_control_present_flag = true;
++    return pps;
++  }
++
+   std::unique_ptr<H265Parser> parser_;
+ };
+ 
++TEST_F(H265BuilderTest, BuildVPSWithTimingInfo) {
++  H265VPS vps = MakeTestVPS();
++  vps.vps_timing_info_present_flag = true;
++  vps.vps_num_units_in_tick = 1;
++  vps.vps_time_scale = 30;
++  vps.vps_poc_proportional_to_timing_flag = true;
++  vps.vps_num_ticks_poc_diff_one_minus1 = 0;
++  vps.vps_num_hrd_parameters = 0;
++
++  H26xAnnexBBitstreamBuilder builder;
++  BuildPackedH265VPS(builder, vps);
++  builder.Flush();
++
++  parser_->SetStream(builder.data());
++  H265NALU nalu;
++  ASSERT_EQ(H265Parser::kOk, parser_->AdvanceToNextNALU(&nalu));
++  ASSERT_EQ(H265NALU::VPS_NUT, nalu.nal_unit_type);
++
++  int vps_id = -1;
++  ASSERT_EQ(H265Parser::kOk, parser_->ParseVPS(&vps_id));
++
++  const H265VPS* parsed_vps = parser_->GetVPS(vps_id);
++  ASSERT_TRUE(parsed_vps);
++  EXPECT_TRUE(parsed_vps->vps_timing_info_present_flag);
++  EXPECT_EQ(vps.vps_num_units_in_tick, parsed_vps->vps_num_units_in_tick);
++  EXPECT_EQ(vps.vps_time_scale, parsed_vps->vps_time_scale);
++  EXPECT_TRUE(parsed_vps->vps_poc_proportional_to_timing_flag);
++  EXPECT_EQ(vps.vps_num_ticks_poc_diff_one_minus1,
++            parsed_vps->vps_num_ticks_poc_diff_one_minus1);
++  EXPECT_EQ(vps.vps_num_hrd_parameters, parsed_vps->vps_num_hrd_parameters);
++}
++
+ TEST_F(H265BuilderTest, BuildVUIParametersInSPS) {
+   // Create an SPS with VUI parameters
+   H265SPS sps = {};
+@@ -167,6 +267,71 @@ TEST_F(H265BuilderTest, BuildSPSWithoutVUIParameters) {
+   EXPECT_EQ(sps.chroma_format_idc, parsed_sps->chroma_format_idc);
+ }
+ 
++TEST_F(H265BuilderTest, BuildSPSWithVUITimingInfo) {
++  H265SPS sps = MakeTestSPS();
++  sps.vui_parameters_present_flag = true;
++  sps.vui_parameters.timing_info_present_flag = true;
++  sps.vui_parameters.num_units_in_tick = 1;
++  sps.vui_parameters.time_scale = 30;
++
++  H26xAnnexBBitstreamBuilder builder;
++  BuildPackedH265SPS(builder, sps);
++  builder.Flush();
++
++  parser_->SetStream(builder.data());
++  H265NALU nalu;
++  ASSERT_EQ(H265Parser::kOk, parser_->AdvanceToNextNALU(&nalu));
++  ASSERT_EQ(H265NALU::SPS_NUT, nalu.nal_unit_type);
++
++  int sps_id = -1;
++  ASSERT_EQ(H265Parser::kOk, parser_->ParseSPS(&sps_id));
++
++  const H265SPS* parsed_sps = parser_->GetSPS(sps_id);
++  ASSERT_TRUE(parsed_sps);
++  EXPECT_TRUE(parsed_sps->vui_parameters_present_flag);
++  EXPECT_TRUE(parsed_sps->vui_parameters.timing_info_present_flag);
++  EXPECT_EQ(sps.vui_parameters.num_units_in_tick,
++            parsed_sps->vui_parameters.num_units_in_tick);
++  EXPECT_EQ(sps.vui_parameters.time_scale,
++            parsed_sps->vui_parameters.time_scale);
++  EXPECT_FALSE(parsed_sps->vui_parameters.poc_proportional_to_timing_flag);
++}
++
++TEST_F(H265BuilderTest, BuildSPSWithBitstreamRestrictionFlags) {
++  H265SPS sps = MakeTestSPS();
++  sps.vui_parameters_present_flag = true;
++  sps.vui_parameters.bitstream_restriction_flag = true;
++  sps.vui_parameters.restricted_ref_pic_lists_flag = true;
++  sps.vui_parameters.min_spatial_segmentation_idc = 0;
++  sps.vui_parameters.max_bytes_per_pic_denom = 0;
++  sps.vui_parameters.max_bits_per_min_cu_denom = 0;
++  sps.vui_parameters.log2_max_mv_length_horizontal = 15;
++  sps.vui_parameters.log2_max_mv_length_vertical = 15;
++
++  H26xAnnexBBitstreamBuilder builder;
++  BuildPackedH265SPS(builder, sps);
++  builder.Flush();
++
++  parser_->SetStream(builder.data());
++  H265NALU nalu;
++  ASSERT_EQ(H265Parser::kOk, parser_->AdvanceToNextNALU(&nalu));
++  ASSERT_EQ(H265NALU::SPS_NUT, nalu.nal_unit_type);
++
++  int sps_id = -1;
++  ASSERT_EQ(H265Parser::kOk, parser_->ParseSPS(&sps_id));
++
++  const H265SPS* parsed_sps = parser_->GetSPS(sps_id);
++  ASSERT_TRUE(parsed_sps);
++  EXPECT_TRUE(parsed_sps->vui_parameters.bitstream_restriction_flag);
++  EXPECT_TRUE(parsed_sps->vui_parameters.restricted_ref_pic_lists_flag);
++  EXPECT_EQ(sps.vui_parameters.min_spatial_segmentation_idc,
++            parsed_sps->vui_parameters.min_spatial_segmentation_idc);
++  EXPECT_EQ(sps.vui_parameters.max_bytes_per_pic_denom,
++            parsed_sps->vui_parameters.max_bytes_per_pic_denom);
++  EXPECT_EQ(sps.vui_parameters.max_bits_per_min_cu_denom,
++            parsed_sps->vui_parameters.max_bits_per_min_cu_denom);
++}
++
+ TEST_F(H265BuilderTest, BuildRangeExtensionsSPS) {
+   H265SPS sps = {};
+   sps.sps_video_parameter_set_id = 0;
+@@ -287,4 +452,102 @@ TEST_F(H265BuilderTest, BuildHighThroughputSPS) {
+   EXPECT_EQ(2, parsed_sps->bit_depth_chroma_minus8);
+ }
+ 
++TEST_F(H265BuilderTest, BuildParseIdentityIDRSliceHeader) {
++  H265SPS sps = MakeTestSPS();
++  H265PPS pps = MakeTestPPS();
++  H265SliceHeader slice_header = {};
++  slice_header.nal_unit_type = H265NALU::IDR_W_RADL;
++  slice_header.irap_pic = true;
++  slice_header.first_slice_segment_in_pic_flag = true;
++  slice_header.no_output_of_prior_pics_flag = false;
++  slice_header.slice_pic_parameter_set_id = pps.pps_pic_parameter_set_id;
++  slice_header.slice_type = H265SliceHeader::kSliceTypeI;
++  slice_header.slice_sao_luma_flag = true;
++  slice_header.slice_sao_chroma_flag = true;
++  slice_header.slice_qp_delta = 0;
++  slice_header.slice_loop_filter_across_slices_enabled_flag = true;
++
++  H26xAnnexBBitstreamBuilder builder;
++  BuildPackedH265SPS(builder, sps);
++  BuildPackedH265PPS(builder, pps);
++  BuildPackedH265SliceHeader(builder, sps, pps, slice_header);
++  builder.FinishNALU();
++
++  parser_->SetStream(builder.data());
++  H265NALU nalu;
++  ASSERT_EQ(H265Parser::kOk, parser_->AdvanceToNextNALU(&nalu));
++  ASSERT_EQ(H265NALU::SPS_NUT, nalu.nal_unit_type);
++  int sps_id = -1;
++  ASSERT_EQ(H265Parser::kOk, parser_->ParseSPS(&sps_id));
++
++  ASSERT_EQ(H265Parser::kOk, parser_->AdvanceToNextNALU(&nalu));
++  ASSERT_EQ(H265NALU::PPS_NUT, nalu.nal_unit_type);
++  int pps_id = -1;
++  ASSERT_EQ(H265Parser::kOk, parser_->ParsePPS(nalu, &pps_id));
++
++  ASSERT_EQ(H265Parser::kOk, parser_->AdvanceToNextNALU(&nalu));
++  ASSERT_EQ(H265NALU::IDR_W_RADL, nalu.nal_unit_type);
++  H265SliceHeader parsed_slice_header;
++  ASSERT_EQ(H265Parser::kOk,
++            parser_->ParseSliceHeader(nalu, &parsed_slice_header, nullptr));
++  EXPECT_TRUE(parsed_slice_header.first_slice_segment_in_pic_flag);
++  EXPECT_FALSE(parsed_slice_header.no_output_of_prior_pics_flag);
++  EXPECT_EQ(pps_id, parsed_slice_header.slice_pic_parameter_set_id);
++  EXPECT_EQ(H265SliceHeader::kSliceTypeI, parsed_slice_header.slice_type);
++  EXPECT_TRUE(parsed_slice_header.slice_sao_luma_flag);
++  EXPECT_TRUE(parsed_slice_header.slice_sao_chroma_flag);
++  EXPECT_EQ(0, parsed_slice_header.slice_qp_delta);
++  EXPECT_TRUE(parsed_slice_header.slice_loop_filter_across_slices_enabled_flag);
++}
++
++TEST_F(H265BuilderTest, BuildParseIdentityNonIDRSliceHeader) {
++  H265SPS sps = MakeTestSPS();
++  H265PPS pps = MakeTestPPS();
++  H265SliceHeader slice_header = {};
++  slice_header.nal_unit_type = H265NALU::TRAIL_R;
++  slice_header.first_slice_segment_in_pic_flag = true;
++  slice_header.pic_output_flag = true;
++  slice_header.slice_pic_parameter_set_id = pps.pps_pic_parameter_set_id;
++  slice_header.slice_type = H265SliceHeader::kSliceTypeI;
++  slice_header.slice_pic_order_cnt_lsb = 7;
++  slice_header.short_term_ref_pic_set_sps_flag = true;
++  slice_header.slice_sao_luma_flag = true;
++  slice_header.slice_sao_chroma_flag = true;
++  slice_header.slice_qp_delta = 0;
++  slice_header.slice_loop_filter_across_slices_enabled_flag = true;
++
++  H26xAnnexBBitstreamBuilder builder;
++  BuildPackedH265SPS(builder, sps);
++  BuildPackedH265PPS(builder, pps);
++  BuildPackedH265SliceHeader(builder, sps, pps, slice_header);
++  builder.FinishNALU();
++
++  parser_->SetStream(builder.data());
++  H265NALU nalu;
++  ASSERT_EQ(H265Parser::kOk, parser_->AdvanceToNextNALU(&nalu));
++  ASSERT_EQ(H265NALU::SPS_NUT, nalu.nal_unit_type);
++  int sps_id = -1;
++  ASSERT_EQ(H265Parser::kOk, parser_->ParseSPS(&sps_id));
++
++  ASSERT_EQ(H265Parser::kOk, parser_->AdvanceToNextNALU(&nalu));
++  ASSERT_EQ(H265NALU::PPS_NUT, nalu.nal_unit_type);
++  int pps_id = -1;
++  ASSERT_EQ(H265Parser::kOk, parser_->ParsePPS(nalu, &pps_id));
++
++  ASSERT_EQ(H265Parser::kOk, parser_->AdvanceToNextNALU(&nalu));
++  ASSERT_EQ(H265NALU::TRAIL_R, nalu.nal_unit_type);
++  H265SliceHeader parsed_slice_header;
++  ASSERT_EQ(H265Parser::kOk,
++            parser_->ParseSliceHeader(nalu, &parsed_slice_header, nullptr));
++  EXPECT_TRUE(parsed_slice_header.first_slice_segment_in_pic_flag);
++  EXPECT_EQ(pps_id, parsed_slice_header.slice_pic_parameter_set_id);
++  EXPECT_EQ(H265SliceHeader::kSliceTypeI, parsed_slice_header.slice_type);
++  EXPECT_EQ(7, parsed_slice_header.slice_pic_order_cnt_lsb);
++  EXPECT_TRUE(parsed_slice_header.short_term_ref_pic_set_sps_flag);
++  EXPECT_TRUE(parsed_slice_header.slice_sao_luma_flag);
++  EXPECT_TRUE(parsed_slice_header.slice_sao_chroma_flag);
++  EXPECT_EQ(0, parsed_slice_header.slice_qp_delta);
++  EXPECT_TRUE(parsed_slice_header.slice_loop_filter_across_slices_enabled_flag);
++}
++
+ }  // namespace media
+diff --git a/media/parsers/h265_parser.cc b/media/parsers/h265_parser.cc
+index c93b7b4830d69..3a3a1fa956409 100644
+--- a/media/parsers/h265_parser.cc
++++ b/media/parsers/h265_parser.cc
+@@ -378,23 +378,27 @@ H265Parser::Result H265Parser::ParseVPS(int* vps_id) {
+     }
+   }
+ 
+-  bool vps_timing_info_present_flag;
+-  READ_BOOL_OR_RETURN(&vps_timing_info_present_flag);
+-  if (vps_timing_info_present_flag) {
+-    SKIP_BITS_OR_RETURN(32);  // vps_num_units_in_tick (!= 0)
+-    SKIP_BITS_OR_RETURN(32);  // vps_time_scale (!= 0)
+-    bool vps_poc_proportional_to_timing_flag;
+-    READ_BOOL_OR_RETURN(&vps_poc_proportional_to_timing_flag);
+-    if (vps_poc_proportional_to_timing_flag) {
+-      int vps_num_ticks_poc_diff_one_minus1;
++  READ_BOOL_OR_RETURN(&vps->vps_timing_info_present_flag);
++  if (vps->vps_timing_info_present_flag) {
++    uint32_t upper_16_bits = 0;
++    uint32_t lower_16_bits = 0;
++    // H264BitReader::ReadBits() supports up to 31 bits at a time, so consume
++    // the HEVC VPS 32-bit timing fields in two 16-bit chunks.
++    READ_BITS_OR_RETURN(16, &upper_16_bits);
++    READ_BITS_OR_RETURN(16, &lower_16_bits);
++    vps->vps_num_units_in_tick = (upper_16_bits << 16) | lower_16_bits;
++    READ_BITS_OR_RETURN(16, &upper_16_bits);
++    READ_BITS_OR_RETURN(16, &lower_16_bits);
++    vps->vps_time_scale = (upper_16_bits << 16) | lower_16_bits;
++    READ_BOOL_OR_RETURN(&vps->vps_poc_proportional_to_timing_flag);
++    if (vps->vps_poc_proportional_to_timing_flag) {
+       // Valid range is 0 to 2^32 - 2, which doesn't actually fit in an int.
+-      READ_UE_OR_RETURN(&vps_num_ticks_poc_diff_one_minus1);
++      READ_UE_OR_RETURN(&vps->vps_num_ticks_poc_diff_one_minus1);
+     }
+-    int vps_num_hrd_parameters;
+-    READ_UE_OR_RETURN(&vps_num_hrd_parameters);
+-    IN_RANGE_OR_RETURN(vps_num_hrd_parameters, 0,
++    READ_UE_OR_RETURN(&vps->vps_num_hrd_parameters);
++    IN_RANGE_OR_RETURN(vps->vps_num_hrd_parameters, 0,
+                        vps->vps_num_layer_sets_minus1 + 1);
+-    for (int i = 0; i < vps_num_hrd_parameters; ++i) {
++    for (int i = 0; i < vps->vps_num_hrd_parameters; ++i) {
+       int hrd_layer_set_idx_i;
+       READ_UE_OR_RETURN(&hrd_layer_set_idx_i);
+       IN_RANGE_OR_RETURN(hrd_layer_set_idx_i,
+@@ -1878,14 +1882,22 @@ H265Parser::Result H265Parser::ParseVuiParameters(const H265SPS& sps,
+     READ_UE_OR_RETURN(&vui->def_disp_win_bottom_offset);
+   }
+ 
+-  // Read and ignore timing info.
+-  READ_BOOL_OR_RETURN(&data);  // timing_info_present_flag
+-  if (data) {
+-    SKIP_BITS_OR_RETURN(32);     // vui_num_units_in_tick
+-    SKIP_BITS_OR_RETURN(32);     // vui_time_scale
+-    READ_BOOL_OR_RETURN(&data);  // vui_poc_proportional_to_timing_flag
+-    if (data)
+-      READ_UE_OR_RETURN(&data);  // vui_num_ticks_poc_diff_one_minus1
++  READ_BOOL_OR_RETURN(&vui->timing_info_present_flag);
++  if (vui->timing_info_present_flag) {
++    uint32_t upper_16_bits = 0;
++    uint32_t lower_16_bits = 0;
++    // H264BitReader::ReadBits() supports up to 31 bits at a time, so consume
++    // the HEVC VUI 32-bit timing fields in two 16-bit chunks.
++    READ_BITS_OR_RETURN(16, &upper_16_bits);
++    READ_BITS_OR_RETURN(16, &lower_16_bits);
++    vui->num_units_in_tick = (upper_16_bits << 16) | lower_16_bits;
++    READ_BITS_OR_RETURN(16, &upper_16_bits);
++    READ_BITS_OR_RETURN(16, &lower_16_bits);
++    vui->time_scale = (upper_16_bits << 16) | lower_16_bits;
++    READ_BOOL_OR_RETURN(&vui->poc_proportional_to_timing_flag);
++    if (vui->poc_proportional_to_timing_flag) {
++      READ_UE_OR_RETURN(&vui->num_ticks_poc_diff_one_minus1);
++    }
+     res = ParseAndIgnoreHrdParameters(true, sps.sps_max_sub_layers_minus1);
+     if (res != kOk)
+       return res;
+@@ -1893,9 +1905,11 @@ H265Parser::Result H265Parser::ParseVuiParameters(const H265SPS& sps,
+ 
+   READ_BOOL_OR_RETURN(&vui->bitstream_restriction_flag);
+   if (vui->bitstream_restriction_flag) {
+-    // Skip tiles_fixed_structure_flag, motion_vectors_over_pic_boundaries_flag
+-    // and restricted_ref_pic_lists_flag.
+-    SKIP_BITS_OR_RETURN(3);
++    // Skip tiles_fixed_structure_flag and
++    // motion_vectors_over_pic_boundaries_flag.
++    SKIP_BITS_OR_RETURN(1);
++    SKIP_BITS_OR_RETURN(1);
++    READ_BOOL_OR_RETURN(&vui->restricted_ref_pic_lists_flag);
+     READ_UE_OR_RETURN(&vui->min_spatial_segmentation_idc);
+     READ_UE_OR_RETURN(&vui->max_bytes_per_pic_denom);
+     READ_UE_OR_RETURN(&vui->max_bits_per_min_cu_denom);
+diff --git a/media/parsers/h265_parser.h b/media/parsers/h265_parser.h
+index ee07d75114a1e..5fa21cfb34955 100644
+--- a/media/parsers/h265_parser.h
++++ b/media/parsers/h265_parser.h
+@@ -146,7 +146,13 @@ struct MEDIA_EXPORT H265VUIParameters {
+   int def_disp_win_right_offset = 0;
+   int def_disp_win_top_offset = 0;
+   int def_disp_win_bottom_offset = 0;
++  bool timing_info_present_flag = false;
++  uint32_t num_units_in_tick = 0;
++  uint32_t time_scale = 0;
++  bool poc_proportional_to_timing_flag = false;
++  int num_ticks_poc_diff_one_minus1 = 0;
+   bool bitstream_restriction_flag = false;
++  bool restricted_ref_pic_lists_flag = false;
+   int min_spatial_segmentation_idc = 0;
+   int max_bytes_per_pic_denom = 0;
+   int max_bits_per_min_cu_denom = 0;
+@@ -170,6 +176,12 @@ struct MEDIA_EXPORT H265VPS {
+   std::array<int, kMaxSubLayers> vps_max_latency_increase_plus1 = {};
+   int vps_max_layer_id = 0;
+   int vps_num_layer_sets_minus1 = 0;
++  bool vps_timing_info_present_flag = false;
++  uint32_t vps_num_units_in_tick = 0;
++  uint32_t vps_time_scale = 0;
++  bool vps_poc_proportional_to_timing_flag = false;
++  int vps_num_ticks_poc_diff_one_minus1 = 0;
++  int vps_num_hrd_parameters = 0;
+ 
+   // Computed from ScalabilityId
+   int aux_alpha_layer_id = 0;

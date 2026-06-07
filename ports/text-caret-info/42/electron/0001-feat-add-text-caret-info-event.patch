@@ -1,0 +1,524 @@
+From fac7f03ba94df76dde9d1c292c80fd607f2cf81d Mon Sep 17 00:00:00 2001
+From: Jung-Kwang Lee <ntoskrnl7@gmail.com>
+Date: Sat, 9 May 2026 22:56:16 +0900
+Subject: feat: add text caret info event
+
+---
+ .../text-caret-info-changed-details-caret.md  |   9 +
+ ...-caret-info-changed-details-composition.md |   7 +
+ ...xt-caret-info-changed-details-selection.md |   8 +
+ .../text-caret-info-changed-details.md        |  25 ++
+ docs/api/web-contents.md                      |  12 +
+ .../browser/api/electron_api_web_contents.cc  | 298 ++++++++++++++++++
+ spec/api-web-contents-spec.ts                 |  52 +++
+ 7 files changed, 411 insertions(+)
+ create mode 100644 docs/api/structures/text-caret-info-changed-details-caret.md
+ create mode 100644 docs/api/structures/text-caret-info-changed-details-composition.md
+ create mode 100644 docs/api/structures/text-caret-info-changed-details-selection.md
+ create mode 100644 docs/api/structures/text-caret-info-changed-details.md
+
+diff --git a/docs/api/structures/text-caret-info-changed-details-caret.md b/docs/api/structures/text-caret-info-changed-details-caret.md
+new file mode 100644
+index 0000000000..30e999f5ab
+--- /dev/null
++++ b/docs/api/structures/text-caret-info-changed-details-caret.md
+@@ -0,0 +1,9 @@
++# TextCaretInfoChangedDetailsCaret Object
++
++* `visible` boolean - Whether a caret or active selection edge is currently
++  visible and valid.
++* `bounds` [Rectangle](rectangle.md) - The visual rectangle of the text
++  insertion caret or active selection edge. Coordinates are in WebContents
++  viewport DIP coordinates.
++* `screenBounds` [Rectangle](rectangle.md) (optional) - The same caret rectangle
++  in screen DIP coordinates, when available.
+diff --git a/docs/api/structures/text-caret-info-changed-details-composition.md b/docs/api/structures/text-caret-info-changed-details-composition.md
+new file mode 100644
+index 0000000000..980c5f0d1f
+--- /dev/null
++++ b/docs/api/structures/text-caret-info-changed-details-composition.md
+@@ -0,0 +1,7 @@
++# TextCaretInfoChangedDetailsComposition Object
++
++* `isComposing` boolean - Whether IME composition is currently active in the
++  editable text.
++* `start` number (optional) - The start offset of the active IME composition
++  range.
++* `end` number (optional) - The end offset of the active IME composition range.
+diff --git a/docs/api/structures/text-caret-info-changed-details-selection.md b/docs/api/structures/text-caret-info-changed-details-selection.md
+new file mode 100644
+index 0000000000..392b62de27
+--- /dev/null
++++ b/docs/api/structures/text-caret-info-changed-details-selection.md
+@@ -0,0 +1,8 @@
++# TextCaretInfoChangedDetailsSelection Object
++
++* `isCollapsed` boolean - Whether the current selection is collapsed to a
++  caret. When this is `false`, typing normally replaces the selected text.
++* `start` number - The start offset of the current selection in the active
++  editable text context.
++* `end` number - The end offset of the current selection in the active editable
++  text context.
+diff --git a/docs/api/structures/text-caret-info-changed-details.md b/docs/api/structures/text-caret-info-changed-details.md
+new file mode 100644
+index 0000000000..66b88c329e
+--- /dev/null
++++ b/docs/api/structures/text-caret-info-changed-details.md
+@@ -0,0 +1,25 @@
++# TextCaretInfoChangedDetails Object
++
++* `frame` [WebFrameMain](../web-frame-main.md) - The frame that owns the
++  focused editable element.
++* `url` string - The current URL of `frame`.
++* `isMainFrame` boolean - Whether `frame` is the main frame of the WebContents.
++* `inputType` string - The current Chromium text input type for the focused
++  editable context. Can be `text`, `password`, `search`, `email`, `number`,
++  `telephone`, `url`, `date`, `dateTime`, `dateTimeLocal`, `month`, `time`,
++  `week`, `textArea`, `contentEditable`, `dateTimeField`, `null`, or
++  `unknown`.
++* `inputMode` string - The current input mode requested by the focused editable
++  context. Can be `default`, `none`, `text`, `tel`, `url`, `email`, `numeric`,
++  `decimal`, `search`, or `unknown`.
++* `inputAction` string - The current enter-key action requested by the focused
++  editable context. Can be `default`, `enter`, `done`, `go`, `next`,
++  `previous`, `search`, `send`, or `unknown`.
++* `caret` [TextCaretInfoChangedDetailsCaret](text-caret-info-changed-details-caret.md) -
++  The current caret state.
++* `selection` [TextCaretInfoChangedDetailsSelection](text-caret-info-changed-details-selection.md) (optional) -
++  The current selection range reported for the focused editable context.
++* `composition` [TextCaretInfoChangedDetailsComposition](text-caret-info-changed-details-composition.md) -
++  The current IME composition state reported for the focused editable context.
++* `reason` string - Why Electron emitted this update. Can be `focus` or
++  `caret-move`.
+diff --git a/docs/api/web-contents.md b/docs/api/web-contents.md
+index 9e3c2b9937..203665a8c0 100644
+--- a/docs/api/web-contents.md
++++ b/docs/api/web-contents.md
+@@ -783,6 +783,18 @@ If the `type` parameter is `custom`, the `image` parameter will hold the custom
+ cursor image in a [`NativeImage`](native-image.md), and `scale`, `size` and `hotspot` will hold
+ additional information about the custom cursor.
+
++#### Event: 'text-caret-info-changed'
++
++Returns:
++
++* `event` Event
++* `details` [TextCaretInfoChangedDetails](structures/text-caret-info-changed-details.md)
++
++Emitted when the caret or active selection edge changes in editable text within
++the page.
++
++Calling `event.preventDefault()` does **NOT** have any effect.
++
+ #### Event: 'context-menu'
+
+ Returns:
+diff --git a/shell/browser/api/electron_api_web_contents.cc b/shell/browser/api/electron_api_web_contents.cc
+index e1448853b3..221a7d87ab 100644
+--- a/shell/browser/api/electron_api_web_contents.cc
++++ b/shell/browser/api/electron_api_web_contents.cc
+@@ -4,6 +4,8 @@
+
+ #include "shell/browser/api/electron_api_web_contents.h"
+
++#include <algorithm>
++#include <cstdlib>
+ #include <limits>
+ #include <list>
+ #include <memory>
+@@ -46,6 +48,7 @@
+ #include "content/browser/renderer_host/render_frame_host_manager.h"  // nogncheck
+ #include "content/browser/renderer_host/render_widget_host_impl.h"  // nogncheck
+ #include "content/browser/renderer_host/render_widget_host_view_base.h"  // nogncheck
++#include "content/browser/renderer_host/text_input_manager.h"  // nogncheck
+ #include "content/browser/web_contents/web_contents_impl.h"  // nogncheck
+ #include "content/public/browser/child_process_security_policy.h"
+ #include "content/public/browser/context_menu_params.h"
+@@ -161,8 +164,12 @@
+ #include "third_party/blink/public/mojom/renderer_preferences.mojom.h"
+ #include "ui/base/cursor/cursor.h"
+ #include "ui/base/cursor/mojom/cursor_type.mojom-shared.h"
++#include "ui/base/ime/text_input_action.h"
++#include "ui/base/ime/text_input_mode.h"
++#include "ui/base/ime/text_input_type.h"
+ #include "ui/display/screen.h"
+ #include "ui/events/base_event_utils.h"
++#include "ui/gfx/selection_bound.h"
+
+ #if BUILDFLAG(IS_MAC)
+ #include "ui/base/cocoa/defaults_utils.h"
+@@ -662,6 +669,295 @@ struct UserDataLink : public base::SupportsUserData::Data {
+ };
+ const void* kElectronApiWebContentsKey = &kElectronApiWebContentsKey;
+
++const void* kTextCaretFrameObserverKey = &kTextCaretFrameObserverKey;
++
++gfx::Rect RectFromSelectionBound(const gfx::SelectionBound& bound) {
++  if (bound.type() == gfx::SelectionBound::EMPTY) {
++    return gfx::Rect();
++  }
++
++  const gfx::Point& start = bound.edge_start_rounded();
++  const gfx::Point& end = bound.edge_end_rounded();
++  const int left = std::min(start.x(), end.x());
++  const int top = std::min(start.y(), end.y());
++  const int width = std::max(1, std::abs(end.x() - start.x()));
++  const int height = std::max(1, std::abs(end.y() - start.y()));
++  return gfx::Rect(left, top, width, height);
++}
++
++std::string_view TextInputTypeToString(ui::TextInputType type) {
++  switch (type) {
++    case ui::TEXT_INPUT_TYPE_NONE:
++      return "none";
++    case ui::TEXT_INPUT_TYPE_TEXT:
++      return "text";
++    case ui::TEXT_INPUT_TYPE_PASSWORD:
++      return "password";
++    case ui::TEXT_INPUT_TYPE_SEARCH:
++      return "search";
++    case ui::TEXT_INPUT_TYPE_EMAIL:
++      return "email";
++    case ui::TEXT_INPUT_TYPE_NUMBER:
++      return "number";
++    case ui::TEXT_INPUT_TYPE_TELEPHONE:
++      return "telephone";
++    case ui::TEXT_INPUT_TYPE_URL:
++      return "url";
++    case ui::TEXT_INPUT_TYPE_DATE:
++      return "date";
++    case ui::TEXT_INPUT_TYPE_DATE_TIME:
++      return "dateTime";
++    case ui::TEXT_INPUT_TYPE_DATE_TIME_LOCAL:
++      return "dateTimeLocal";
++    case ui::TEXT_INPUT_TYPE_MONTH:
++      return "month";
++    case ui::TEXT_INPUT_TYPE_TIME:
++      return "time";
++    case ui::TEXT_INPUT_TYPE_WEEK:
++      return "week";
++    case ui::TEXT_INPUT_TYPE_TEXT_AREA:
++      return "textArea";
++    case ui::TEXT_INPUT_TYPE_CONTENT_EDITABLE:
++      return "contentEditable";
++    case ui::TEXT_INPUT_TYPE_DATE_TIME_FIELD:
++      return "dateTimeField";
++    case ui::TEXT_INPUT_TYPE_NULL:
++      return "null";
++  }
++  return "unknown";
++}
++
++std::string_view TextInputModeToString(ui::TextInputMode mode) {
++  switch (mode) {
++    case ui::TEXT_INPUT_MODE_DEFAULT:
++      return "default";
++    case ui::TEXT_INPUT_MODE_NONE:
++      return "none";
++    case ui::TEXT_INPUT_MODE_TEXT:
++      return "text";
++    case ui::TEXT_INPUT_MODE_TEL:
++      return "tel";
++    case ui::TEXT_INPUT_MODE_URL:
++      return "url";
++    case ui::TEXT_INPUT_MODE_EMAIL:
++      return "email";
++    case ui::TEXT_INPUT_MODE_NUMERIC:
++      return "numeric";
++    case ui::TEXT_INPUT_MODE_DECIMAL:
++      return "decimal";
++    case ui::TEXT_INPUT_MODE_SEARCH:
++      return "search";
++  }
++  return "unknown";
++}
++
++std::string_view TextInputActionToString(ui::TextInputAction action) {
++  switch (action) {
++    case ui::TextInputAction::kDefault:
++      return "default";
++    case ui::TextInputAction::kEnter:
++      return "enter";
++    case ui::TextInputAction::kDone:
++      return "done";
++    case ui::TextInputAction::kGo:
++      return "go";
++    case ui::TextInputAction::kNext:
++      return "next";
++    case ui::TextInputAction::kPrevious:
++      return "previous";
++    case ui::TextInputAction::kSearch:
++      return "search";
++    case ui::TextInputAction::kSend:
++      return "send";
++  }
++  return "unknown";
++}
++
++void SetRangeDetails(gin_helper::Dictionary* target,
++                     const gfx::Range& range) {
++  target->Set("isCollapsed", range.is_empty());
++  target->Set("start", static_cast<uint32_t>(range.start()));
++  target->Set("end", static_cast<uint32_t>(range.end()));
++}
++
++class TextCaretFrameObserver : public base::SupportsUserData::Data,
++                               public content::WebContentsObserver,
++                               public content::TextInputManager::Observer {
++ public:
++  TextCaretFrameObserver(content::WebContents* web_contents,
++                         base::WeakPtr<WebContents> api_web_contents)
++      : content::WebContentsObserver(web_contents),
++        api_web_contents_(api_web_contents) {
++    auto* web_contents_impl =
++        static_cast<content::WebContentsImpl*>(web_contents);
++    text_input_manager_ = web_contents_impl->GetTextInputManager();
++    if (text_input_manager_)
++      text_input_manager_->AddObserver(this);
++  }
++
++  ~TextCaretFrameObserver() override { StopObservingTextInputManager(); }
++
++  static void CreateForWebContents(
++      content::WebContents* web_contents,
++      base::WeakPtr<WebContents> api_web_contents) {
++    if (!web_contents ||
++        web_contents->GetUserData(kTextCaretFrameObserverKey)) {
++      return;
++    }
++
++    web_contents->SetUserData(
++        kTextCaretFrameObserverKey,
++        std::make_unique<TextCaretFrameObserver>(web_contents,
++                                                 api_web_contents));
++  }
++
++  using content::WebContentsObserver::OnTextSelectionChanged;
++
++ private:
++  void WebContentsDestroyed() override {
++    StopObservingTextInputManager();
++    Observe(nullptr);
++  }
++
++  void OnUpdateTextInputStateCalled(
++      content::TextInputManager* text_input_manager,
++      content::RenderWidgetHostViewBase* updated_view,
++      bool did_update_state) override {
++    if (did_update_state)
++      EmitCaretInfoChanged(text_input_manager, updated_view, "focus");
++  }
++
++  void OnSelectionBoundsChanged(
++      content::TextInputManager* text_input_manager,
++      content::RenderWidgetHostViewBase* updated_view) override {
++    EmitCaretInfoChanged(text_input_manager, updated_view, "caret-move");
++  }
++
++  void OnTextSelectionChanged(
++      content::TextInputManager* text_input_manager,
++      content::RenderWidgetHostViewBase* updated_view) override {
++    EmitCaretInfoChanged(text_input_manager, updated_view, "caret-move");
++  }
++
++  void StopObservingTextInputManager() {
++    if (text_input_manager_ && text_input_manager_->HasObserver(this))
++      text_input_manager_->RemoveObserver(this);
++    text_input_manager_ = nullptr;
++  }
++
++  content::RenderFrameHost* GetRenderFrameHostForView(
++      content::RenderWidgetHostViewBase* view) {
++    content::WebContents* contents = web_contents();
++    if (!contents || !view)
++      return nullptr;
++
++    content::RenderWidgetHost* widget = view->GetRenderWidgetHost();
++    content::RenderFrameHost* focused_frame = contents->GetFocusedFrame();
++    if (focused_frame &&
++        (focused_frame->GetView() == view ||
++         focused_frame->GetRenderWidgetHost() == widget)) {
++      return focused_frame;
++    }
++
++    content::RenderFrameHost* result = nullptr;
++    contents->ForEachRenderFrameHostWithAction(
++        [view, widget, &result](content::RenderFrameHost* frame) {
++          if (frame->GetView() == view ||
++              frame->GetRenderWidgetHost() == widget) {
++            result = frame;
++            return content::RenderFrameHost::FrameIterationAction::kStop;
++          }
++          return content::RenderFrameHost::FrameIterationAction::kContinue;
++        });
++    return result;
++  }
++
++  void EmitCaretInfoChanged(content::TextInputManager* text_input_manager,
++                            content::RenderWidgetHostViewBase* updated_view,
++                            const char* reason) {
++    if (!api_web_contents_ || !text_input_manager || !updated_view ||
++        !text_input_manager->IsRegistered(updated_view)) {
++      return;
++    }
++
++    const ui::mojom::TextInputState* text_input_state =
++        text_input_manager->GetTextInputState();
++    if (!text_input_state ||
++        text_input_state->type == ui::TEXT_INPUT_TYPE_NONE) {
++      return;
++    }
++
++    const auto* region = text_input_manager->GetSelectionRegion(updated_view);
++    if (!region)
++      return;
++
++    gfx::Rect caret_bounds = RectFromSelectionBound(region->focus);
++    if (caret_bounds.IsEmpty())
++      caret_bounds = region->caret_rect;
++    if (caret_bounds.IsEmpty())
++      return;
++
++    content::RenderFrameHost* render_frame_host =
++        GetRenderFrameHostForView(updated_view);
++    if (!render_frame_host)
++      return;
++
++    v8::Isolate* isolate = JavascriptEnvironment::GetIsolate();
++    v8::HandleScope handle_scope(isolate);
++
++    auto details = gin_helper::Dictionary::CreateEmpty(isolate);
++    details.SetGetter("frame", render_frame_host);
++    details.Set("url", render_frame_host->GetLastCommittedURL().spec());
++    details.Set("isMainFrame", render_frame_host->GetParent() == nullptr);
++    details.Set("inputType",
++                std::string(TextInputTypeToString(text_input_state->type)));
++    details.Set("inputMode",
++                std::string(TextInputModeToString(text_input_state->mode)));
++    details.Set("inputAction",
++                std::string(TextInputActionToString(text_input_state->action)));
++
++    auto caret = gin_helper::Dictionary::CreateEmpty(isolate);
++    caret.Set("visible", region->focus.type() != gfx::SelectionBound::EMPTY);
++    caret.Set("bounds", caret_bounds);
++
++    content::RenderWidgetHostView* root_view =
++        web_contents()->GetTopLevelRenderWidgetHostView();
++    if (root_view) {
++      gfx::Point screen_origin = caret_bounds.origin();
++      screen_origin += root_view->GetViewBounds().OffsetFromOrigin();
++      caret.Set("screenBounds", gfx::Rect(screen_origin, caret_bounds.size()));
++    }
++    details.Set("caret", caret);
++
++    if (text_input_state->selection.IsValid()) {
++      auto selection = gin_helper::Dictionary::CreateEmpty(isolate);
++      SetRangeDetails(&selection, text_input_state->selection);
++      details.Set("selection", selection);
++    }
++
++    const bool has_composition = text_input_state->composition &&
++                                 text_input_state->composition->IsValid();
++    auto composition = gin_helper::Dictionary::CreateEmpty(isolate);
++    composition.Set("isComposing", has_composition);
++    if (has_composition) {
++      composition.Set("start",
++                      static_cast<uint32_t>(
++                          text_input_state->composition->start()));
++      composition.Set("end",
++                      static_cast<uint32_t>(
++                          text_input_state->composition->end()));
++    }
++    details.Set("composition", composition);
++
++    details.Set("reason", std::string(reason));
++
++    api_web_contents_->Emit("text-caret-info-changed", details);
++  }
++
++  base::WeakPtr<WebContents> api_web_contents_;
++  raw_ptr<content::TextInputManager> text_input_manager_ = nullptr;
++};
++
+ const char kRootName[] = "<root>";
+
+ struct FileSystem {
+@@ -835,6 +1131,7 @@ WebContents::WebContents(v8::Isolate* isolate,
+
+   web_contents->SetUserData(kElectronApiWebContentsKey,
+                             std::make_unique<UserDataLink>(GetWeakPtr()));
++  TextCaretFrameObserver::CreateForWebContents(web_contents, GetWeakPtr());
+   InitZoomController(web_contents, gin::Dictionary::CreateEmpty(isolate));
+ }
+
+@@ -1069,6 +1366,7 @@ void WebContents::InitWithSessionAndOptions(
+
+   web_contents()->SetUserData(kElectronApiWebContentsKey,
+                               std::make_unique<UserDataLink>(GetWeakPtr()));
++  TextCaretFrameObserver::CreateForWebContents(web_contents(), GetWeakPtr());
+ }
+
+ #if BUILDFLAG(ENABLE_ELECTRON_EXTENSIONS)
+diff --git a/spec/api-web-contents-spec.ts b/spec/api-web-contents-spec.ts
+index 517268e4d4..2fd39aa870 100644
+--- a/spec/api-web-contents-spec.ts
++++ b/spec/api-web-contents-spec.ts
+@@ -1221,6 +1221,58 @@ describe('webContents module', () => {
+     });
+   });
+
++  describe('text-caret-info-changed event', () => {
++    afterEach(closeAllWindows);
++
++    it('emits caret bounds and input state for a focused editable element', async () => {
++      const w = new BrowserWindow({ show: false, width: 400, height: 300 });
++      await w.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(`
++        <!DOCTYPE html>
++        <input
++          id="field"
++          type="search"
++          inputmode="email"
++          enterkeyhint="go"
++          value="hello"
++          style="font-size: 24px; margin: 20px;">
++      `)}`);
++
++      const caretInfoChanged = new Promise<Electron.TextCaretInfoChangedDetails>((resolve) => {
++        const listener = (_event: Electron.Event, details: Electron.TextCaretInfoChangedDetails) => {
++          if (details.selection?.start === 2 && details.selection.end === 2) {
++            w.webContents.off('text-caret-info-changed', listener);
++            resolve(details);
++          }
++        };
++        w.webContents.on('text-caret-info-changed', listener);
++      });
++
++      await w.webContents.executeJavaScript(`
++        const field = document.getElementById('field');
++        field.focus();
++        field.setSelectionRange(2, 2);
++      `);
++
++      const details = await caretInfoChanged;
++      expect(details.frame).to.equal(w.webContents.mainFrame);
++      expect(details.url).to.equal(w.webContents.mainFrame.url);
++      expect(details.isMainFrame).to.be.true();
++      expect(details.inputType).to.equal('search');
++      expect(details.inputMode).to.equal('email');
++      expect(details.inputAction).to.equal('go');
++      expect(details.reason).to.be.oneOf(['focus', 'caret-move']);
++      expect(details.caret.visible).to.be.true();
++      expect(details.caret.bounds.width).to.be.greaterThan(0);
++      expect(details.caret.bounds.height).to.be.greaterThan(0);
++      expect(details.selection).to.deep.equal({
++        isCollapsed: true,
++        start: 2,
++        end: 2
++      });
++      expect(details.composition).to.deep.equal({ isComposing: false });
++    });
++  });
++
+   describe('openDevTools() API', () => {
+     afterEach(closeAllWindows);
+     it('can show window with activation', async () => {

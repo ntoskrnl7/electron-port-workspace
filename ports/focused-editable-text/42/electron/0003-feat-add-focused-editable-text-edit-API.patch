@@ -1,0 +1,815 @@
+From f63c1da2b5c440955195799e6193ff9466e30a29 Mon Sep 17 00:00:00 2001
+From: Jung-Kwang Lee <ntoskrnl7@gmail.com>
+Date: Fri, 5 Jun 2026 18:22:56 +0900
+Subject: [PATCH] feat: add focused editable text edit API
+
+---
+ .../focused-editable-text-edit-selection.md   |   8 +
+ .../focused-editable-text-insert-text-edit.md |  11 +
+ ...focused-editable-text-replace-text-edit.md |  20 +
+ docs/api/web-contents.md                      |  28 ++
+ .../browser/api/electron_api_web_contents.cc  | 366 +++++++++++++++++-
+ shell/browser/api/electron_api_web_contents.h |   1 +
+ spec/api-web-contents-spec.ts                 | 260 +++++++++++++
+ 7 files changed, 693 insertions(+), 1 deletion(-)
+ create mode 100644 docs/api/structures/focused-editable-text-edit-selection.md
+ create mode 100644 docs/api/structures/focused-editable-text-insert-text-edit.md
+ create mode 100644 docs/api/structures/focused-editable-text-replace-text-edit.md
+
+diff --git a/docs/api/structures/focused-editable-text-edit-selection.md b/docs/api/structures/focused-editable-text-edit-selection.md
+new file mode 100644
+index 0000000000..d657ea70e3
+--- /dev/null
++++ b/docs/api/structures/focused-editable-text-edit-selection.md
+@@ -0,0 +1,8 @@
++# FocusedEditableTextEditSelection Object
++
++* `start` number - UTF-16 start offset.
++* `end` number - UTF-16 end offset.
++
++This object is passed as `selectionAfter` to
++`webContents.editFocusedEditableText()`. Electron clamps the range to the final
++focused editable text length and normalizes reversed ranges.
+diff --git a/docs/api/structures/focused-editable-text-insert-text-edit.md b/docs/api/structures/focused-editable-text-insert-text-edit.md
+new file mode 100644
+index 0000000000..8b39fc7c7b
+--- /dev/null
++++ b/docs/api/structures/focused-editable-text-insert-text-edit.md
+@@ -0,0 +1,11 @@
++# FocusedEditableTextInsertTextEdit Object
++
++* `kind` string - Can be `insertText`.
++* `text` string - The text to insert into the current selection or active
++  composition.
++* `selectionAfter` [FocusedEditableTextEditSelection](focused-editable-text-edit-selection.md) (optional) -
++  Best-effort selection to apply after the edit. The range is interpreted as
++  UTF-16 offsets in the final focused editable text and is clamped to the final
++  text length.
++
++This object is passed to `webContents.editFocusedEditableText()`.
+diff --git a/docs/api/structures/focused-editable-text-replace-text-edit.md b/docs/api/structures/focused-editable-text-replace-text-edit.md
+new file mode 100644
+index 0000000000..a1c474233e
+--- /dev/null
++++ b/docs/api/structures/focused-editable-text-replace-text-edit.md
+@@ -0,0 +1,20 @@
++# FocusedEditableTextReplaceTextEdit Object
++
++* `kind` string - Can be `replaceText`.
++* `text` string - The replacement text.
++* `start` number (optional) - UTF-16 start offset of the replacement range in
++  the full focused editable text. If `end` is provided and `start` is omitted,
++  the range starts at `0`.
++* `end` number (optional) - UTF-16 end offset of the replacement range in the
++  full focused editable text. If `start` is provided and `end` is omitted, the
++  range ends at the current text length.
++* `selectionAfter` [FocusedEditableTextEditSelection](focused-editable-text-edit-selection.md) (optional) -
++  Best-effort selection to apply after the edit. The range is interpreted as
++  UTF-16 offsets in the final focused editable text and is clamped to the final
++  text length.
++
++When both `start` and `end` are omitted, Electron replaces the current selection
++or active composition. Replacement ranges outside the current focused editable
++text are rejected.
++
++This object is passed to `webContents.editFocusedEditableText()`.
+diff --git a/docs/api/web-contents.md b/docs/api/web-contents.md
+index f5cf295135..7663ba67ab 100644
+--- a/docs/api/web-contents.md
++++ b/docs/api/web-contents.md
+@@ -1303,6 +1303,34 @@ are handled on a best-effort basis. The watcher is not a general DOM mutation
+ observer; editors backed by canvas, virtual documents, or application-internal
+ models may only expose the focused DOM control.
+ 
++#### `contents.editFocusedEditableText(edit)` _Experimental_
++
++* `edit` [FocusedEditableTextInsertTextEdit](structures/focused-editable-text-insert-text-edit.md) | [FocusedEditableTextReplaceTextEdit](structures/focused-editable-text-replace-text-edit.md)
++
++Returns `Promise<FocusedEditableText | null>` - resolves with the focused
++editable text snapshot after the edit is applied, or `null` if no focused
++editable text can be edited.
++
++Edits the currently focused editable text using Chromium's text input path.
++`insertText` inserts into the current selection or active composition.
++`replaceText` replaces the requested UTF-16 range, or the current selection when
++no range is provided.
++
++`start`, `end`, and `selectionAfter` offsets are UTF-16 offsets in the full
++focused editable text. For `replaceText`, omitting `start` means the beginning
++of the text, omitting `end` means the end of the text, and omitting both means
++the current selection. Replacement ranges outside the current text are rejected.
++
++`selectionAfter` is best-effort. If provided, Electron clamps it to the final
++text length and applies it after the edit. If selection placement cannot be
++completed, the edit itself is not rolled back. The returned
++[`FocusedEditableText`](structures/focused-editable-text.md) contains the
++actual final selection.
++
++Password inputs return `null`. Custom editors backed by DOM-editable content are
++handled on a best-effort basis. Editors backed by canvas, virtual documents, or
++application-internal models may only expose the focused DOM control.
++
+ #### `contents.isLoading()`
+ 
+ Returns `boolean` - Whether web page is still loading resources.
+diff --git a/shell/browser/api/electron_api_web_contents.cc b/shell/browser/api/electron_api_web_contents.cc
+index 5a6bd8121a..c35f4c3c57 100644
+--- a/shell/browser/api/electron_api_web_contents.cc
++++ b/shell/browser/api/electron_api_web_contents.cc
+@@ -2322,6 +2322,21 @@ struct FocusedEditableTextSnapshot {
+   bool is_partial = false;
+ };
+ 
++enum class FocusedEditableTextEditKind { kInsertText, kReplaceText };
++
++struct FocusedEditableTextEditSelection {
++  int start = 0;
++  int end = 0;
++};
++
++struct FocusedEditableTextEdit {
++  FocusedEditableTextEditKind kind = FocusedEditableTextEditKind::kInsertText;
++  std::u16string text;
++  std::optional<int> start;
++  std::optional<int> end;
++  std::optional<FocusedEditableTextEditSelection> selection_after;
++};
++
+ using FocusedEditableTextResultCallback =
+     base::OnceCallback<void(v8::Local<v8::Value>)>;
+ 
+@@ -2554,10 +2569,156 @@ bool ParseFocusedEditableTextWatchOptionsDictionary(
+   return true;
+ }
+ 
++bool GetOptionalFocusedEditableTextEditOffset(
++    const gin_helper::Dictionary& dict,
++    std::string_view key,
++    std::optional<int>* offset,
++    std::string* error) {
++  if (!dict.Has(std::string(key)))
++    return true;
++
++  int value = 0;
++  if (!dict.Get(std::string(key), &value)) {
++    *error = base::StringPrintf("%s must be an integer",
++                                std::string(key).c_str());
++    return false;
++  }
++
++  *offset = value;
++  return true;
++}
++
++bool ParseFocusedEditableTextEditSelection(
++    const gin_helper::Dictionary& dict,
++    FocusedEditableTextEditSelection* selection,
++    std::string* error) {
++  if (!dict.Get("start", &selection->start)) {
++    *error = "selectionAfter.start must be an integer";
++    return false;
++  }
++  if (!dict.Get("end", &selection->end)) {
++    *error = "selectionAfter.end must be an integer";
++    return false;
++  }
++  return true;
++}
++
++bool ParseFocusedEditableTextEdit(gin::Arguments* args,
++                                  FocusedEditableTextEdit* edit,
++                                  std::string* error) {
++  gin_helper::Dictionary dict;
++  if (!args->GetNext(&dict)) {
++    *error = "edit must be an object";
++    return false;
++  }
++
++  std::string kind;
++  if (!dict.Get("kind", &kind)) {
++    *error = "kind must be a string";
++    return false;
++  }
++  if (kind == "insertText") {
++    edit->kind = FocusedEditableTextEditKind::kInsertText;
++  } else if (kind == "replaceText") {
++    edit->kind = FocusedEditableTextEditKind::kReplaceText;
++  } else {
++    *error = "kind must be 'insertText' or 'replaceText'";
++    return false;
++  }
++
++  std::string text;
++  if (!dict.Get("text", &text)) {
++    *error = "text must be a string";
++    return false;
++  }
++  edit->text = base::UTF8ToUTF16(text);
++
++  if (!GetOptionalFocusedEditableTextEditOffset(dict, "start", &edit->start,
++                                                error) ||
++      !GetOptionalFocusedEditableTextEditOffset(dict, "end", &edit->end,
++                                                error)) {
++    return false;
++  }
++
++  if ((edit->start || edit->end) &&
++      edit->kind != FocusedEditableTextEditKind::kReplaceText) {
++    *error = "start and end are only valid for replaceText";
++    return false;
++  }
++
++  if (dict.Has("selectionAfter")) {
++    gin_helper::Dictionary selection_dict;
++    if (!dict.Get("selectionAfter", &selection_dict)) {
++      *error = "selectionAfter must be an object";
++      return false;
++    }
++    FocusedEditableTextEditSelection selection;
++    if (!ParseFocusedEditableTextEditSelection(selection_dict, &selection,
++                                               error)) {
++      return false;
++    }
++    edit->selection_after = selection;
++  }
++
++  return true;
++}
++
++std::optional<gfx::Range> ResolveFocusedEditableTextEditReplacementRange(
++    const FocusedEditableTextEdit& edit,
++    size_t text_length,
++    std::string* error) {
++  if (edit.kind == FocusedEditableTextEditKind::kInsertText ||
++      (!edit.start && !edit.end)) {
++    return std::nullopt;
++  }
++
++  const int start = edit.start.value_or(0);
++  if (text_length > static_cast<size_t>(std::numeric_limits<int>::max())) {
++    *error = "focused editable text is too long to edit by range";
++    return std::nullopt;
++  }
++  const int end = edit.end.value_or(static_cast<int>(text_length));
++  if (start < 0 || end < 0) {
++    *error = "start and end must be non-negative";
++    return std::nullopt;
++  }
++  if (static_cast<size_t>(start) > text_length ||
++      static_cast<size_t>(end) > text_length) {
++    *error = "start and end must be within the focused editable text";
++    return std::nullopt;
++  }
++  if (start > end) {
++    *error = "start must be less than or equal to end";
++    return std::nullopt;
++  }
++  return gfx::Range(start, end);
++}
++
++gfx::Range GetFocusedEditableTextEditCurrentReplacementRange(
++    const FocusedEditableTextInputState& input_state,
++    size_t text_length) {
++  if (input_state.composition)
++    return ClampRangeToText(*input_state.composition, text_length);
++  return ClampRangeToText(input_state.selection, text_length);
++}
++
++gfx::Range ClampFocusedEditableTextSelectionAfter(
++    const FocusedEditableTextEditSelection& selection,
++    size_t final_text_length) {
++  const int max_offset = static_cast<int>(std::min<size_t>(
++      final_text_length, static_cast<size_t>(std::numeric_limits<int>::max())));
++  int start = std::clamp(selection.start, 0, max_offset);
++  int end = std::clamp(selection.end, 0, max_offset);
++  if (start <= end)
++    return gfx::Range(start, end);
++  return gfx::Range(end, start);
++}
++
+ content::RenderFrameHost* GetFocusedEditableTextFrame(
+     content::WebContents* contents,
+     FocusedEditableTextInputState* input_state,
+-    const ui::mojom::TextInputState** text_input_state_out = nullptr) {
++    const ui::mojom::TextInputState** text_input_state_out = nullptr,
++    content::RenderWidgetHostImpl** active_widget_out = nullptr) {
+   auto* web_contents_impl = static_cast<content::WebContentsImpl*>(contents);
+   auto* text_input_manager = web_contents_impl->GetTextInputManager();
+   if (!text_input_manager)
+@@ -2585,6 +2746,8 @@ content::RenderFrameHost* GetFocusedEditableTextFrame(
+   *input_state = CaptureFocusedEditableTextInputState(*text_input_state);
+   if (text_input_state_out)
+     *text_input_state_out = text_input_state;
++  if (active_widget_out)
++    *active_widget_out = active_widget;
+   return render_frame_host;
+ }
+ 
+@@ -2848,6 +3011,126 @@ void RequestFocusedEditableTextSnapshot(
+       content::ISOLATED_WORLD_ID_GLOBAL);
+ }
+ 
++class FocusedEditableTextEditRequest {
++ public:
++  FocusedEditableTextEditRequest(
++      base::WeakPtr<WebContents> owner,
++      gin_helper::Promise<v8::Local<v8::Value>> promise)
++      : owner_(std::move(owner)), promise_(std::move(promise)) {}
++
++  FocusedEditableTextEditRequest(const FocusedEditableTextEditRequest&) =
++      delete;
++  FocusedEditableTextEditRequest& operator=(
++      const FocusedEditableTextEditRequest&) = delete;
++
++  void Start(content::RenderWidgetHostImpl* target_widget,
++             std::u16string text,
++             std::optional<gfx::Range> replacement_range,
++             std::optional<gfx::Range> selection_after) {
++    if (!target_widget) {
++      ResolveNull();
++      return;
++    }
++
++    target_widget_ = target_widget->GetWeakPtr();
++    selection_after_ = selection_after;
++    target_widget->Focus();
++    if (!target_widget->GetWidgetInputHandler()) {
++      ResolveNull();
++      return;
++    }
++    StartTimeout();
++    target_widget->GetWidgetInputHandler()->ImeCommitText(
++        std::move(text), std::vector<ui::ImeTextSpan>(),
++        replacement_range.value_or(gfx::Range::InvalidRange()), 0,
++        base::BindOnce(&FocusedEditableTextEditRequest::OnCommitComplete,
++                       weak_factory_.GetWeakPtr()));
++  }
++
++ private:
++  void StartTimeout() {
++    base::SingleThreadTaskRunner::GetCurrentDefault()->PostDelayedTask(
++        FROM_HERE,
++        base::BindOnce(&FocusedEditableTextEditRequest::ResolveNullIfPending,
++                       weak_factory_.GetWeakPtr()),
++        base::Seconds(5));
++  }
++
++  void ResolveNullIfPending() {
++    if (settled_)
++      return;
++    ResolveNull();
++  }
++
++  void OnCommitComplete() {
++    if (settled_)
++      return;
++    if (!owner_ || !owner_->GetWebContents() || !target_widget_) {
++      ResolveNull();
++      return;
++    }
++
++    if (selection_after_) {
++      auto* frame_input_handler = target_widget_->GetFrameWidgetInputHandler();
++      if (!frame_input_handler) {
++        ResolveNull();
++        return;
++      }
++      frame_input_handler->SetEditableSelectionOffsets(
++          static_cast<int>(selection_after_->start()),
++          static_cast<int>(selection_after_->end()));
++    }
++
++    target_widget_->InsertVisualStateCallback(base::BindOnce(
++        &FocusedEditableTextEditRequest::AfterVisualState,
++        weak_factory_.GetWeakPtr()));
++  }
++
++  void AfterVisualState(bool) {
++    if (settled_)
++      return;
++    if (!owner_ || !owner_->GetWebContents()) {
++      ResolveNull();
++      return;
++    }
++
++    FocusedEditableTextOptions options;
++    options.mode = FocusedEditableTextMode::kFull;
++    RequestFocusedEditableTextSnapshot(
++        owner_->GetWebContents(), options,
++        base::BindOnce(&FocusedEditableTextEditRequest::OnSnapshot,
++                       weak_factory_.GetWeakPtr()));
++  }
++
++  void OnSnapshot(v8::Local<v8::Value> value) {
++    if (settled_)
++      return;
++    settled_ = true;
++    v8::HandleScope handle_scope(promise_.isolate());
++    v8::Context::Scope context_scope(promise_.GetContext());
++    promise_.Resolve(value);
++    delete this;
++  }
++
++  void ResolveNull() {
++    if (settled_)
++      return;
++    settled_ = true;
++    v8::HandleScope handle_scope(promise_.isolate());
++    v8::Context::Scope context_scope(promise_.GetContext());
++    v8::Local<v8::Value> null_value = v8::Null(promise_.isolate());
++    promise_.Resolve(null_value);
++    delete this;
++  }
++
++  base::WeakPtr<WebContents> owner_;
++  gin_helper::Promise<v8::Local<v8::Value>> promise_;
++  base::WeakPtr<content::RenderWidgetHostImpl> target_widget_;
++  std::optional<gfx::Range> selection_after_;
++  bool settled_ = false;
++  base::WeakPtrFactory<FocusedEditableTextEditRequest> weak_factory_{this};
++};
++
+ class FocusedEditableTextWatcher;
+ 
+ class TextCaretFrameObserver : public base::SupportsUserData::Data,
+@@ -6528,6 +6811,85 @@ v8::Local<v8::Value> WebContents::WatchFocusedEditableText(
+   return wrapper;
+ }
+ 
++v8::Local<v8::Promise> WebContents::EditFocusedEditableText(
++    gin::Arguments* args) {
++  v8::Isolate* isolate = args->isolate();
++  gin_helper::Promise<v8::Local<v8::Value>> promise(isolate);
++  v8::Local<v8::Promise> handle = promise.GetHandle();
++
++  FocusedEditableTextEdit edit;
++  std::string error;
++  if (!ParseFocusedEditableTextEdit(args, &edit, &error)) {
++    promise.RejectWithErrorMessage(error);
++    return handle;
++  }
++
++  FocusedEditableTextInputState input_state;
++  const ui::mojom::TextInputState* text_input_state = nullptr;
++  content::RenderWidgetHostImpl* active_widget = nullptr;
++  content::RenderFrameHost* render_frame_host = GetFocusedEditableTextFrame(
++      web_contents(), &input_state, &text_input_state, &active_widget);
++  if (!render_frame_host || !active_widget || !text_input_state) {
++    v8::Local<v8::Value> null_value = v8::Null(isolate);
++    promise.Resolve(null_value);
++    return handle;
++  }
++
++  std::optional<size_t> text_length;
++  if (text_input_state->value)
++    text_length = text_input_state->value->length();
++
++  const bool needs_text_length =
++      edit.kind == FocusedEditableTextEditKind::kReplaceText ||
++      edit.selection_after.has_value();
++  if (needs_text_length && !text_length) {
++    v8::Local<v8::Value> null_value = v8::Null(isolate);
++    promise.Resolve(null_value);
++    return handle;
++  }
++
++  std::optional<gfx::Range> replacement_range;
++  size_t replaced_length = 0;
++  if (edit.kind == FocusedEditableTextEditKind::kReplaceText) {
++    replacement_range =
++        ResolveFocusedEditableTextEditReplacementRange(edit, *text_length,
++                                                       &error);
++    if (!error.empty()) {
++      promise.RejectWithErrorMessage(error);
++      return handle;
++    }
++    if (replacement_range) {
++      replaced_length = replacement_range->length();
++    } else {
++      gfx::Range current = GetFocusedEditableTextEditCurrentReplacementRange(
++          input_state, *text_length);
++      replaced_length = current.length();
++    }
++  } else if (text_length) {
++    gfx::Range current = GetFocusedEditableTextEditCurrentReplacementRange(
++        input_state, *text_length);
++    replaced_length = current.length();
++  }
++
++  std::optional<gfx::Range> selection_after;
++  const size_t final_text_length =
++      text_length ? *text_length - replaced_length + edit.text.length() : 0;
++  if (edit.selection_after) {
++    selection_after = ClampFocusedEditableTextSelectionAfter(
++        *edit.selection_after, final_text_length);
++  } else if (replacement_range) {
++    const size_t offset = std::min<size_t>(
++        replacement_range->start() + edit.text.length(), final_text_length);
++    selection_after = gfx::Range(offset, offset);
++  }
++
++  auto* request = new FocusedEditableTextEditRequest(GetWeakPtr(),
++                                                     std::move(promise));
++  request->Start(active_widget, std::move(edit.text), replacement_range,
++                 selection_after);
++  return handle;
++}
++
+ void WebContents::SendInputEvent(v8::Isolate* isolate,
+                                  v8::Local<v8::Value> input_event) {
+   content::RenderWidgetHostView* view =
+@@ -7951,6 +8313,8 @@ void WebContents::FillObjectTemplate(v8::Isolate* isolate,
+       .SetMethod("getFocusedEditableText", &WebContents::GetFocusedEditableText)
+       .SetMethod("watchFocusedEditableText",
+                  &WebContents::WatchFocusedEditableText)
++      .SetMethod("editFocusedEditableText",
++                 &WebContents::EditFocusedEditableText)
+       .SetMethod("sendInputEvent", &WebContents::SendInputEvent)
+       .SetMethod("dispatchInputEvent", &WebContents::DispatchInputEvent)
+       .SetMethod("beginFrameSubscription", &WebContents::BeginFrameSubscription)
+diff --git a/shell/browser/api/electron_api_web_contents.h b/shell/browser/api/electron_api_web_contents.h
+index 30c89280ba..b84df2efff 100644
+--- a/shell/browser/api/electron_api_web_contents.h
++++ b/shell/browser/api/electron_api_web_contents.h
+@@ -311,6 +311,7 @@ class WebContents final : public ExclusiveAccessContext,
+   v8::Local<v8::Value> GetTextCaretInfo(v8::Isolate* isolate);
+   v8::Local<v8::Promise> GetFocusedEditableText(gin::Arguments* args);
+   v8::Local<v8::Value> WatchFocusedEditableText(gin::Arguments* args);
++  v8::Local<v8::Promise> EditFocusedEditableText(gin::Arguments* args);
+ 
+   // Send WebInputEvent to the page.
+   void SendInputEvent(v8::Isolate* isolate, v8::Local<v8::Value> input_event);
+diff --git a/spec/api-web-contents-spec.ts b/spec/api-web-contents-spec.ts
+index 6c75e6a435..ccf24298eb 100644
+--- a/spec/api-web-contents-spec.ts
++++ b/spec/api-web-contents-spec.ts
+@@ -1600,6 +1600,266 @@ describe('webContents module', () => {
+     });
+   });
+ 
++  describe('editFocusedEditableText() API', () => {
++    afterEach(closeAllWindows);
++
++    it('returns null when no focused editable text is available', async () => {
++      const w = new BrowserWindow({ show: false, width: 400, height: 300 });
++      await w.loadURL('data:text/html;charset=utf-8,<p>no editable element</p>');
++
++      expect(await w.webContents.editFocusedEditableText({
++        kind: 'insertText',
++        text: 'ignored'
++      })).to.equal(null);
++    });
++
++    it('returns null for password inputs', async () => {
++      const w = new BrowserWindow({ show: false, width: 400, height: 300 });
++      await w.loadURL(
++        `data:text/html;charset=utf-8,${encodeURIComponent(`
++        <!DOCTYPE html>
++        <input id="field" type="password" value="secret">
++      `)}`
++      );
++
++      await w.webContents.executeJavaScript(`
++        document.getElementById('field').focus();
++      `);
++
++      expect(await w.webContents.editFocusedEditableText({
++        kind: 'insertText',
++        text: 'ignored'
++      })).to.equal(null);
++    });
++
++    it('inserts text and clamps selectionAfter to the final text', async () => {
++      const w = new BrowserWindow({ show: false, width: 400, height: 300 });
++      await w.loadURL(
++        `data:text/html;charset=utf-8,${encodeURIComponent(`
++        <!DOCTYPE html>
++        <input id="field" value="hello world" style="font-size: 24px; margin: 20px;">
++      `)}`
++      );
++
++      await w.webContents.executeJavaScript(`
++        const field = document.getElementById('field');
++        field.focus();
++        field.setSelectionRange(5, 5);
++      `);
++      await waitUntil(async () => {
++        const info = await w.webContents.getFocusedEditableText({ mode: 'value' });
++        return info?.selection.start === 5 && info.selection.end === 5;
++      });
++
++      const info = await w.webContents.editFocusedEditableText({
++        kind: 'insertText',
++        text: '!',
++        selectionAfter: { start: 999, end: 999 }
++      });
++
++      expect(info).to.not.equal(null);
++      if (info === null) {
++        throw new Error('Expected focused editable text');
++      }
++      expect(info.text).to.equal('hello! world');
++      expect(info.selection).to.deep.equal({
++        isCollapsed: true,
++        start: 'hello! world'.length,
++        end: 'hello! world'.length
++      });
++
++      const domState = await w.webContents.executeJavaScript(`
++        ({
++          value: document.getElementById('field').value,
++          selectionStart: document.getElementById('field').selectionStart,
++          selectionEnd: document.getElementById('field').selectionEnd
++        })
++      `);
++      expect(domState).to.deep.equal({
++        value: 'hello! world',
++        selectionStart: 'hello! world'.length,
++        selectionEnd: 'hello! world'.length
++      });
++    });
++
++    it('replaces the current selection when no range is provided', async () => {
++      const w = new BrowserWindow({ show: false, width: 400, height: 300 });
++      await w.loadURL(
++        `data:text/html;charset=utf-8,${encodeURIComponent(`
++        <!DOCTYPE html>
++        <textarea id="field">abcdef</textarea>
++      `)}`
++      );
++
++      await w.webContents.executeJavaScript(`
++        const field = document.getElementById('field');
++        field.focus();
++        field.setSelectionRange(2, 4);
++      `);
++      await waitUntil(async () => {
++        const info = await w.webContents.getFocusedEditableText({ mode: 'value' });
++        return info?.text.slice(info.selection.start, info.selection.end) === 'cd';
++      });
++
++      const info = await w.webContents.editFocusedEditableText({
++        kind: 'replaceText',
++        text: 'XX'
++      });
++
++      expect(info).to.not.equal(null);
++      if (info === null) {
++        throw new Error('Expected focused editable text');
++      }
++      expect(info.text).to.equal('abXXef');
++      expect(info.selection).to.deep.equal({
++        isCollapsed: true,
++        start: 4,
++        end: 4
++      });
++    });
++
++    it('supports open-ended replace ranges', async () => {
++      const w = new BrowserWindow({ show: false, width: 400, height: 300 });
++      await w.loadURL(
++        `data:text/html;charset=utf-8,${encodeURIComponent(`
++        <!DOCTYPE html>
++        <input id="field" value="abcdef" style="font-size: 24px; margin: 20px;">
++      `)}`
++      );
++
++      await w.webContents.executeJavaScript(`
++        const field = document.getElementById('field');
++        field.focus();
++        field.setSelectionRange(0, 0);
++      `);
++      await waitUntil(async () => {
++        const info = await w.webContents.getFocusedEditableText({ mode: 'value' });
++        return info?.text === 'abcdef';
++      });
++
++      const tail = await w.webContents.editFocusedEditableText({
++        kind: 'replaceText',
++        start: 3,
++        text: 'XYZ',
++        selectionAfter: { start: 4, end: 99 }
++      });
++
++      expect(tail).to.not.equal(null);
++      if (tail === null) {
++        throw new Error('Expected focused editable text');
++      }
++      expect(tail.text).to.equal('abcXYZ');
++      expect(tail.selection).to.deep.equal({
++        isCollapsed: false,
++        start: 4,
++        end: 6
++      });
++
++      const head = await w.webContents.editFocusedEditableText({
++        kind: 'replaceText',
++        end: 3,
++        text: '!'
++      });
++
++      expect(head).to.not.equal(null);
++      if (head === null) {
++        throw new Error('Expected focused editable text');
++      }
++      expect(head.text).to.equal('!XYZ');
++      expect(head.selection).to.deep.equal({
++        isCollapsed: true,
++        start: 1,
++        end: 1
++      });
++    });
++
++    it('edits contenteditable text on the focused editable path', async () => {
++      const w = new BrowserWindow({ show: false, width: 400, height: 300 });
++      await w.loadURL(
++        `data:text/html;charset=utf-8,${encodeURIComponent(`
++        <!DOCTYPE html>
++        <div id="editor" contenteditable="true">alpha beta gamma</div>
++      `)}`
++      );
++
++      await w.webContents.executeJavaScript(`
++        const editor = document.getElementById('editor');
++        const text = editor.firstChild;
++        const range = document.createRange();
++        range.setStart(text, 6);
++        range.setEnd(text, 10);
++        const selection = getSelection();
++        selection.removeAllRanges();
++        selection.addRange(range);
++        editor.focus();
++      `);
++      await waitUntil(async () => {
++        const info = await w.webContents.getFocusedEditableText();
++        return info?.text.slice(info.selection.start, info.selection.end) === 'beta';
++      });
++
++      const info = await w.webContents.editFocusedEditableText({
++        kind: 'replaceText',
++        start: 6,
++        end: 10,
++        text: 'BETA',
++        selectionAfter: { start: 10, end: 10 }
++      });
++
++      expect(info).to.not.equal(null);
++      if (info === null) {
++        throw new Error('Expected focused editable text');
++      }
++      expect(info.text).to.equal('alpha BETA gamma');
++      expect(info.selection).to.deep.equal({
++        isCollapsed: true,
++        start: 10,
++        end: 10
++      });
++      expect(await w.webContents.executeJavaScript("document.getElementById('editor').textContent")).to.equal('alpha BETA gamma');
++    });
++
++    it('rejects invalid edit objects and replacement ranges', async () => {
++      const w = new BrowserWindow({ show: false, width: 400, height: 300 });
++      await w.loadURL(
++        `data:text/html;charset=utf-8,${encodeURIComponent(`
++        <!DOCTYPE html>
++        <input id="field" value="abcdef">
++      `)}`
++      );
++
++      await w.webContents.executeJavaScript(`
++        const field = document.getElementById('field');
++        field.focus();
++        field.setSelectionRange(0, 0);
++      `);
++      await waitUntil(async () => {
++        const info = await w.webContents.getFocusedEditableText({ mode: 'value' });
++        return info?.text === 'abcdef';
++      });
++
++      await expect(
++        w.webContents.editFocusedEditableText({ kind: 'invalid' as any, text: 'x' })
++      ).to.eventually.be.rejectedWith("kind must be 'insertText' or 'replaceText'");
++      await expect(
++        w.webContents.editFocusedEditableText({ kind: 'insertText', text: 'x', start: 1 } as any)
++      ).to.eventually.be.rejectedWith('start and end are only valid for replaceText');
++      await expect(
++        w.webContents.editFocusedEditableText({ kind: 'replaceText', text: 'x', start: 4, end: 2 })
++      ).to.eventually.be.rejectedWith('start must be less than or equal to end');
++      await expect(
++        w.webContents.editFocusedEditableText({ kind: 'replaceText', text: 'x', start: 99 })
++      ).to.eventually.be.rejectedWith('start and end must be within the focused editable text');
++      await expect(
++        w.webContents.editFocusedEditableText({
++          kind: 'replaceText',
++          text: 'x',
++          selectionAfter: { start: 'bad', end: 0 } as any
++        })
++      ).to.eventually.be.rejectedWith('selectionAfter.start must be an integer');
++    });
++  });
++
+   describe('watchFocusedEditableText() API', () => {
+     afterEach(closeAllWindows);
+ 
+-- 
+2.53.0
+

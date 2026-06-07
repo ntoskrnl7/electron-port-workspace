@@ -1,0 +1,51 @@
+From 51b8a211e14bd1f743baadff5d1f8f240ca0ff59 Mon Sep 17 00:00:00 2001
+From: Jung-Kwang Lee <ntoskrnl7@gmail.com>
+Date: Fri, 20 Mar 2026 00:29:44 +0900
+Subject: fix: support NVIDIA VA-API native pixmap import
+
+Patch-Dir: src/electron/patches/chromium
+Patch-Filename: fix_support_nvidia_va-api_native_pixmap_import.patch
+(cherry picked from commit f5d28dd7182deeba1489b2803ac9a005becc068b)
+---
+ media/gpu/vaapi/vaapi_wrapper.cc | 8 ++++++++
+ media/gpu/vaapi/vaapi_wrapper.h  | 1 +
+ 2 files changed, 9 insertions(+)
+
+diff --git a/media/gpu/vaapi/vaapi_wrapper.cc b/media/gpu/vaapi/vaapi_wrapper.cc
+index 4c220c3385e9e..b0e16d511f36a 100644
+--- a/media/gpu/vaapi/vaapi_wrapper.cc
++++ b/media/gpu/vaapi/vaapi_wrapper.cc
+@@ -385,6 +385,13 @@ media::VAImplementation VendorStringToImplementationType(
+   } else if (base::StartsWith(va_vendor_string, "Intel iHD driver",
+                               base::CompareCase::SENSITIVE)) {
+     return media::VAImplementation::kIntelIHD;
++  // The NVIDIA VA-API backend appears as either:
++  // - "VA-API NVDEC driver" (official)
++  // - "VA-API NVDEC/NVENC driver" (custom builds with NVENC support)
++  // Match the common NVDEC prefix so both map to kNvidia.
++  } else if (base::StartsWith(va_vendor_string, "VA-API NVDEC",
++                              base::CompareCase::SENSITIVE)) {
++    return media::VAImplementation::kNvidia;
+   } else if (base::StartsWith(va_vendor_string, "Chromium fake libva driver",
+                               base::CompareCase::SENSITIVE)) {
+     return media::VAImplementation::kChromiumFakeDriver;
+@@ -2450,6 +2457,7 @@ std::unique_ptr<ScopedVASurface> VaapiWrapper::CreateVASurfaceForPixmap(
+   // plumbed for JPEG decoding and encoding.
+   const bool use_drm_prime_2 =
+       (GetImplementationType() == VAImplementation::kIntelIHD ||
++       GetImplementationType() == VAImplementation::kNvidia ||
+        GetImplementationType() == VAImplementation::kChromiumFakeDriver ||
+        GetImplementationType() == VAImplementation::kMesaGallium) &&
+       !protected_content &&
+diff --git a/media/gpu/vaapi/vaapi_wrapper.h b/media/gpu/vaapi/vaapi_wrapper.h
+index 37001b947a9fa..a2be205da4f97 100644
+--- a/media/gpu/vaapi/vaapi_wrapper.h
++++ b/media/gpu/vaapi/vaapi_wrapper.h
+@@ -103,6 +103,7 @@ enum class VAImplementation {
+   kMesaGallium,
+   kIntelI965,
+   kIntelIHD,
++  kNvidia,
+   kChromiumFakeDriver,
+   kOther,
+   kInvalid,

@@ -1,0 +1,6 @@
+schema_version=1
+name=focused-editable-text
+target=42
+electronized_chromium_patches=false
+depends_on=text-caret-info
+electron_patch_files=electron/*.patch

@@ -1,0 +1,214 @@
+From d3e902a7d706cccef98b8d8c607898544db0e19f Mon Sep 17 00:00:00 2001
+From: Codex <codex@localhost>
+Date: Wed, 20 May 2026 20:52:48 +0900
+Subject: [PATCH] fix: expose JavaScript dialog titles
+
+---
+ BUILD.gn                                         | 1 +
+ docs/api/structures/alert-javascript-dialog.md   | 1 +
+ docs/api/structures/confirm-javascript-dialog.md | 1 +
+ docs/api/structures/prompt-javascript-dialog.md  | 1 +
+ lib/browser/api/web-contents.ts                  | 5 +++--
+ shell/browser/api/electron_api_web_contents.cc   | 7 +++++++
+ spec/chromium-spec.ts                            | 5 +++++
+ spec/ts-smoke/electron/main.ts                   | 4 ++--
+ typings/internal-electron.d.ts                   | 2 +-
+ 9 files changed, 22 insertions(+), 5 deletions(-)
+
+diff --git a/BUILD.gn b/BUILD.gn
+index 333d815456..20c4dd1cab 100644
+--- a/BUILD.gn
++++ b/BUILD.gn
+@@ -483,6 +483,7 @@ source_set("electron_lib") {
+     "//components/embedder_support:user_agent",
+     "//components/heap_profiling/multi_process",
+     "//components/input",
++    "//components/javascript_dialogs/core:util",
+     "//components/language/core/browser",
+     "//components/memory_system",
+     "//components/net_log",
+diff --git a/docs/api/structures/alert-javascript-dialog.md b/docs/api/structures/alert-javascript-dialog.md
+index 3b6e34e5f6..30112f4b07 100644
+--- a/docs/api/structures/alert-javascript-dialog.md
++++ b/docs/api/structures/alert-javascript-dialog.md
+@@ -3,6 +3,7 @@
+ * `type` string - Can be `alert`.
+ * `frame` [WebFrameMain](../web-frame-main.md) - The frame that requested the
+   JavaScript dialog.
++* `title` string - The localized Chromium dialog title.
+ * `messageText` string - The dialog message text.
+ * `url` string - The last committed URL of the frame that requested the dialog.
+ * `isMainFrame` boolean - Whether the frame that requested the dialog is the
+diff --git a/docs/api/structures/confirm-javascript-dialog.md b/docs/api/structures/confirm-javascript-dialog.md
+index 44e36fc4ae..78de03b6f0 100644
+--- a/docs/api/structures/confirm-javascript-dialog.md
++++ b/docs/api/structures/confirm-javascript-dialog.md
+@@ -3,6 +3,7 @@
+ * `type` string - Can be `confirm`.
+ * `frame` [WebFrameMain](../web-frame-main.md) - The frame that requested the
+   JavaScript dialog.
++* `title` string - The localized Chromium dialog title.
+ * `messageText` string - The dialog message text.
+ * `url` string - The last committed URL of the frame that requested the dialog.
+ * `isMainFrame` boolean - Whether the frame that requested the dialog is the
+diff --git a/docs/api/structures/prompt-javascript-dialog.md b/docs/api/structures/prompt-javascript-dialog.md
+index d4945143b8..6aa0f4d5bc 100644
+--- a/docs/api/structures/prompt-javascript-dialog.md
++++ b/docs/api/structures/prompt-javascript-dialog.md
+@@ -3,6 +3,7 @@
+ * `type` string - Can be `prompt`.
+ * `frame` [WebFrameMain](../web-frame-main.md) - The frame that requested the
+   JavaScript dialog.
++* `title` string - The localized Chromium dialog title.
+ * `messageText` string - The dialog message text.
+ * `defaultPromptText` string - The default text for the prompt dialog.
+ * `url` string - The last committed URL of the frame that requested the dialog.
+diff --git a/lib/browser/api/web-contents.ts b/lib/browser/api/web-contents.ts
+index 34dca2f1d4..f6b3a18642 100644
+--- a/lib/browser/api/web-contents.ts
++++ b/lib/browser/api/web-contents.ts
+@@ -434,7 +434,7 @@ type JavaScriptDialogType = 'alert' | 'confirm' | 'prompt' | 'beforeunload';
+ interface JavaScriptDialogInfo {
+   frame: Electron.WebFrameMain;
+   dialogType: JavaScriptDialogType;
+-  title?: string;
++  title: string;
+   messageText: string;
+   defaultPromptText: string;
+   isReload?: boolean;
+@@ -466,6 +466,7 @@ const createJavaScriptDialog = (
+   let handled = false;
+   const details = {
+     frame: info.frame,
++    title: info.title,
+     messageText: info.messageText,
+     url: info.frame.url,
+     isMainFrame: info.frame.parent === null
+@@ -521,7 +522,6 @@ const createJavaScriptDialog = (
+         response: {
+           ...details,
+           type: 'beforeunload',
+-          title: info.title ?? '',
+           isReload: !!info.isReload,
+           leave: () => respond(true),
+           stay: () => respond(false)
+@@ -1201,6 +1201,7 @@ WebContents.prototype._init = function () {
+     const parent = this.getOwnerBrowserWindow();
+     const abortController = new AbortController();
+     const options: MessageBoxOptions = {
++      title: info.title,
+       message: info.messageText,
+       checkboxLabel: checkbox,
+       signal: abortController.signal,
+diff --git a/shell/browser/api/electron_api_web_contents.cc b/shell/browser/api/electron_api_web_contents.cc
+index b90607261c..68a2f4effc 100644
+--- a/shell/browser/api/electron_api_web_contents.cc
++++ b/shell/browser/api/electron_api_web_contents.cc
+@@ -46,6 +46,7 @@
+ #include "chrome/common/pref_names.h"
+ #include "components/input/native_web_keyboard_event.h"
+ #include "components/input/render_widget_host_input_event_router.h"
++#include "components/javascript_dialogs/core/dialog_util.h"
+ #include "components/prefs/pref_service.h"
+ #include "components/prefs/scoped_user_pref_update.h"
+ #include "components/security_state/content/content_utils.h"
+@@ -6202,11 +6203,17 @@ void WebContents::RunJavaScriptDialog(content::WebContents* web_contents,
+                                       bool* did_suppress_message) {
+   CHECK_EQ(web_contents, this->web_contents());
+ 
++  const std::u16string title = javascript_dialogs::util::DialogTitle(
++      web_contents->GetPrimaryMainFrame()->GetLastCommittedURL(),
++      web_contents->GetPrimaryMainFrame()->GetLastCommittedOrigin(),
++      rfh->GetLastCommittedOrigin());
++
+   auto* isolate = JavascriptEnvironment::GetIsolate();
+   v8::HandleScope scope(isolate);
+   auto info = gin::DataObjectBuilder(isolate)
+                   .Set("frame", rfh)
+                   .Set("dialogType", dialog_type)
++                  .Set("title", title)
+                   .Set("messageText", message_text)
+                   .Set("defaultPromptText", default_prompt_text)
+                   .Build();
+diff --git a/spec/chromium-spec.ts b/spec/chromium-spec.ts
+index 9a62b0f619..b316d84014 100644
+--- a/spec/chromium-spec.ts
++++ b/spec/chromium-spec.ts
+@@ -3557,6 +3557,7 @@ describe('chromium features', () => {
+         w.webContents.executeJavaScript('alert("hello")', true);
+         const [info] = await p;
+         expect(info.frame).to.equal(w.webContents.mainFrame);
++        expect(info.title).to.not.equal('');
+         expect(info.messageText).to.equal('hello');
+         expect(info.dialogType).to.equal('alert');
+       });
+@@ -3585,6 +3586,7 @@ describe('chromium features', () => {
+         const resultPromise = w.webContents.executeJavaScript('confirm("hello")', true);
+         const [info, cb] = await p;
+         expect(info.frame).to.equal(w.webContents.mainFrame);
++        expect(info.title).to.not.equal('');
+         expect(info.messageText).to.equal('hello');
+         expect(info.dialogType).to.equal('confirm');
+         cb(true, '');
+@@ -3608,6 +3610,7 @@ describe('chromium features', () => {
+         const resultPromise = w.webContents.executeJavaScript('prompt("hello", "default text")', true);
+         const [info, cb] = await p;
+         expect(info.frame).to.equal(w.webContents.mainFrame);
++        expect(info.title).to.not.equal('');
+         expect(info.messageText).to.equal('hello');
+         expect(info.defaultPromptText).to.equal('default text');
+         expect(info.dialogType).to.equal('prompt');
+@@ -3627,6 +3630,7 @@ describe('chromium features', () => {
+             return Promise.resolve({ response: 0, checkboxChecked: false });
+           };
+           const result = await w.webContents.executeJavaScript('prompt("hello", "default text")', true);
++          expect(recordedOpts?.title).to.not.equal('');
+           expect(recordedOpts?.message).to.equal('hello');
+           expect(recordedOpts?.buttons).to.deep.equal(['OK', 'Cancel']);
+           expect(result).to.equal('default text');
+@@ -3647,6 +3651,7 @@ describe('chromium features', () => {
+           expect(dialog.frame).to.equal(w.webContents.mainFrame);
+           expect(dialog.url).to.equal('about:blank');
+           expect(dialog.isMainFrame).to.equal(true);
++          expect(dialog.title).to.not.equal('');
+ 
+           switch (dialog.type) {
+             case 'alert':
+diff --git a/spec/ts-smoke/electron/main.ts b/spec/ts-smoke/electron/main.ts
+index b27738de6a..977c0d1af0 100644
+--- a/spec/ts-smoke/electron/main.ts
++++ b/spec/ts-smoke/electron/main.ts
+@@ -132,7 +132,7 @@ app.whenReady().then(() => {
+   });
+   mainWindow.webContents.setPrintRequestHandler(null);
+   mainWindow.webContents.setJavaScriptDialogHandler((dialog) => {
+-    console.log(dialog.type, dialog.messageText);
++    console.log(dialog.type, dialog.title, dialog.messageText);
+     console.log(dialog.frame, dialog.url, dialog.isMainFrame);
+     switch (dialog.type) {
+       case 'alert':
+@@ -149,7 +149,7 @@ app.whenReady().then(() => {
+         console.log(dialog.isReload);
+         break;
+       case 'beforeunload':
+-        console.log(dialog.title, dialog.isReload);
++        console.log(dialog.isReload);
+         dialog.leave();
+         break;
+     }
+diff --git a/typings/internal-electron.d.ts b/typings/internal-electron.d.ts
+index 0032a8fee9..42831fa141 100644
+--- a/typings/internal-electron.d.ts
++++ b/typings/internal-electron.d.ts
+@@ -284,7 +284,7 @@ declare namespace Electron {
+     on(event: '-ipc-message-sync', listener: (event: Electron.IpcMainEvent, internal: boolean, channel: string, args: any[]) => void): this;
+     on(event: '-ipc-invoke', listener: (event: Electron.IpcMainInvokeEvent, internal: boolean, channel: string, args: any[]) => void): this;
+     on(event: '-ipc-ports', listener: (event: Electron.IpcMainEvent, internal: boolean, channel: string, message: any, ports: any[]) => void): this;
+-    on(event: '-run-dialog', listener: (info: {frame: WebFrameMain, dialogType: 'prompt' | 'confirm' | 'alert' | 'beforeunload', title?: string, messageText: string, defaultPromptText: string, isReload?: boolean}, callback: (success: boolean, user_input: string) => void) => void): this;
++    on(event: '-run-dialog', listener: (info: {frame: WebFrameMain, dialogType: 'prompt' | 'confirm' | 'alert' | 'beforeunload', title: string, messageText: string, defaultPromptText: string, isReload?: boolean}, callback: (success: boolean, user_input: string) => void) => void): this;
+     on(event: '-cancel-dialogs', listener: () => void): this;
+     on(event: 'ready-to-show', listener: () => void): this;
+     on(event: '-before-unload-fired', listener: (event: Electron.Event, proceed: boolean) => void): this;
+-- 
+2.53.0
+

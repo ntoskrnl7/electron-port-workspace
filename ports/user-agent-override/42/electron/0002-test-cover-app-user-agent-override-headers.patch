@@ -1,0 +1,37 @@
+From 82d4abcfd6e463d5772aa2fc1919857999652bff Mon Sep 17 00:00:00 2001
+From: Jung-Kwang Lee <ntoskrnl7@gmail.com>
+Date: Wed, 13 May 2026 17:25:27 +0900
+Subject: [PATCH 2/3] test: cover app user agent override headers
+
+---
+ spec/api-app-spec.ts | 6 ++++++
+ 1 file changed, 6 insertions(+)
+
+diff --git a/spec/api-app-spec.ts b/spec/api-app-spec.ts
+index 6ed6eade57..2b7314cb83 100644
+--- a/spec/api-app-spec.ts
++++ b/spec/api-app-spec.ts
+@@ -2582,7 +2582,9 @@ describe('default behavior', () => {
+     it('can set a fallback with User-Agent Client Hints metadata', async () => {
+       app.setUserAgentOverride({ userAgent, userAgentMetadata });
+ 
++      let headers: http.IncomingHttpHeaders | null = null;
+       const server = http.createServer((req, res) => {
++        headers = req.headers;
+         res.end('<!DOCTYPE html>');
+       });
+       defer(() => {
+@@ -2600,6 +2602,10 @@ describe('default behavior', () => {
+       })`);
+ 
+       expect(ses.getUserAgent()).to.equal(userAgent);
++      expect(headers!['user-agent']).to.equal(userAgent);
++      expect(headers!['sec-ch-ua']).to.include('AppBrand');
++      expect(headers!['sec-ch-ua-mobile']).to.equal('?0');
++      expect(headers!['sec-ch-ua-platform']).to.equal('"Windows"');
+       expect(result.userAgent).to.equal(userAgent);
+       expect(result.brands.map((brand: any) => brand.brand)).to.include('AppBrand');
+       expect(result.platform).to.equal('Windows');
+-- 
+2.53.0
+

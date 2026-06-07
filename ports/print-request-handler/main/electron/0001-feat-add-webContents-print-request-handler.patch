@@ -1,0 +1,879 @@
+From 71aaa89ca997abf6c4427b03f2a1ce4e053a2281 Mon Sep 17 00:00:00 2001
+From: Jung-Kwang Lee <ntoskrnl7@gmail.com>
+Date: Sun, 3 May 2026 00:00:05 +0900
+Subject: feat: add webContents print request handler
+
+---
+ .../print-request-handler-details.md          |   7 +
+ .../structures/print-request-handler-job.md   |  13 +
+ .../print-request-handler-request.md          |  10 +
+ docs/api/web-contents.md                      |  83 ++++++
+ lib/browser/api/web-contents.ts               |  96 +++++-
+ patches/chromium/.patches                     |   1 +
+ ...on_to_handle_renderer_print_requests.patch | 119 ++++++++
+ .../browser/api/electron_api_web_contents.cc  | 279 +++++++++++++++++-
+ shell/browser/api/electron_api_web_contents.h |  12 +
+ .../printing/print_view_manager_electron.cc   |  18 ++
+ .../printing/print_view_manager_electron.h    |   1 +
+ spec/ts-smoke/electron/main.ts                |   8 +
+ typings/internal-electron.d.ts                |   1 +
+ 13 files changed, 636 insertions(+), 12 deletions(-)
+ create mode 100644 docs/api/structures/print-request-handler-details.md
+ create mode 100644 docs/api/structures/print-request-handler-job.md
+ create mode 100644 docs/api/structures/print-request-handler-request.md
+ create mode 100644 patches/chromium/feat_allow_electron_to_handle_renderer_print_requests.patch
+
+diff --git a/docs/api/structures/print-request-handler-details.md b/docs/api/structures/print-request-handler-details.md
+new file mode 100644
+index 0000000000..3ca9f16b3e
+--- /dev/null
++++ b/docs/api/structures/print-request-handler-details.md
+@@ -0,0 +1,7 @@
++# PrintRequestHandlerDetails Object
++
++* `frame` [WebFrameMain](../web-frame-main.md) - The frame that requested
++  printing.
++* `url` string - The last committed URL of the frame that requested printing.
++* `isMainFrame` boolean - Whether the frame that requested printing is the main
++  frame.
+diff --git a/docs/api/structures/print-request-handler-job.md b/docs/api/structures/print-request-handler-job.md
+new file mode 100644
+index 0000000000..7b34b84b91
+--- /dev/null
++++ b/docs/api/structures/print-request-handler-job.md
+@@ -0,0 +1,13 @@
++# PrintRequestHandlerJob Object
++
++* `print` Function\<Promise\<void\>\> - Starts a new print operation for the
++  frame that requested printing. This follows the same print option path and has
++  the same platform limitations as `webContents.print(options)`.
++  * `options` WebContentsPrintOptions (optional) - See
++    [`webContents.print`](../web-contents.md#contentsprintoptions-callback) for
++    supported options.
++* `toPDF` Function\<Promise\<Buffer\>\> - Creates a PDF from the frame that
++  requested printing.
++  * `options` PrintToPDFOptions (optional) - See
++    [`webContents.printToPDF`](../web-contents.md#contentsprinttopdfoptions)
++    for supported options.
+diff --git a/docs/api/structures/print-request-handler-request.md b/docs/api/structures/print-request-handler-request.md
+new file mode 100644
+index 0000000000..1558d1380b
+--- /dev/null
++++ b/docs/api/structures/print-request-handler-request.md
+@@ -0,0 +1,10 @@
++# PrintRequestHandlerRequest Object
++
++* `continue` Function - Continues the original print request. Prefer this for
++  synchronous allow-or-cancel decisions. This only works when called
++  synchronously before the print request handler returns.
++* `handle` Function - Handles the print request with an application-controlled
++  print job. Use this for asynchronous decisions that should later print with
++  `job.print(...)` or create a PDF with `job.toPDF(...)`.
++  * `handler` Function
++    * `job` [PrintRequestHandlerJob](print-request-handler-job.md)
+diff --git a/docs/api/web-contents.md b/docs/api/web-contents.md
+index 04cb555298..d6acf0d7ef 100644
+--- a/docs/api/web-contents.md
++++ b/docs/api/web-contents.md
+@@ -1820,6 +1820,89 @@ win.webContents.print(options, (success, errorType) => {
+ })
+ ```
+
++#### `contents.setPrintRequestHandler(handler)`
++
++* `handler` Function | null
++  * `details` [PrintRequestHandlerDetails](structures/print-request-handler-details.md)
++  * `request` [PrintRequestHandlerRequest](structures/print-request-handler-request.md)
++
++Sets a handler for renderer-initiated print requests, such as `window.print()`.
++Passing `null` clears the handler.
++
++The handler may run asynchronous work before it handles `request`. This is useful
++when print options depend on frame state, for example when the app needs to call
++`details.frame.executeJavaScript(...)` before deciding how to print.
++
++Call `request.continue()` when the app can synchronously decide to allow the
++original print request to continue. Return without calling `request.continue()`
++or `request.handle(...)` to cancel it. Call `request.handle((job) => { ... })`
++to work with a
++[`PrintRequestHandlerJob`](structures/print-request-handler-job.md).
++Inside that callback, `job.print(options)` starts a new print operation for the
++frame that requested printing, and `job.toPDF(options)` creates a PDF for that
++frame. Both methods return Promises. Use `job.print(options)` when the app needs
++to wait asynchronously before deciding to print. Calling
++`request.handle(...)` synchronously before `handler` returns prevents Electron
++from continuing the original print request.
++
++If `request` is not handled before `handler` returns, Electron releases the
++renderer from the original `window.print()` call and cancels that original print
++request. This keeps renderer-dependent work such as
++`details.frame.executeJavaScript(...)` from deadlocking while the app decides
++what to do. In that asynchronous case, call `request.handle((job) => { ... })`
++later and use `job.print(options)` or `job.toPDF(options)` to handle the request.
++Continuing the original native print flow with `request.continue()` is only
++possible when `request.continue()` is called synchronously during `handler`.
++The `job` callback passed to `request.handle(...)` is run after Electron has
++released the original print request, so `job.print(options)` does not re-enter
++the renderer while it is still blocked in the original `window.print()` call.
++
++Prefer `request.continue()` for synchronous allow-or-cancel decisions. Prefer
++`request.handle(..., job.print(...))` for asynchronous decisions that should
++still print. `job.print(options)` uses the same print option path and has the
++same platform limitations as `webContents.print(options)`, but it targets the
++frame that originally requested printing.
++
++```js
++const { BrowserWindow } = require('electron')
++
++const win = new BrowserWindow()
++
++win.webContents.setPrintRequestHandler(async (details, request) => {
++  const html = await details.frame.executeJavaScript(
++    'document.documentElement.outerHTML'
++  )
++  const options = await decidePrintOptions(details.url, html)
++
++  request.handle(job => {
++    job.toPDF(options).then(pdf => {
++      console.log('PDF size:', pdf.length)
++    })
++  })
++})
++```
++
++To decide asynchronously and then print without using the original native print
++continuation, call `job.print(options)`:
++
++```js
++win.webContents.setPrintRequestHandler(async (details, request) => {
++  const options = await getPrintOptions(details)
++
++  request.handle(async job => {
++    try {
++      await job.print(options)
++    } catch (error) {
++      console.error(error)
++    }
++  })
++})
++```
++
++`request.continue()` or `request.handle(...)` may be called at most once for each
++print request. If `request.handle(...)` is called asynchronously, the original
++print request has already been released.
++
+ #### `contents.printToPDF(options)`
+
+ * `options` Object
+diff --git a/lib/browser/api/web-contents.ts b/lib/browser/api/web-contents.ts
+index ebe192a5dc..eafc0ee17a 100644
+--- a/lib/browser/api/web-contents.ts
++++ b/lib/browser/api/web-contents.ts
+@@ -229,8 +229,7 @@ function parsePageSize(pageSize: string | ElectronInternal.PageSize) {
+
+ // Translate the options of printToPDF.
+
+-const printToPDFQueues = new WeakMap<Electron.WebContents, Promise<unknown>>();
+-WebContents.prototype.printToPDF = async function (options) {
++const translatePrintToPDFOptions = function (options: Electron.PrintToPDFOptions = {}) {
+   const margins = checkType(options.margins ?? {}, 'object', 'margins');
+   const pageSize = parsePageSize(options.pageSize ?? 'letter');
+
+@@ -242,7 +241,7 @@ WebContents.prototype.printToPDF = async function (options) {
+     throw new Error('margins must be less than or equal to pageSize');
+   }
+
+-  const printSettings = {
++  return {
+     requestID: getNextId(),
+     landscape: checkType(options.landscape ?? false, 'boolean', 'landscape'),
+     displayHeaderFooter: checkType(options.displayHeaderFooter ?? false, 'boolean', 'displayHeaderFooter'),
+@@ -260,22 +259,103 @@ WebContents.prototype.printToPDF = async function (options) {
+     generateDocumentOutline: checkType(options.generateDocumentOutline ?? false, 'boolean', 'generateDocumentOutline'),
+     ...pageSize
+   };
++};
+
+-  if (!this._printToPDF) {
++const printToPDFQueues = new WeakMap<Electron.WebContents, Promise<unknown>>();
++const queuePrintToPDF = function (contents: Electron.WebContents, task: () => Promise<Buffer>) {
++  if (!contents._printToPDF) {
+     throw new Error('Printing feature is disabled');
+   }
+
+-  const prev = printToPDFQueues.get(this) ?? Promise.resolve();
+-  const next = prev.catch(() => {}).then(() => this._printToPDF(printSettings));
+-  printToPDFQueues.set(this, next);
++  const prev = printToPDFQueues.get(contents) ?? Promise.resolve();
++  const next = prev.catch(() => {}).then(task);
++  printToPDFQueues.set(contents, next);
+   next
+     .finally(() => {
+-      if (printToPDFQueues.get(this) === next) printToPDFQueues.delete(this);
++      if (printToPDFQueues.get(contents) === next) printToPDFQueues.delete(contents);
+     })
+     .catch(() => {});
+   return next;
+ };
+
++WebContents.prototype.printToPDF = async function (options) {
++  const printSettings = translatePrintToPDFOptions(options);
++  return queuePrintToPDF(this, () => this._printToPDF(printSettings));
++};
++
++interface NativePrintRequestHandlerJob {
++  preventDefault: () => void;
++  _toPDF: (options: any) => Promise<Buffer>;
++  _print: (options?: ElectronInternal.WebContentsPrintOptions, callback?: (success: boolean, failureReason?: string) => void) => void;
++}
++
++interface PrintRequestHandlerJob {
++  print: (options?: ElectronInternal.WebContentsPrintOptions) => Promise<void>;
++  toPDF: (options?: Electron.PrintToPDFOptions) => Promise<Buffer>;
++}
++
++interface PrintRequestHandlerRequest {
++  continue: () => void;
++  handle: (handler: (job: PrintRequestHandlerJob) => void | Promise<void>) => void;
++}
++
++const createPrintRequestHandlerJob = function (contents: Electron.WebContents, nativeJob: NativePrintRequestHandlerJob): PrintRequestHandlerJob {
++  return {
++    print: (options: ElectronInternal.WebContentsPrintOptions = {}) => {
++      return new Promise<void>((resolve, reject) => {
++        nativeJob._print(options, (success, failureReason) => {
++          if (success) {
++            resolve();
++          } else {
++            reject(new Error(failureReason || 'Print job failed'));
++          }
++        });
++      });
++    },
++    toPDF: (options = {}) => {
++      const printSettings = translatePrintToPDFOptions(options);
++      return queuePrintToPDF(contents, () => nativeJob._toPDF(printSettings));
++    }
++  };
++};
++
++WebContents.prototype.setPrintRequestHandler = function (handler) {
++  if (!this._setPrintRequestHandler) {
++    throw new Error('Printing feature is disabled');
++  }
++
++  if (handler === null) {
++    this._setPrintRequestHandler(null);
++    return;
++  }
++
++  if (typeof handler !== 'function') {
++    throw new TypeError('Print request handler must be null or a function');
++  }
++
++  this._setPrintRequestHandler((
++    details: Electron.PrintRequestHandlerDetails,
++    respond: (action?: ((job: NativePrintRequestHandlerJob) => void)) => void
++  ) => {
++    const request: PrintRequestHandlerRequest = {
++      continue: () => respond(),
++      handle: (handler: (job: PrintRequestHandlerJob) => void | Promise<void>) => {
++        if (typeof handler !== 'function') {
++          throw new TypeError('Print request handler must be a function');
++        }
++
++        respond(nativeJob => {
++          nativeJob.preventDefault();
++          const job = createPrintRequestHandlerJob(this, nativeJob);
++          Promise.resolve().then(() => handler(job));
++        });
++      }
++    };
++
++    handler(details, request);
++  });
++};
++
+ // TODO(codebytere): deduplicate argument sanitization by moving rest of
+ // print param logic into new file shared between printToPDF and print
+ WebContents.prototype.print = function (options: ElectronInternal.WebContentsPrintOptions = {}, callback) {
+diff --git a/patches/chromium/.patches b/patches/chromium/.patches
+index 9814005b90..bd39f06bec 100644
+--- a/patches/chromium/.patches
++++ b/patches/chromium/.patches
+@@ -154,3 +154,4 @@ fix_allow_reentrancy_on_downloadmanagerimpl_observer_list.patch
+ build_gn_arg_to_support_linker_wrapper_script_on_windows.patch
+ fix_use_bundled_devtools_frontend_url_for_remote_debugging.patch
+ fix_constrain_allowuniversalaccessfromfileurls_to_file_origins_in.patch
++feat_allow_electron_to_handle_renderer_print_requests.patch
+diff --git a/patches/chromium/feat_allow_electron_to_handle_renderer_print_requests.patch b/patches/chromium/feat_allow_electron_to_handle_renderer_print_requests.patch
+new file mode 100644
+index 0000000000..61bda2c64f
+--- /dev/null
++++ b/patches/chromium/feat_allow_electron_to_handle_renderer_print_requests.patch
+@@ -0,0 +1,119 @@
++From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
++From: Jung-Kwang Lee <ntoskrnl7@gmail.com>
++Date: Sat, 2 May 2026 23:53:33 +0900
++Subject: feat: allow Electron to handle renderer print requests
++
++Electron needs to decide how to handle renderer-initiated print requests before Chromium enters the blocking print settings path. This adds a narrow browser callback hook for scripted and PDF plugin print requests while preserving Chromium's default behavior by continuing when no embedder handles the request.
++
++diff --git a/components/printing/browser/print_manager.cc b/components/printing/browser/print_manager.cc
++index 0767f4e9369e926b1cea99178c1a1975941f1765..2a82945a654fa5e0a6a24479854e2a2b36e6bd70 100644
++--- a/components/printing/browser/print_manager.cc
+++++ b/components/printing/browser/print_manager.cc
++@@ -47,6 +47,10 @@ void PrintManager::IsPrintingEnabled(IsPrintingEnabledCallback callback) {
++   std::move(callback).Run(true);
++ }
++
+++void PrintManager::HandlePrintRequest(HandlePrintRequestCallback callback) {
+++  std::move(callback).Run(true);
+++}
+++
++ void PrintManager::ShowInvalidPrinterSettingsError() {}
++
++ void PrintManager::PrintingFailed(int32_t cookie,
++diff --git a/components/printing/browser/print_manager.h b/components/printing/browser/print_manager.h
++index a8551d95e64da2afbc1685b2df8f1fc377c7117b..61be788bbb3d18ee6453b17fa338560039236834 100644
++--- a/components/printing/browser/print_manager.h
+++++ b/components/printing/browser/print_manager.h
++@@ -47,6 +47,7 @@ class PrintManager : public content::WebContentsObserver,
++   void DidPrintDocument(mojom::DidPrintDocumentParamsPtr params,
++                         DidPrintDocumentCallback callback) override;
++   void IsPrintingEnabled(IsPrintingEnabledCallback callback) override;
+++  void HandlePrintRequest(HandlePrintRequestCallback callback) override;
++   void DidShowPrintDialog() override;
++   void ShowInvalidPrinterSettingsError() override;
++   void PrintingFailed(int32_t cookie,
++diff --git a/components/printing/common/print.mojom b/components/printing/common/print.mojom
++index 16d758a6936f66148a196761cfb875f68c1818d7..721d5a4ac35bd7dd713614f8dd1a1cf29378e315 100644
++--- a/components/printing/common/print.mojom
+++++ b/components/printing/common/print.mojom
++@@ -382,6 +382,10 @@ interface PrintManagerHost {
++   [Sync]
++   IsPrintingEnabled() => (bool printing_enabled);
++
+++  // Gives the browser a chance to asynchronously handle a renderer-initiated
+++  // print request before the renderer enters the blocking print settings path.
+++  HandlePrintRequest() => (bool should_print);
+++
++   // Requests the print settings from the user. This step is about showing
++   // UI to the user to select the final print settings. If the user cancels or
++   // an error occurs, return null.
++diff --git a/components/pdf/renderer/pdf_view_web_plugin_client.cc b/components/pdf/renderer/pdf_view_web_plugin_client.cc
++index e5a6e7f2307103c11a5a82a111d3b82c635f460a..e8c4899902ae9b6951eefa23a0c7bba0cd2c8d3f 100644
++--- a/components/pdf/renderer/pdf_view_web_plugin_client.cc
++++ b/components/pdf/renderer/pdf_view_web_plugin_client.cc
++@@ -299,7 +299,11 @@ void PdfViewWebPluginClient::Print() {
++   blink::WebElement element = plugin_container_->GetElement();
++   DCHECK(!element.IsNull());
++ #if BUILDFLAG(ENABLE_PRINTING)
++-  printing::PrintRenderFrameHelper::Get(render_frame_)->PrintNode(element);
+++  auto* print_helper = printing::PrintRenderFrameHelper::Get(render_frame_);
+++  if (!print_helper || !print_helper->HandlePrintRequest())
+++    return;
+++
+++  print_helper->PrintNode(element);
++ #endif  // BUILDFLAG(ENABLE_PRINTING)
++ }
++ 
++diff --git a/components/printing/renderer/print_render_frame_helper.cc b/components/printing/renderer/print_render_frame_helper.cc
++index dd83b6cfb6e3f916e60f50402014cd931a4d8850..09026c5731f03cde2fb6737b7c4887f09b7807bb 100644
++--- a/components/printing/renderer/print_render_frame_helper.cc
+++++ b/components/printing/renderer/print_render_frame_helper.cc
++@@ -1200,6 +1200,19 @@ bool PrintRenderFrameHelper::IsScriptInitiatedPrintAllowed(
++          scripting_throttler_.IsAllowed(frame);
++ }
++
+++bool PrintRenderFrameHelper::HandlePrintRequest() {
+++  bool should_print = true;
+++  base::RunLoop run_loop(base::RunLoop::Type::kNestableTasksAllowed);
+++  GetPrintManagerHost()->HandlePrintRequest(base::BindOnce(
+++      [](base::OnceClosure quit, bool* should_print, bool result) {
+++        *should_print = result;
+++        std::move(quit).Run();
+++      },
+++      run_loop.QuitClosure(), &should_print));
+++  run_loop.Run();
+++  return should_print;
+++}
+++
++ void PrintRenderFrameHelper::DidStartNavigation(
++     const GURL& url,
++     std::optional<blink::WebNavigationType> navigation_type) {
++@@ -1241,6 +1254,9 @@ void PrintRenderFrameHelper::ScriptedPrint(bool user_initiated) {
++     return;
++   }
++
+++  if (!HandlePrintRequest())
+++    return;
+++
++   if (g_is_preview_enabled) {
++ #if BUILDFLAG(ENABLE_PRINT_PREVIEW)
++     print_in_progress_ = true;
++diff --git a/components/printing/renderer/print_render_frame_helper.h b/components/printing/renderer/print_render_frame_helper.h
++index 116939ffd857354ab1bfab472b292cfedd99dcba..05c432c310dd7cbf1c4b2dee5f48cb4ec26ab6ac 100644
++--- a/components/printing/renderer/print_render_frame_helper.h
+++++ b/components/printing/renderer/print_render_frame_helper.h
++@@ -146,6 +146,7 @@ class PrintRenderFrameHelper
++   static constexpr double kEpsilon = 0.01f;
++ 
++   void PrintNode(const blink::WebNode& node);
+++  bool HandlePrintRequest();
++ 
++   const mojo::AssociatedRemote<mojom::PrintManagerHost>& GetPrintManagerHost();
++ 
++diff --git a/components/printing/test/print_render_frame_helper_browsertest.cc b/components/printing/test/print_render_frame_helper_browsertest.cc
++index 5223b60ed44a8b6593165ac5b3febd2a7e67f785..ffcb48d7e0e634a635440152f4630388539300d2 100644
++--- a/components/printing/test/print_render_frame_helper_browsertest.cc
+++++ b/components/printing/test/print_render_frame_helper_browsertest.cc
++@@ -332,6 +332,9 @@ class TestPrintManagerHost
++   void IsPrintingEnabled(IsPrintingEnabledCallback callback) override {
++     std::move(callback).Run(is_printing_enabled_);
++   }
+++  void HandlePrintRequest(HandlePrintRequestCallback callback) override {
+++    std::move(callback).Run(true);
+++  }
++   void GetDefaultPrintSettings(
++       GetDefaultPrintSettingsCallback callback) override {
++     printing::mojom::PrintParamsPtr params =
+diff --git a/shell/browser/api/electron_api_web_contents.cc b/shell/browser/api/electron_api_web_contents.cc
+index 219658752d..d46aa1f492 100644
+--- a/shell/browser/api/electron_api_web_contents.cc
++++ b/shell/browser/api/electron_api_web_contents.cc
+@@ -3265,9 +3265,156 @@ void OnPDFCreated(gin_helper::Promise<v8::Local<v8::Value>> promise,
+
+   promise.Resolve(buffer);
+ }
++
++v8::Local<v8::Promise> PrintFrameToPDF(content::RenderFrameHost* rfh,
++                                       gin::Arguments* args) {
++  v8::Isolate* isolate = args->isolate();
++  gin_helper::Promise<v8::Local<v8::Value>> promise(isolate);
++  v8::Local<v8::Promise> handle = promise.GetHandle();
++
++  gin_helper::Dictionary options = gin_helper::Dictionary::CreateEmpty(isolate);
++  if (args->Length() >= 1 && !args->GetNext(&options)) {
++    promise.RejectWithErrorMessage("options must be an object when provided");
++    return handle;
++  }
++
++  std::optional<bool> landscape;
++  std::optional<bool> display_header_footer;
++  std::optional<bool> print_background;
++  std::optional<double> scale;
++  std::optional<double> paper_width;
++  std::optional<double> paper_height;
++  std::optional<double> margin_top;
++  std::optional<double> margin_bottom;
++  std::optional<double> margin_left;
++  std::optional<double> margin_right;
++  std::optional<std::string> header_template;
++  std::optional<std::string> footer_template;
++  std::optional<bool> prefer_css_page_size;
++  std::optional<bool> generate_tagged_pdf;
++  std::optional<bool> generate_document_outline;
++
++  options.GetOptional(kLandscape, &landscape);
++  options.GetOptional(kDisplayHeaderFooter, &display_header_footer);
++  options.GetOptional(kPrintBackground, &print_background);
++  options.GetOptional(kScale, &scale);
++  options.GetOptional(kPaperWidth, &paper_width);
++  options.GetOptional(kPaperHeight, &paper_height);
++  options.GetOptional(kMarginTop, &margin_top);
++  options.GetOptional(kMarginBottom, &margin_bottom);
++  options.GetOptional(kMarginLeft, &margin_left);
++  options.GetOptional(kMarginRight, &margin_right);
++  options.GetOptional(kHeaderTemplate, &header_template);
++  options.GetOptional(kFooterTemplate, &footer_template);
++  options.GetOptional(kPreferCSSPageSize, &prefer_css_page_size);
++  options.GetOptional(kGenerateTaggedPDF, &generate_tagged_pdf);
++  options.GetOptional(kGenerateDocumentOutline, &generate_document_outline);
++
++  absl::variant<printing::mojom::PrintPagesParamsPtr, std::string>
++      print_pages_params = print_to_pdf::GetPrintPagesParams(
++          rfh->GetLastCommittedURL(), landscape, display_header_footer,
++          print_background, scale, paper_width, paper_height, margin_top,
++          margin_bottom, margin_left, margin_right, header_template,
++          footer_template, prefer_css_page_size, generate_tagged_pdf,
++          generate_document_outline);
++
++  if (absl::holds_alternative<std::string>(print_pages_params)) {
++    promise.RejectWithErrorMessage("Invalid print parameters: " +
++                                   absl::get<std::string>(print_pages_params));
++    return handle;
++  }
++
++  std::string page_ranges;
++  options.Get(kPageRanges, &page_ranges);
++
++  auto* manager = PrintViewManagerElectron::FromWebContents(
++      content::WebContents::FromRenderFrameHost(rfh));
++  if (!manager) {
++    promise.RejectWithErrorMessage("Failed to find print manager");
++    return handle;
++  }
++
++  auto params = std::move(
++      absl::get<printing::mojom::PrintPagesParamsPtr>(print_pages_params));
++  manager->PrintToPdf(rfh, page_ranges, std::move(params),
++                      base::BindOnce(&OnPDFCreated, std::move(promise)));
++  return handle;
++}
++
++v8::Local<v8::Object> CreatePrintRequestHandle(
++    v8::Isolate* isolate,
++    content::RenderFrameHost* rfh,
++    std::shared_ptr<bool> prevent_default) {
++  auto request = gin_helper::Dictionary::CreateEmpty(isolate);
++  request.SetMethod("preventDefault",
++                    base::BindRepeating(
++                        [](std::shared_ptr<bool> prevent_default) {
++                          *prevent_default = true;
++                        },
++                        prevent_default));
++  request.SetMethod(
++      "_toPDF",
++      base::BindRepeating(
++          [](content::GlobalRenderFrameHostId rfh_id, gin::Arguments* args) {
++            auto* rfh = content::RenderFrameHost::FromID(rfh_id);
++            if (!rfh) {
++              gin_helper::Promise<v8::Local<v8::Value>> promise(
++                  args->isolate());
++              auto handle = promise.GetHandle();
++              promise.RejectWithErrorMessage("Frame is no longer available");
++              return handle;
++            }
++            return PrintFrameToPDF(rfh, args);
++          },
++          rfh->GetGlobalId()));
++  request.SetMethod(
++      "_print",
++      base::BindRepeating(
++          [](content::GlobalRenderFrameHostId rfh_id, gin::Arguments* args) {
++            auto* rfh = content::RenderFrameHost::FromID(rfh_id);
++            if (!rfh) {
++              args->ThrowTypeError("Frame is no longer available");
++              return;
++            }
++
++            auto* api_web_contents = electron::api::WebContents::From(
++                content::WebContents::FromRenderFrameHost(rfh));
++            if (!api_web_contents) {
++              args->ThrowTypeError("Failed to find WebContents");
++              return;
++            }
++
++            api_web_contents->PrintFrameFromPrintRequest(rfh, args);
++          },
++          rfh->GetGlobalId()));
++  return request.GetHandle();
++}
++
++struct PrintRequestHandlerState {
++  explicit PrintRequestHandlerState(
++      content::GlobalRenderFrameHostId frame_id,
++      base::OnceCallback<void(bool)> callback)
++      : frame_id(frame_id), callback(std::move(callback)) {}
++
++  content::GlobalRenderFrameHostId frame_id;
++  base::OnceCallback<void(bool)> callback;
++  bool callback_called = false;
++};
+ }  // namespace
+
+ void WebContents::Print(gin::Arguments* const args) {
++  content::RenderFrameHost* rfh = GetRenderFrameHostToUse(web_contents());
++  if (!rfh)
++    return;
++
++  PrintFrame(rfh, args);
++}
++
++void WebContents::PrintFrame(content::RenderFrameHost* rfh,
++                             gin::Arguments* const args) {
++  if (!rfh)
++    return;
++
+   v8::Isolate* const isolate = args->isolate();
+   auto options = gin_helper::Dictionary::CreateEmpty(isolate);
+
+@@ -3286,10 +3433,6 @@ void WebContents::Print(gin::Arguments* const args) {
+
+   base::DictValue settings;
+   if (options.IsEmptyObject()) {
+-    content::RenderFrameHost* rfh = GetRenderFrameHostToUse(web_contents());
+-    if (!rfh)
+-      return;
+-
+     auto* print_view_manager = PrintViewManagerElectron::FromWebContents(
+         content::WebContents::FromRenderFrameHost(rfh));
+     if (!print_view_manager)
+@@ -3439,6 +3582,11 @@ void WebContents::Print(gin::Arguments* const args) {
+                      std::move(settings), std::move(callback)));
+ }
+
++void WebContents::PrintFrameFromPrintRequest(content::RenderFrameHost* rfh,
++                                             gin::Arguments* const args) {
++  PrintFrame(rfh, args);
++}
++
+ // Partially duplicated and modified from
+ // headless/lib/browser/protocol/page_handler.cc;l=41
+ v8::Local<v8::Promise> WebContents::PrintToPDF(const base::Value& settings) {
+@@ -3498,6 +3646,127 @@ v8::Local<v8::Promise> WebContents::PrintToPDF(const base::Value& settings) {
+
+   return handle;
+ }
++
++void WebContents::SetPrintRequestHandler(v8::Local<v8::Value> val,
++                                         gin::Arguments* args) {
++  if (val->IsNull()) {
++    print_request_handler_.reset();
++    return;
++  }
++
++  if (!val->IsFunction()) {
++    args->ThrowTypeError("Print request handler must be null or a function");
++    return;
++  }
++
++  print_request_handler_.emplace(args->isolate(), val);
++}
++
++void WebContents::RunPrintRequestHandler(
++    content::RenderFrameHost* rfh,
++    base::OnceCallback<void(bool)> callback) {
++  if (!print_request_handler_) {
++    std::move(callback).Run(true);
++    return;
++  }
++
++  v8::Isolate* isolate = JavascriptEnvironment::GetIsolate();
++  gin_helper::Locker locker(isolate);
++  v8::HandleScope handle_scope(isolate);
++  v8::Local<v8::Function> handler = print_request_handler_->NewHandle(isolate);
++  v8::Local<v8::Context> context = handler->GetCreationContextChecked(isolate);
++  v8::Context::Scope context_scope(context);
++
++  auto details = gin_helper::Dictionary::CreateEmpty(isolate);
++  details.SetGetter("frame", rfh);
++  details.Set("url", rfh->GetLastCommittedURL().spec());
++  details.Set("isMainFrame", rfh->GetParent() == nullptr);
++
++  auto callback_state = std::make_shared<PrintRequestHandlerState>(
++      rfh->GetGlobalId(), std::move(callback));
++  auto done = gin_helper::CreateFunctionFromTranslator(
++      isolate,
++      base::BindRepeating(
++          [](std::shared_ptr<PrintRequestHandlerState> callback_state,
++             gin::Arguments* args) {
++            if (!callback_state || callback_state->callback_called) {
++              args->ThrowTypeError("Print request callback was already called");
++              return;
++            }
++
++            callback_state->callback_called = true;
++
++            if (args->Length() == 0) {
++              if (callback_state->callback) {
++                std::move(callback_state->callback).Run(true);
++              } else {
++                args->ThrowTypeError(
++                    "Print request callback was called after the original "
++                    "print request was released; call request.handle(...) "
++                    "instead");
++              }
++              return;
++            }
++
++            v8::Local<v8::Value> value;
++            if (!args->GetNext(&value)) {
++              if (callback_state->callback) {
++                std::move(callback_state->callback).Run(true);
++              }
++              return;
++            }
++
++            if (value->IsBoolean() && !value.As<v8::Boolean>()->Value()) {
++              if (callback_state->callback) {
++                std::move(callback_state->callback).Run(false);
++              }
++              return;
++            }
++
++            if (value->IsFunction()) {
++              v8::Isolate* isolate = args->isolate();
++              gin_helper::Locker locker(isolate);
++              v8::HandleScope handle_scope(isolate);
++              auto context = isolate->GetCurrentContext();
++              auto prevent_default = std::make_shared<bool>(false);
++              auto* rfh =
++                  content::RenderFrameHost::FromID(callback_state->frame_id);
++              if (!rfh) {
++                if (callback_state->callback) {
++                  std::move(callback_state->callback).Run(false);
++                }
++                return;
++              }
++              v8::Local<v8::Object> request =
++                  CreatePrintRequestHandle(isolate, rfh, prevent_default);
++              v8::Local<v8::Value> argv[] = {request};
++              value.As<v8::Function>()
++                  ->Call(context, value, std::size(argv), argv)
++                  .IsEmpty();
++              if (callback_state->callback) {
++                std::move(callback_state->callback).Run(!*prevent_default);
++              }
++              return;
++            }
++
++            if (callback_state->callback) {
++              std::move(callback_state->callback).Run(true);
++            }
++          },
++          callback_state),
++      true);
++
++  v8::Local<v8::Value> argv[] = {details.GetHandle(), done};
++  if (handler->Call(context, handler, std::size(argv), argv).IsEmpty() &&
++      callback_state->callback) {
++    std::move(callback_state->callback).Run(true);
++    return;
++  }
++
++  if (callback_state->callback) {
++    std::move(callback_state->callback).Run(false);
++  }
++}
+ #endif
+
+ void WebContents::AddWorkSpace(v8::Isolate* const isolate,
+@@ -4762,6 +5031,8 @@ void WebContents::FillObjectTemplate(v8::Isolate* isolate,
+ #if BUILDFLAG(ENABLE_PRINTING)
+       .SetMethod("_print", &WebContents::Print)
+       .SetMethod("_printToPDF", &WebContents::PrintToPDF)
++      .SetMethod("_setPrintRequestHandler",
++                 &WebContents::SetPrintRequestHandler)
+ #endif
+       .SetMethod("_setNextChildWebPreferences",
+                  &WebContents::SetNextChildWebPreferences)
+diff --git a/shell/browser/api/electron_api_web_contents.h b/shell/browser/api/electron_api_web_contents.h
+index 187d766d04..ea0e36b02d 100644
+--- a/shell/browser/api/electron_api_web_contents.h
++++ b/shell/browser/api/electron_api_web_contents.h
+@@ -38,6 +38,8 @@
+ #include "shell/browser/preload_script.h"
+ #include "shell/browser/ui/inspectable_web_contents_delegate.h"
+ #include "shell/browser/ui/inspectable_web_contents_view_delegate.h"
++#include "shell/common/api/api.mojom.h"
++#include "shell/common/gin_helper/callback.h"
+ #include "shell/common/gin_helper/cleaned_up_at_exit.h"
+ #include "shell/common/gin_helper/constructible.h"
+ #include "shell/common/gin_helper/pinnable.h"
+@@ -263,8 +265,14 @@ class WebContents final : public ExclusiveAccessContext,
+
+ #if BUILDFLAG(ENABLE_PRINTING)
+   void Print(gin::Arguments* args);
++  void PrintFrame(content::RenderFrameHost* rfh, gin::Arguments* args);
++  void PrintFrameFromPrintRequest(content::RenderFrameHost* rfh,
++                                  gin::Arguments* args);
+   // Print current page as PDF.
+   v8::Local<v8::Promise> PrintToPDF(const base::Value& settings);
++  void SetPrintRequestHandler(v8::Local<v8::Value> val, gin::Arguments* args);
++  void RunPrintRequestHandler(content::RenderFrameHost* rfh,
++                              base::OnceCallback<void(bool)> callback);
+ #endif
+
+   void SetNextChildWebPreferences(const gin_helper::Dictionary);
+@@ -829,6 +837,10 @@ class WebContents final : public ExclusiveAccessContext,
+
+   v8::Global<v8::Value> pending_child_web_preferences_;
+
++#if BUILDFLAG(ENABLE_PRINTING)
++  std::optional<gin_helper::SafeV8Function> print_request_handler_;
++#endif
++
+   // The window that this WebContents belongs to.
+   base::WeakPtr<NativeWindow> owner_window_;
+
+diff --git a/shell/browser/printing/print_view_manager_electron.cc b/shell/browser/printing/print_view_manager_electron.cc
+index 5d8318faf5..f5c194e747 100644
+--- a/shell/browser/printing/print_view_manager_electron.cc
++++ b/shell/browser/printing/print_view_manager_electron.cc
+@@ -12,6 +12,7 @@
+ #include "components/printing/browser/print_to_pdf/pdf_print_utils.h"
+ #include "printing/mojom/print.mojom.h"
+ #include "printing/page_range.h"
++#include "shell/browser/api/electron_api_web_contents.h"
+ #include "third_party/abseil-cpp/absl/types/variant.h"
+
+ #if BUILDFLAG(ENABLE_PRINT_PREVIEW)
+@@ -96,6 +97,23 @@ void PrintViewManagerElectron::GetDefaultPrintSettings(
+   }
+ }
+
++void PrintViewManagerElectron::HandlePrintRequest(
++    HandlePrintRequestCallback callback) {
++  auto* rfh = GetCurrentTargetFrame();
++  if (!rfh) {
++    std::move(callback).Run(true);
++    return;
++  }
++
++  auto* api_web_contents = electron::api::WebContents::From(web_contents());
++  if (!api_web_contents) {
++    std::move(callback).Run(true);
++    return;
++  }
++
++  api_web_contents->RunPrintRequestHandler(rfh, std::move(callback));
++}
++
+ void PrintViewManagerElectron::ScriptedPrint(
+     printing::mojom::ScriptedPrintParamsPtr params,
+     ScriptedPrintCallback callback) {
+diff --git a/shell/browser/printing/print_view_manager_electron.h b/shell/browser/printing/print_view_manager_electron.h
+index f347956383..a39f08cae6 100644
+--- a/shell/browser/printing/print_view_manager_electron.h
++++ b/shell/browser/printing/print_view_manager_electron.h
+@@ -54,6 +54,7 @@ class PrintViewManagerElectron
+   void DidGetPrintedPagesCount(int32_t cookie, uint32_t number_pages) override;
+   void GetDefaultPrintSettings(
+       GetDefaultPrintSettingsCallback callback) override;
++  void HandlePrintRequest(HandlePrintRequestCallback callback) override;
+   void ScriptedPrint(printing::mojom::ScriptedPrintParamsPtr params,
+                      ScriptedPrintCallback callback) override;
+ #if BUILDFLAG(ENABLE_PRINT_PREVIEW)
+diff --git a/spec/ts-smoke/electron/main.ts b/spec/ts-smoke/electron/main.ts
+index 0640727f01..8c3349a8dc 100644
+--- a/spec/ts-smoke/electron/main.ts
++++ b/spec/ts-smoke/electron/main.ts
+@@ -89,6 +89,14 @@ app.whenReady().then(() => {
+
+   mainWindow.webContents.print({ silent: true, printBackground: false });
+   mainWindow.webContents.print();
++  mainWindow.webContents.setPrintRequestHandler(async (details, request) => {
++    const html = String(await details.frame.executeJavaScript('document.documentElement.outerHTML'));
++    request.handle(job => {
++      job.print({ silent: true }).then(() => console.log('print succeeded'));
++      job.toPDF({ printBackground: html.length > 0 }).then((data: Buffer) => console.log(data));
++    });
++  });
++  mainWindow.webContents.setPrintRequestHandler(null);
+
+   mainWindow.webContents
+     .printToPDF({
+diff --git a/typings/internal-electron.d.ts b/typings/internal-electron.d.ts
+index 17f9fc96b1..4a79ad23a3 100644
+--- a/typings/internal-electron.d.ts
++++ b/typings/internal-electron.d.ts
+@@ -100,6 +100,7 @@ declare namespace Electron {
+     _send(internal: boolean, channel: string, args: any): boolean;
+     _sendInternal(channel: string, ...args: any[]): void;
+     _printToPDF(options: any): Promise<Buffer>;
++    _setPrintRequestHandler(handler: any): void;
+     _print(options: any, callback?: (success: boolean, failureReason: string) => void): void;
+     _init(): void;
+     _getNavigationEntryAtIndex(index: number): Electron.NavigationEntry | null;

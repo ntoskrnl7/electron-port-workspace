@@ -1,0 +1,6 @@
+schema_version=1
+name=print-request-handler
+target=42
+electronized_chromium_patches=true
+electron_patch_files=electron/*.patch
+notes=Electron patch contains the Chromium patch-stack entry for renderer print request handling.

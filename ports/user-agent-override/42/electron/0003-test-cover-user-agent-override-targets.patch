@@ -1,0 +1,389 @@
+From b432db1104dd01fb547b82cdcdf7f37563c852b5 Mon Sep 17 00:00:00 2001
+From: Jung-Kwang Lee <ntoskrnl7@gmail.com>
+Date: Thu, 14 May 2026 17:58:46 +0900
+Subject: [PATCH 3/3] test: cover user agent override targets
+
+---
+ spec/api-app-spec.ts                    |  69 ++++++++---
+ spec/api-session-spec.ts                |  66 +++++++++-
+ spec/lib/user-agent-override-helpers.ts | 158 ++++++++++++++++++++++++
+ 3 files changed, 272 insertions(+), 21 deletions(-)
+ create mode 100644 spec/lib/user-agent-override-helpers.ts
+
+diff --git a/spec/api-app-spec.ts b/spec/api-app-spec.ts
+index 2b7314cb83..a587d70634 100644
+--- a/spec/api-app-spec.ts
++++ b/spec/api-app-spec.ts
+@@ -17,6 +17,11 @@ import { promisify } from 'node:util';
+ 
+ import { collectStreamBody, getResponse } from './lib/net-helpers';
+ import { defer, ifdescribe, ifit, isWayland, listen, waitUntil } from './lib/spec-helpers';
++import {
++  collectUserAgentOverrideTargetSnapshots,
++  createUserAgentOverrideTestServer,
++  UserAgentTargetSnapshots
++} from './lib/user-agent-override-helpers';
+ import { closeWindow, closeAllWindows } from './lib/window-helpers';
+ 
+ const fixturesPath = path.resolve(__dirname, 'fixtures');
+@@ -2541,9 +2546,10 @@ describe('default behavior', () => {
+   describe('user agent fallback', () => {
+     let initialValue: string;
+     const userAgent = 'Mozilla/5.0 AppUserAgentOverride/99.0';
++    const brand = 'AppBrand';
+     const userAgentMetadata = {
+-      brands: [{ brand: 'AppBrand', version: '99' }],
+-      fullVersionList: [{ brand: 'AppBrand', version: '99.0.1234.5' }],
++      brands: [{ brand, version: '99' }],
++      fullVersionList: [{ brand, version: '99.0.1234.5' }],
+       fullVersion: '99.0.1234.5',
+       platform: 'Windows',
+       platformVersion: '19.0.0',
+@@ -2555,6 +2561,35 @@ describe('default behavior', () => {
+       formFactors: ['Desktop']
+     };
+ 
++    const expectUserAgentSnapshots = (snapshots: UserAgentTargetSnapshots) => {
++      for (const [target, snapshot] of Object.entries(snapshots)) {
++        expect(snapshot.userAgent, `${target}.userAgent`).to.equal(userAgent);
++        expect(snapshot.brands?.map(brandVersion => brandVersion.brand), `${target}.brands`).to.include(brand);
++        expect(snapshot.mobile, `${target}.mobile`).to.equal(false);
++        expect(snapshot.platform, `${target}.platform`).to.equal('Windows');
++      }
++    };
++
++    const expectRequestHeaders = (
++      requests: Record<string, http.IncomingHttpHeaders>,
++      paths: string[],
++      clientHintsPaths: string[]
++    ) => {
++      for (const requestPath of paths) {
++        const headers = requests[requestPath];
++        expect(headers, `${requestPath} request`).to.exist();
++        expect(headers!['user-agent'], `${requestPath} user-agent`).to.equal(userAgent);
++      }
++
++      for (const requestPath of clientHintsPaths) {
++        const headers = requests[requestPath];
++        expect(headers, `${requestPath} request`).to.exist();
++        expect(headers!['sec-ch-ua'], `${requestPath} sec-ch-ua`).to.include(brand);
++        expect(headers!['sec-ch-ua-mobile'], `${requestPath} sec-ch-ua-mobile`).to.equal('?0');
++        expect(headers!['sec-ch-ua-platform'], `${requestPath} sec-ch-ua-platform`).to.equal('"Windows"');
++      }
++    };
++
+     before(() => {
+       initialValue = app.userAgentFallback!;
+     });
+@@ -2582,11 +2617,7 @@ describe('default behavior', () => {
+     it('can set a fallback with User-Agent Client Hints metadata', async () => {
+       app.setUserAgentOverride({ userAgent, userAgentMetadata });
+ 
+-      let headers: http.IncomingHttpHeaders | null = null;
+-      const server = http.createServer((req, res) => {
+-        headers = req.headers;
+-        res.end('<!DOCTYPE html>');
+-      });
++      const { server, requests } = createUserAgentOverrideTestServer();
+       defer(() => {
+         server.close();
+       });
+@@ -2595,20 +2626,20 @@ describe('default behavior', () => {
+       const ses = session.fromPartition(`app-user-agent-override-${crypto.randomUUID()}`);
+       const w = new BrowserWindow({ show: false, webPreferences: { session: ses } });
+       await w.loadURL(url);
+-      const result = await w.webContents.executeJavaScript(`({
+-        userAgent: navigator.userAgent,
+-        brands: navigator.userAgentData.brands,
+-        platform: navigator.userAgentData.platform
+-      })`);
++      const snapshots = await collectUserAgentOverrideTargetSnapshots(w.webContents);
+ 
+       expect(ses.getUserAgent()).to.equal(userAgent);
+-      expect(headers!['user-agent']).to.equal(userAgent);
+-      expect(headers!['sec-ch-ua']).to.include('AppBrand');
+-      expect(headers!['sec-ch-ua-mobile']).to.equal('?0');
+-      expect(headers!['sec-ch-ua-platform']).to.equal('"Windows"');
+-      expect(result.userAgent).to.equal(userAgent);
+-      expect(result.brands.map((brand: any) => brand.brand)).to.include('AppBrand');
+-      expect(result.platform).to.equal('Windows');
++      expectUserAgentSnapshots(snapshots);
++      expectRequestHeaders(requests, [
++        '/',
++        '/subframe.html',
++        '/dedicated-worker.js',
++        '/shared-worker.js',
++        '/service-worker.js'
++      ], [
++        '/',
++        '/subframe.html'
++      ]);
+     });
+   });
+ 
+diff --git a/spec/api-session-spec.ts b/spec/api-session-spec.ts
+index fab2f57b7a..a5ac9d1125 100644
+--- a/spec/api-session-spec.ts
++++ b/spec/api-session-spec.ts
+@@ -14,6 +14,11 @@ import { setTimeout } from 'node:timers/promises';
+ import { pathToFileURL } from 'node:url';
+ 
+ import { defer, ifit, listen, waitUntil } from './lib/spec-helpers';
++import {
++  collectUserAgentOverrideTargetSnapshots,
++  createUserAgentOverrideTestServer,
++  UserAgentTargetSnapshots
++} from './lib/user-agent-override-helpers';
+ import { closeAllWindows } from './lib/window-helpers';
+ 
+ describe('session module', () => {
+@@ -2140,9 +2145,10 @@ describe('session module', () => {
+     afterEach(closeAllWindows);
+ 
+     const userAgent = 'Mozilla/5.0 SessionUserAgentOverride/99.0';
++    const brand = 'SessionBrand';
+     const userAgentMetadata = {
+-      brands: [{ brand: 'SessionBrand', version: '99' }],
+-      fullVersionList: [{ brand: 'SessionBrand', version: '99.0.1234.5' }],
++      brands: [{ brand, version: '99' }],
++      fullVersionList: [{ brand, version: '99.0.1234.5' }],
+       fullVersion: '99.0.1234.5',
+       platform: 'Windows',
+       platformVersion: '19.0.0',
+@@ -2154,6 +2160,35 @@ describe('session module', () => {
+       formFactors: ['Desktop']
+     };
+ 
++    const expectUserAgentSnapshots = (snapshots: UserAgentTargetSnapshots) => {
++      for (const [target, snapshot] of Object.entries(snapshots)) {
++        expect(snapshot.userAgent, `${target}.userAgent`).to.equal(userAgent);
++        expect(snapshot.brands?.map(brandVersion => brandVersion.brand), `${target}.brands`).to.include(brand);
++        expect(snapshot.mobile, `${target}.mobile`).to.equal(false);
++        expect(snapshot.platform, `${target}.platform`).to.equal('Windows');
++      }
++    };
++
++    const expectRequestHeaders = (
++      requests: Record<string, http.IncomingHttpHeaders>,
++      paths: string[],
++      clientHintsPaths: string[]
++    ) => {
++      for (const requestPath of paths) {
++        const headers = requests[requestPath];
++        expect(headers, `${requestPath} request`).to.exist();
++        expect(headers!['user-agent'], `${requestPath} user-agent`).to.equal(userAgent);
++      }
++
++      for (const requestPath of clientHintsPaths) {
++        const headers = requests[requestPath];
++        expect(headers, `${requestPath} request`).to.exist();
++        expect(headers!['sec-ch-ua'], `${requestPath} sec-ch-ua`).to.include(brand);
++        expect(headers!['sec-ch-ua-mobile'], `${requestPath} sec-ch-ua-mobile`).to.equal('?0');
++        expect(headers!['sec-ch-ua-platform'], `${requestPath} sec-ch-ua-platform`).to.equal('"Windows"');
++      }
++    };
++
+     it('can be retrieved and cleared with getUserAgent()', () => {
+       const ses = session.fromPartition(`user-agent-override-${crypto.randomUUID()}`);
+       ses.setUserAgentOverride({ userAgent, userAgentMetadata });
+@@ -2215,6 +2250,33 @@ describe('session module', () => {
+       expect(result.platform).to.equal('Windows');
+     });
+ 
++    it('sets navigator and request headers for frames and workers', async () => {
++      const ses = session.fromPartition(`user-agent-override-targets-${crypto.randomUUID()}`);
++      ses.setUserAgentOverride({ userAgent, userAgentMetadata });
++
++      const { server, requests } = createUserAgentOverrideTestServer();
++      defer(() => {
++        server.close();
++      });
++
++      const { url } = await listen(server);
++      const w = new BrowserWindow({ show: false, webPreferences: { session: ses } });
++      await w.loadURL(url);
++
++      const snapshots = await collectUserAgentOverrideTargetSnapshots(w.webContents);
++      expectUserAgentSnapshots(snapshots);
++      expectRequestHeaders(requests, [
++        '/',
++        '/subframe.html',
++        '/dedicated-worker.js',
++        '/shared-worker.js',
++        '/service-worker.js'
++      ], [
++        '/',
++        '/subframe.html'
++      ]);
++    });
++
+     it('sets navigator.userAgent for shared workers', async () => {
+       const ses = session.fromPartition(`user-agent-override-shared-worker-${crypto.randomUUID()}`);
+       ses.setUserAgentOverride({ userAgent, userAgentMetadata });
+diff --git a/spec/lib/user-agent-override-helpers.ts b/spec/lib/user-agent-override-helpers.ts
+new file mode 100644
+index 0000000000..6ef549418a
+--- /dev/null
++++ b/spec/lib/user-agent-override-helpers.ts
+@@ -0,0 +1,158 @@
++import * as http from 'node:http';
++
++export interface UserAgentSnapshot {
++  userAgent: string;
++  brands?: Array<{ brand: string; version: string }>;
++  mobile?: boolean;
++  platform?: string;
++}
++
++export type UserAgentTargetSnapshots = Record<
++  'mainFrame' | 'subframe' | 'dedicatedWorker' | 'sharedWorker' | 'serviceWorker',
++  UserAgentSnapshot
++>;
++
++const snapshotScript = `
++function readUserAgentSnapshot() {
++  const snapshot = {
++    userAgent: navigator.userAgent
++  };
++  if (navigator.userAgentData) {
++    snapshot.brands = navigator.userAgentData.brands.map(brand => ({
++      brand: brand.brand,
++      version: brand.version
++    }));
++    snapshot.mobile = navigator.userAgentData.mobile;
++    snapshot.platform = navigator.userAgentData.platform;
++  }
++  return snapshot;
++}
++`;
++
++export function createUserAgentOverrideTestServer() {
++  const requests: Record<string, http.IncomingHttpHeaders> = {};
++  const server = http.createServer((req, res) => {
++    const requestPath = (req.url ?? '/').split('?')[0];
++    requests[requestPath] = req.headers;
++
++    if (requestPath === '/subframe.html') {
++      res.setHeader('Content-Type', 'text/html');
++      res.end(`<!DOCTYPE html><script>
++        ${snapshotScript}
++        parent.postMessage({
++          type: 'user-agent-snapshot',
++          snapshot: readUserAgentSnapshot()
++        }, '*');
++      </script>`);
++      return;
++    }
++
++    if (requestPath === '/dedicated-worker.js') {
++      res.setHeader('Content-Type', 'text/javascript');
++      res.end(`
++        ${snapshotScript}
++        postMessage(readUserAgentSnapshot());
++      `);
++      return;
++    }
++
++    if (requestPath === '/shared-worker.js') {
++      res.setHeader('Content-Type', 'text/javascript');
++      res.end(`
++        ${snapshotScript}
++        onconnect = event => {
++          event.ports[0].postMessage(readUserAgentSnapshot());
++        };
++      `);
++      return;
++    }
++
++    if (requestPath === '/service-worker.js') {
++      res.setHeader('Content-Type', 'text/javascript');
++      res.end(`
++        ${snapshotScript}
++        self.addEventListener('message', event => {
++          event.ports[0].postMessage(readUserAgentSnapshot());
++        });
++      `);
++      return;
++    }
++
++    res.setHeader('Content-Type', 'text/html');
++    res.end('<!DOCTYPE html>');
++  });
++
++  return { server, requests };
++}
++
++export async function collectUserAgentOverrideTargetSnapshots(webContents: Electron.WebContents) {
++  const mainFrame = await webContents.executeJavaScript(`(() => {
++    ${snapshotScript}
++    return readUserAgentSnapshot();
++  })()`);
++
++  const subframe = await webContents.executeJavaScript(`
++    new Promise((resolve, reject) => {
++      const timeout = setTimeout(() => reject(new Error('subframe timed out')), 5000);
++      window.addEventListener('message', event => {
++        if (event.data?.type !== 'user-agent-snapshot') return;
++        clearTimeout(timeout);
++        resolve(event.data.snapshot);
++      }, { once: true });
++
++      const frame = document.createElement('iframe');
++      frame.src = '/subframe.html';
++      document.body.appendChild(frame);
++    })
++  `);
++
++  const dedicatedWorker = await webContents.executeJavaScript(`
++    new Promise((resolve, reject) => {
++      const worker = new Worker('/dedicated-worker.js');
++      worker.onerror = event => reject(event.message);
++      worker.onmessage = event => {
++        worker.terminate();
++        resolve(event.data);
++      };
++    })
++  `);
++
++  const sharedWorker = await webContents.executeJavaScript(`
++    new Promise((resolve, reject) => {
++      const worker = new SharedWorker('/shared-worker.js');
++      worker.onerror = event => reject(event.message);
++      worker.port.onmessage = event => {
++        worker.port.close();
++        resolve(event.data);
++      };
++      worker.port.start();
++    })
++  `);
++
++  const serviceWorker = await webContents.executeJavaScript(`
++    (async () => {
++      const registration = await navigator.serviceWorker.register('/service-worker.js');
++      const readyRegistration = await navigator.serviceWorker.ready;
++      const worker = readyRegistration.active || registration.active ||
++        registration.waiting || registration.installing;
++      if (!worker) throw new Error('service worker is not available');
++
++      const snapshot = await new Promise((resolve, reject) => {
++        const channel = new MessageChannel();
++        channel.port1.onmessage = event => resolve(event.data);
++        channel.port1.onmessageerror = event => reject(event);
++        worker.postMessage('user-agent', [channel.port2]);
++      });
++      await registration.unregister();
++      return snapshot;
++    })()
++  `);
++
++  return {
++    mainFrame,
++    subframe,
++    dedicatedWorker,
++    sharedWorker,
++    serviceWorker
++  } as UserAgentTargetSnapshots;
++}
+-- 
+2.53.0
+

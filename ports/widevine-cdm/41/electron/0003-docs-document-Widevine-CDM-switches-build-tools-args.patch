@@ -1,0 +1,97 @@
+From caf930cf1c48f240b1b76c8e1fa553c9a9babe62 Mon Sep 17 00:00:00 2001
+From: Jung-Kwang Lee <ntoskrnl7@gmail.com>
+Date: Sun, 3 May 2026 17:09:41 +0900
+Subject: docs: document Widevine CDM switches, build-tools args, and bundled
+ WidevineCdm fallback path
+
+---
+ docs/api/command-line-switches.md         | 25 ++++++++++++++++++
+ docs/development/build-instructions-gn.md | 32 +++++++++++++++++++++++
+ 2 files changed, 57 insertions(+)
+
+diff --git a/docs/api/command-line-switches.md b/docs/api/command-line-switches.md
+index 42b8db00e1..4404d1d280 100644
+--- a/docs/api/command-line-switches.md
++++ b/docs/api/command-line-switches.md
+@@ -259,6 +259,31 @@ This switch only works when `--enable-logging` is also passed.
+ 
+ See also `--enable-logging`, `--log-level`, and `--v`.
+ 
++### --widevine-cdm-path=`path`
++
++Specifies the directory containing Widevine CDM files.
++
++Electron looks for `manifest.json` in this directory and then loads the
++platform-specific Widevine CDM library.
++If this switch is not set, Electron uses bundled Widevine CDM when available.
++Electron also checks the bundled location at
++`<Electron executable directory>/WidevineCdm`.
++
++This switch is only effective in builds where Widevine support is enabled
++(`enable_widevine = true`).
++
++### --widevine-cdm-version=`version`
++
++Optional. Specifies the Widevine CDM version when it cannot be read from
++`manifest.json`. You can omit this switch when the manifest already contains
++the version.
++
++Use this together with `--widevine-cdm-path` when needed. For example:
++`4.10.2891.0`.
++
++This switch is only effective in builds where Widevine support is enabled
++(`enable_widevine = true`).
++
+ ### --force_high_performance_gpu
+ 
+ Force using discrete GPU when there are multiple GPUs available.
+diff --git a/docs/development/build-instructions-gn.md b/docs/development/build-instructions-gn.md
+index 4d1037f26b..bc340a0ae4 100644
+--- a/docs/development/build-instructions-gn.md
++++ b/docs/development/build-instructions-gn.md
+@@ -69,6 +69,27 @@ Some quick tips on building once your checkout is set up:
+   via Electron's [patch system](./patches.md). The `e patches` command can export all relevant patches to
+   `${root}/src/electron/patches/` once your code change is ready.
+ 
++### Passing custom GN args with Build Tools
++
++When using `e build`, you can pass custom GN args via `GN_EXTRA_ARGS`.
++In current Build Tools behavior, `GN_EXTRA_ARGS` is applied when `CI` is set.
++
++On Linux and macOS:
++
++```sh
++export CI=true
++export GN_EXTRA_ARGS="enable_widevine=true"
++e build --target electron
++```
++
++On Windows (PowerShell):
++
++```powershell
++$env:CI="true"
++$env:GN_EXTRA_ARGS="enable_widevine=true"
++e build --target electron
++```
++
+ > [!IMPORTANT]
+ > Unless you're applying upstream patches, you should treat `${root}/src/` as a read-only folder and
+ > spend most of your development time in `${root}/src/electron/`. You should not need to make any
+@@ -235,6 +256,17 @@ $ gn gen out/Release --args="import(\`"//electron/build/args/release.gn\`")"
+ 
+ Also you shouldn't have to run `gn gen` again—if you want to change the build arguments, you can run `gn args out/Testing` to bring up an editor. To see the list of available build configuration options, run `gn args out/Testing --list`.
+ 
++To build Electron with Widevine support, add this GN arg:
++
++```gn
++enable_widevine = true
++```
++
++This enables Widevine support in the Electron binary. At runtime, provide CDM
++files with switches such as `--widevine-cdm-path` when needed.
++Without that switch, Electron checks the bundled location at
++`<Electron executable directory>/WidevineCdm`.
++
+ **To build, run `ninja` with the `electron` target:**
+ Note: This will also take a while and probably heat up your lap.
+ 

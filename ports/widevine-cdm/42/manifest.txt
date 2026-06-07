@@ -1,0 +1,7 @@
+schema_version=1
+name=widevine-cdm
+target=42
+electronized_chromium_patches=true
+electron_patch_files=electron/*.patch
+chromium_direct_archive=chromium-direct
+notes=Electron patch contains the Chromium patch-stack entry for CDM renderer visibility; chromium-direct keeps the original Chromium patch for reference.

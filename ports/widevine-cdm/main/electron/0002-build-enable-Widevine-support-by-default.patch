@@ -1,0 +1,21 @@
+From 007b89e380997b94b600fb840605dbc2ca04cb13 Mon Sep 17 00:00:00 2001
+From: Jung-Kwang Lee <ntoskrnl7@gmail.com>
+Date: Wed, 6 May 2026 14:44:17 +0900
+Subject: build: enable Widevine support by default
+
+---
+ build/args/all.gn | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/build/args/all.gn b/build/args/all.gn
+index 0557ce1e94..62ea5ca02b 100644
+--- a/build/args/all.gn
++++ b/build/args/all.gn
+@@ -14,6 +14,7 @@ v8_enable_snapshot_native_code_counters = false
+ v8_enable_javascript_promise_hooks = true
+ 
+ enable_cdm_host_verification = false
++enable_widevine = true
+ ffmpeg_branding = "Chrome"
+ proprietary_codecs = true
+ 

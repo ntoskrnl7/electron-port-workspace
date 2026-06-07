@@ -1,0 +1,3980 @@
+From 644a1776588f3caf94b5d29b75813c00e4447a07 Mon Sep 17 00:00:00 2001
+From: Jung-Kwang Lee <ntoskrnl7@gmail.com>
+Date: Fri, 15 May 2026 22:04:26 +0900
+Subject: feat: add trusted webContents input dispatch API
+
+---
+ .../structures/dispatch-input-event-result.md |   14 +
+ ...-input-ime-set-composition-event-params.md |   10 +
+ ...dispatch-input-insert-text-event-params.md |    4 +
+ .../dispatch-input-key-event-params.md        |   26 +
+ .../dispatch-input-mouse-event-params.md      |   36 +
+ .../dispatch-input-touch-event-params.md      |   11 +
+ .../structures/dispatch-input-touch-point.md  |   17 +
+ docs/api/web-contents.md                      |   19 +
+ .../browser/api/electron_api_web_contents.cc  | 1537 +++++++++++++++-
+ shell/browser/api/electron_api_web_contents.h |    3 +
+ spec/api-web-contents-spec.ts                 | 1541 ++++++++++++++++-
+ .../dispatch-input-cross-frame-drag/main.js   |  301 ++++
+ .../package.json                              |    4 +
+ .../api/dispatch-input-drag-hang/main.js      |  186 ++
+ .../api/dispatch-input-drag-hang/package.json |    4 +
+ 15 files changed, 3694 insertions(+), 19 deletions(-)
+ create mode 100644 docs/api/structures/dispatch-input-event-result.md
+ create mode 100644 docs/api/structures/dispatch-input-ime-set-composition-event-params.md
+ create mode 100644 docs/api/structures/dispatch-input-insert-text-event-params.md
+ create mode 100644 docs/api/structures/dispatch-input-key-event-params.md
+ create mode 100644 docs/api/structures/dispatch-input-mouse-event-params.md
+ create mode 100644 docs/api/structures/dispatch-input-touch-event-params.md
+ create mode 100644 docs/api/structures/dispatch-input-touch-point.md
+ create mode 100644 spec/fixtures/api/dispatch-input-cross-frame-drag/main.js
+ create mode 100644 spec/fixtures/api/dispatch-input-cross-frame-drag/package.json
+ create mode 100644 spec/fixtures/api/dispatch-input-drag-hang/main.js
+ create mode 100644 spec/fixtures/api/dispatch-input-drag-hang/package.json
+
+diff --git a/docs/api/structures/dispatch-input-event-result.md b/docs/api/structures/dispatch-input-event-result.md
+new file mode 100644
+index 0000000000..93f4e3765c
+--- /dev/null
++++ b/docs/api/structures/dispatch-input-event-result.md
+@@ -0,0 +1,14 @@
++# DispatchInputEventResult Object
++
++* `inputEventId` string - Unique identifier assigned to this dispatch request.
++* `consumed` boolean - Whether Chromium reported that the input event was
++  consumed. For keyboard events this is the value callers should use to decide
++  whether a follow-up text insertion should be skipped.
++* `ackState` string - Raw Chromium input ACK state for diagnostics and advanced
++  routing decisions. Can be `consumed`, `not-consumed`, `no-consumer-exists`,
++  `ignored`, `set-non-blocking`, `set-non-blocking-due-to-fling`, or `unknown`.
++* `ackSource` string - Thread or component that produced the Chromium input ACK.
++  Can be `main-thread`, `compositor-thread`, `browser`, or `unknown`.
++* `frame` [WebFrameMain](../web-frame-main.md) (optional) - Frame that received
++  the input event, when Electron can map the target renderer widget back to a
++  frame.
+diff --git a/docs/api/structures/dispatch-input-ime-set-composition-event-params.md b/docs/api/structures/dispatch-input-ime-set-composition-event-params.md
+new file mode 100644
+index 0000000000..09d6b55aa8
+--- /dev/null
++++ b/docs/api/structures/dispatch-input-ime-set-composition-event-params.md
+@@ -0,0 +1,10 @@
++# DispatchInputImeSetCompositionEventParams Object
++
++* `kind` string - Can be `imeSetComposition`.
++* `text` string - Composition text to set in the focused editable element.
++* `selectionStart` Integer - Start offset of the composition selection.
++* `selectionEnd` Integer - End offset of the composition selection.
++* `replacementStart` Integer (optional) - Start offset of the replacement range.
++  Must be provided together with `replacementEnd`.
++* `replacementEnd` Integer (optional) - End offset of the replacement range.
++  Must be provided together with `replacementStart`.
+diff --git a/docs/api/structures/dispatch-input-insert-text-event-params.md b/docs/api/structures/dispatch-input-insert-text-event-params.md
+new file mode 100644
+index 0000000000..59a2a8ab75
+--- /dev/null
++++ b/docs/api/structures/dispatch-input-insert-text-event-params.md
+@@ -0,0 +1,4 @@
++# DispatchInputInsertTextEventParams Object
++
++* `kind` string - Can be `insertText`.
++* `text` string - Text to commit into the focused editable element.
+diff --git a/docs/api/structures/dispatch-input-key-event-params.md b/docs/api/structures/dispatch-input-key-event-params.md
+new file mode 100644
+index 0000000000..d3719f8d05
+--- /dev/null
++++ b/docs/api/structures/dispatch-input-key-event-params.md
+@@ -0,0 +1,26 @@
++# DispatchInputKeyEventParams Object
++
++* `kind` string - Can be `key`.
++* `type` string - Keyboard event phase to dispatch. Can be `rawKeyDown`,
++  `keyDown`, `keyUp`, or `char`.
++* `modifiers` Integer (optional) - Bit field of active modifiers using the
++  Chrome DevTools Protocol layout: Alt=1, Ctrl=2, Meta=4, Shift=8.
++* `timestamp` number (optional) - Event timestamp in seconds since the Unix
++  epoch. The current event time is used when omitted.
++* `text` string (optional) - Text generated by the key event, if any.
++* `unmodifiedText` string (optional) - Text generated by the key event without
++  modifier effects, if any.
++* `code` string (optional) - DOM `KeyboardEvent.code` value, for example `KeyA`
++  or `Enter`.
++* `key` string (optional) - DOM `KeyboardEvent.key` value, for example `a` or
++  `Enter`.
++* `windowsVirtualKeyCode` Integer (optional) - Windows virtual key code. When
++  omitted, Electron derives a best-effort value from `code` and `key`.
++* `nativeVirtualKeyCode` Integer (optional) - Native virtual key code. When
++  omitted, Electron uses the resolved Windows virtual key code.
++* `autoRepeat` boolean (optional) - Whether this key event is an auto-repeat
++  event.
++* `isKeypad` boolean (optional) - Whether this key event originated from the
++  numeric keypad.
++* `isSystemKey` boolean (optional) - Whether this is a system key event.
++* `location` Integer (optional) - DOM `KeyboardEvent.location` value.
+diff --git a/docs/api/structures/dispatch-input-mouse-event-params.md b/docs/api/structures/dispatch-input-mouse-event-params.md
+new file mode 100644
+index 0000000000..2c5ce8069a
+--- /dev/null
++++ b/docs/api/structures/dispatch-input-mouse-event-params.md
+@@ -0,0 +1,36 @@
++# DispatchInputMouseEventParams Object
++
++* `kind` string - Can be `mouse`.
++* `type` string - Mouse event phase to dispatch. Can be `mousePressed`,
++  `mouseReleased`, `mouseMoved`, or `mouseWheel`.
++* `x` number - X coordinate relative to the WebContents viewport in CSS pixels.
++* `y` number - Y coordinate relative to the WebContents viewport in CSS pixels.
++* `modifiers` Integer (optional) - Bit field of active modifiers using the
++  Chrome DevTools Protocol layout: Alt=1, Ctrl=2, Meta=4, Shift=8.
++* `timestamp` number (optional) - Event timestamp in seconds since the Unix
++  epoch. The current event time is used when omitted.
++* `button` string (optional) - Mouse button associated with this event. Can be
++  `none`, `left`, `middle`, `right`, `back`, or `forward`.
++* `buttons` Integer (optional) - Bit field of currently pressed mouse buttons:
++  Left=1, Right=2, Middle=4, Back=8, Forward=16.
++* `clickCount` Integer (optional) - Number of consecutive clicks represented by
++  this event.
++* `force` number (optional) - Pointer force in the range [0, 1].
++* `tangentialPressure` number (optional) - Tangential pointer pressure in the
++  range [-1, 1].
++* `tiltX` number (optional) - Pointer tilt on the X axis in degrees, in the
++  range [-90, 90].
++* `tiltY` number (optional) - Pointer tilt on the Y axis in degrees, in the
++  range [-90, 90].
++* `twist` Integer (optional) - Pointer twist in degrees, in the range [0, 359].
++* `deltaX` number (optional) - Horizontal wheel delta. Required when `type` is
++  `mouseWheel`.
++* `deltaY` number (optional) - Vertical wheel delta. Required when `type` is
++  `mouseWheel`.
++* `pointerType` string (optional) - Pointer device type used for the mouse event.
++  Can be `mouse` or `pen`.
++
++`mousePressed`, `mouseMoved`, and `mouseReleased` can be used as one trusted
++mouse sequence. If the page starts a renderer drag from that sequence, Chromium
++will finish the drag source when the release is dispatched, even when the drop
++target is in another frame.
+diff --git a/docs/api/structures/dispatch-input-touch-event-params.md b/docs/api/structures/dispatch-input-touch-event-params.md
+new file mode 100644
+index 0000000000..4ab9cafc32
+--- /dev/null
++++ b/docs/api/structures/dispatch-input-touch-event-params.md
+@@ -0,0 +1,11 @@
++# DispatchInputTouchEventParams Object
++
++* `kind` string - Can be `touch`.
++* `type` string - Touch event phase to dispatch. Can be `touchStart`,
++  `touchEnd`, `touchMove`, or `touchCancel`.
++* `touchPoints` [DispatchInputTouchPoint[]](dispatch-input-touch-point.md) (optional) -
++  Touch points participating in this request.
++* `modifiers` Integer (optional) - Bit field of active modifiers using the
++  Chrome DevTools Protocol layout: Alt=1, Ctrl=2, Meta=4, Shift=8.
++* `timestamp` number (optional) - Event timestamp in seconds since the Unix
++  epoch. The current event time is used when omitted.
+diff --git a/docs/api/structures/dispatch-input-touch-point.md b/docs/api/structures/dispatch-input-touch-point.md
+new file mode 100644
+index 0000000000..91f1581d72
+--- /dev/null
++++ b/docs/api/structures/dispatch-input-touch-point.md
+@@ -0,0 +1,17 @@
++# DispatchInputTouchPoint Object
++
++* `id` Integer (optional) - Stable touch point identifier. Either every touch
++  point in the request must provide an id, or none of them should.
++* `x` number - X coordinate relative to the WebContents viewport in CSS pixels.
++* `y` number - Y coordinate relative to the WebContents viewport in CSS pixels.
++* `radiusX` number (optional) - Horizontal radius of the touch contact area.
++* `radiusY` number (optional) - Vertical radius of the touch contact area.
++* `rotationAngle` number (optional) - Rotation angle of the touch contact area.
++* `force` number (optional) - Touch force in the range [0, 1].
++* `tangentialPressure` number (optional) - Tangential pointer pressure in the
++  range [-1, 1].
++* `tiltX` number (optional) - Pointer tilt on the X axis in degrees, in the
++  range [-90, 90].
++* `tiltY` number (optional) - Pointer tilt on the Y axis in degrees, in the
++  range [-90, 90].
++* `twist` Integer (optional) - Pointer twist in degrees, in the range [0, 359].
+diff --git a/docs/api/web-contents.md b/docs/api/web-contents.md
+index 7fec0a4908..6b5519d662 100644
+--- a/docs/api/web-contents.md
++++ b/docs/api/web-contents.md
+@@ -2220,6 +2220,25 @@ Sends an input `event` to the page.
+ > The [`BrowserWindow`](browser-window.md) containing the contents needs to be focused for
+ `sendInputEvent()` to work.
+
++#### `contents.dispatchInputEvent(inputEvent)`
++
++* `inputEvent` [DispatchInputKeyEventParams](structures/dispatch-input-key-event-params.md) | [DispatchInputMouseEventParams](structures/dispatch-input-mouse-event-params.md) | [DispatchInputTouchEventParams](structures/dispatch-input-touch-event-params.md) | [DispatchInputInsertTextEventParams](structures/dispatch-input-insert-text-event-params.md) | [DispatchInputImeSetCompositionEventParams](structures/dispatch-input-ime-set-composition-event-params.md)
++
++Returns `Promise<DispatchInputEventResult>` - resolves with Chromium input ACK
++details for the dispatched event. See
++[DispatchInputEventResult](structures/dispatch-input-event-result.md).
++
++Dispatches an input event to the page. Mouse and touch events are routed by
++coordinate hit testing, so they can target out-of-process child frames. Keyboard,
++text, and IME composition requests are routed to the currently focused frame.
++Mouse dispatches use Chromium's trusted input path and keep renderer-started
++drag sequences in sync, including drops that finish in a different frame from
++the drag source.
++
++The returned `consumed` value is based on Chromium's input ACK state. For
++keyboard events, this is the value callers should use to decide whether a
++follow-up text insertion should be skipped.
++
+ #### `contents.beginFrameSubscription([onlyDirty ,]callback)`
+
+ * `onlyDirty` boolean (optional) - Defaults to `false`.
+diff --git a/shell/browser/api/electron_api_web_contents.cc b/shell/browser/api/electron_api_web_contents.cc
+index 2aeda4af73..b1daae6b50 100644
+--- a/shell/browser/api/electron_api_web_contents.cc
++++ b/shell/browser/api/electron_api_web_contents.cc
+@@ -8,6 +8,7 @@
+ #include <cstdlib>
+ #include <limits>
+ #include <list>
++#include <map>
+ #include <memory>
+ #include <optional>
+ #include <set>
+@@ -18,18 +19,24 @@
+
+ #include "base/base64.h"
+ #include "base/containers/fixed_flat_map.h"
++#include "base/containers/flat_map.h"
+ #include "base/containers/flat_set.h"
+ #include "base/containers/id_map.h"
+ #include "base/containers/map_util.h"
+ #include "base/files/file_util.h"
+ #include "base/json/json_reader.h"
++#include "base/json/json_writer.h"
+ #include "base/no_destructor.h"
+ #include "base/strings/strcat.h"
+ #include "base/strings/string_number_conversions.h"
++#include "base/strings/stringprintf.h"
+ #include "base/strings/utf_string_conversions.h"
+ #include "base/task/current_thread.h"
++#include "base/task/single_thread_task_runner.h"
+ #include "base/threading/scoped_blocking_call.h"
++#include "base/types/expected.h"
+ #include "base/unguessable_token.h"
++#include "base/uuid.h"
+ #include "base/values.h"
+ #include "chrome/browser/browser_process.h"
+ #include "chrome/browser/devtools/devtools_eye_dropper.h"
+@@ -38,11 +45,13 @@
+ #include "chrome/browser/ui/views/eye_dropper/eye_dropper.h"
+ #include "chrome/common/pref_names.h"
+ #include "components/input/native_web_keyboard_event.h"
++#include "components/input/render_widget_host_input_event_router.h"
+ #include "components/prefs/pref_service.h"
+ #include "components/prefs/scoped_user_pref_update.h"
+ #include "components/security_state/content/content_utils.h"
+ #include "components/security_state/core/security_state.h"
+ #include "content/browser/renderer_host/frame_tree_node.h"  // nogncheck
++#include "content/browser/renderer_host/input/touch_emulator_impl.h"  // nogncheck
+ #include "content/browser/renderer_host/navigation_controller_impl.h"  // nogncheck
+ #include "content/browser/renderer_host/render_frame_host_manager.h"  // nogncheck
+ #include "content/browser/renderer_host/render_widget_host_impl.h"  // nogncheck
+@@ -54,6 +63,7 @@
+ #include "content/public/browser/desktop_media_id.h"
+ #include "content/public/browser/desktop_streams_registry.h"
+ #include "content/public/browser/devtools_agent_host.h"
++#include "content/public/browser/devtools_agent_host_client.h"
+ #include "content/public/browser/download_request_utils.h"
+ #include "content/public/browser/favicon_status.h"
+ #include "content/public/browser/file_select_listener.h"
+@@ -160,6 +170,8 @@
+ #include "third_party/blink/public/mojom/devtools/console_message.mojom.h"
+ #include "third_party/blink/public/mojom/frame/find_in_page.mojom.h"
+ #include "third_party/blink/public/mojom/frame/fullscreen.mojom.h"
++#include "third_party/blink/public/mojom/input/input_event_result.mojom.h"
++#include "third_party/blink/public/mojom/input/input_handler.mojom.h"
+ #include "third_party/blink/public/mojom/messaging/transferable_message.mojom.h"
+ #include "third_party/blink/public/mojom/renderer_preferences.mojom.h"
+ #include "ui/base/cursor/cursor.h"
+@@ -169,7 +181,13 @@
+ #include "ui/base/ime/text_input_type.h"
+ #include "ui/display/screen.h"
+ #include "ui/events/base_event_utils.h"
++#include "ui/events/blink/web_input_event_traits.h"
++#include "ui/events/gesture_detection/gesture_provider_config_helper.h"
++#include "ui/events/keycodes/dom/keycode_converter.h"
++#include "ui/events/keycodes/keyboard_code_conversion.h"
++#include "ui/gfx/range/range.h"
+ #include "ui/gfx/selection_bound.h"
++#include "ui/latency/latency_info.h"
+
+ #if BUILDFLAG(IS_MAC)
+ #include "ui/base/cocoa/defaults_utils.h"
+@@ -661,6 +679,1203 @@ std::optional<base::TimeDelta> GetCursorBlinkInterval() {
+   return std::nullopt;
+ }
+
++gfx::PointF CssPixelsToPointF(double x, double y, float scale_factor) {
++  return gfx::PointF(x * scale_factor, y * scale_factor);
++}
++
++gfx::PointF ConvertWidgetPointToScreenPoint(
++    content::RenderWidgetHostViewBase& view,
++    const gfx::PointF& point_in_widget) {
++  return point_in_widget + view.GetViewBounds().OffsetFromOrigin();
++}
++
++base::TimeTicks GetDispatchInputEventTimeTicks(
++    const std::optional<double>& timestamp) {
++  return timestamp.has_value()
++             ? base::Seconds(timestamp.value()) + base::TimeTicks::UnixEpoch()
++             : ui::EventTimeForNow();
++}
++
++int GetDispatchInputEventModifiers(int modifiers,
++                                   bool auto_repeat,
++                                   bool is_keypad,
++                                   int location,
++                                   int buttons) {
++  int result = blink::WebInputEvent::kFromDebugger;
++  if (auto_repeat)
++    result |= blink::WebInputEvent::kIsAutoRepeat;
++  if (is_keypad)
++    result |= blink::WebInputEvent::kIsKeyPad;
++
++  if (modifiers & 1)
++    result |= blink::WebInputEvent::kAltKey;
++  if (modifiers & 2)
++    result |= blink::WebInputEvent::kControlKey;
++  if (modifiers & 4)
++    result |= blink::WebInputEvent::kMetaKey;
++  if (modifiers & 8)
++    result |= blink::WebInputEvent::kShiftKey;
++
++  if (location & 1)
++    result |= blink::WebInputEvent::kIsLeft;
++  if (location & 2)
++    result |= blink::WebInputEvent::kIsRight;
++
++  if (buttons & 1)
++    result |= blink::WebMouseEvent::kLeftButtonDown;
++  if (buttons & 2)
++    result |= blink::WebInputEvent::kRightButtonDown;
++  if (buttons & 4)
++    result |= blink::WebInputEvent::kMiddleButtonDown;
++  if (buttons & 8)
++    result |= blink::WebInputEvent::kBackButtonDown;
++  if (buttons & 16)
++    result |= blink::WebInputEvent::kForwardButtonDown;
++  return result;
++}
++
++bool SetKeyboardEventText(
++    base::span<char16_t, blink::WebKeyboardEvent::kTextLengthCap> to,
++    const std::optional<std::string>& from) {
++  if (!from.has_value())
++    return true;
++
++  std::u16string text16 = base::UTF8ToUTF16(from.value());
++  if (text16.size() >= to.size())
++    return false;
++
++  std::ranges::fill(to, 0);
++  for (size_t i = 0; i < text16.size(); ++i)
++    to[i] = text16[i];
++  return true;
++}
++
++ui::KeyboardCode InferWindowsVirtualKeyCode(ui::DomCode dom_code,
++                                            ui::DomKey dom_key) {
++  if (dom_code != ui::DomCode::NONE) {
++    ui::KeyboardCode code = ui::DomCodeToUsLayoutKeyboardCode(dom_code);
++    if (code != ui::VKEY_UNKNOWN)
++      return code;
++  }
++
++  if (dom_key != ui::DomKey::NONE) {
++    ui::KeyboardCode code = ui::NonPrintableDomKeyToKeyboardCode(dom_key);
++    if (code != ui::VKEY_UNKNOWN)
++      return code;
++  }
++
++  return ui::VKEY_UNKNOWN;
++}
++
++blink::WebInputEvent::Type GetDispatchKeyEventType(const std::string& type) {
++  if (type == "keyDown")
++    return blink::WebInputEvent::Type::kKeyDown;
++  if (type == "keyUp")
++    return blink::WebInputEvent::Type::kKeyUp;
++  if (type == "char")
++    return blink::WebInputEvent::Type::kChar;
++  if (type == "rawKeyDown")
++    return blink::WebInputEvent::Type::kRawKeyDown;
++  return blink::WebInputEvent::Type::kUndefined;
++}
++
++base::expected<input::NativeWebKeyboardEvent, std::string>
++CreateDispatchKeyEvent(const gin_helper::Dictionary& dict) {
++  std::string type;
++  if (!dict.Get("type", &type))
++    return base::unexpected("Missing required option 'type'");
++
++  blink::WebInputEvent::Type web_event_type = GetDispatchKeyEventType(type);
++  if (web_event_type == blink::WebInputEvent::Type::kUndefined)
++    return base::unexpected(
++        base::StringPrintf("Unexpected key event type '%s'", type.c_str()));
++
++  int modifiers = 0;
++  dict.Get("modifiers", &modifiers);
++  bool auto_repeat = false;
++  dict.Get("autoRepeat", &auto_repeat);
++  bool is_keypad = false;
++  dict.Get("isKeypad", &is_keypad);
++  int location = 0;
++  dict.Get("location", &location);
++  std::optional<double> timestamp;
++  double timestamp_value = 0;
++  if (dict.Get("timestamp", &timestamp_value))
++    timestamp = timestamp_value;
++
++  input::NativeWebKeyboardEvent event(
++      web_event_type,
++      GetDispatchInputEventModifiers(modifiers, auto_repeat, is_keypad,
++                                     location, 0),
++      GetDispatchInputEventTimeTicks(timestamp));
++
++  std::optional<std::string> text;
++  std::string text_value;
++  if (dict.Get("text", &text_value))
++    text = text_value;
++  if (!SetKeyboardEventText(event.text, text))
++    return base::unexpected("Invalid 'text' parameter");
++
++  std::optional<std::string> unmodified_text;
++  std::string unmodified_text_value;
++  if (dict.Get("unmodifiedText", &unmodified_text_value))
++    unmodified_text = unmodified_text_value;
++  if (!SetKeyboardEventText(event.unmodified_text, unmodified_text))
++    return base::unexpected("Invalid 'unmodifiedText' parameter");
++
++  ui::DomCode dom_code = ui::DomCode::NONE;
++  std::string code;
++  if (dict.Get("code", &code)) {
++    dom_code = ui::KeycodeConverter::CodeStringToDomCode(code);
++    event.dom_code = static_cast<int>(dom_code);
++  }
++
++  ui::DomKey dom_key = ui::DomKey::NONE;
++  std::string key;
++  if (dict.Get("key", &key)) {
++    dom_key = ui::KeycodeConverter::KeyStringToDomKey(key);
++    event.dom_key = static_cast<int>(dom_key);
++  }
++
++  int windows_virtual_key_code = 0;
++  if (dict.Get("windowsVirtualKeyCode", &windows_virtual_key_code)) {
++    event.windows_key_code = windows_virtual_key_code;
++  } else {
++    event.windows_key_code = InferWindowsVirtualKeyCode(dom_code, dom_key);
++  }
++
++  int native_virtual_key_code = 0;
++  if (dict.Get("nativeVirtualKeyCode", &native_virtual_key_code)) {
++    event.native_key_code = native_virtual_key_code;
++  } else {
++    event.native_key_code = event.windows_key_code;
++  }
++
++  bool is_system_key = false;
++  if (dict.Get("isSystemKey", &is_system_key))
++    event.is_system_key = is_system_key;
++
++  return event;
++}
++
++blink::WebInputEvent::Type GetDispatchMouseEventType(const std::string& type) {
++  if (type == "mousePressed")
++    return blink::WebInputEvent::Type::kMouseDown;
++  if (type == "mouseReleased")
++    return blink::WebInputEvent::Type::kMouseUp;
++  if (type == "mouseMoved")
++    return blink::WebInputEvent::Type::kMouseMove;
++  if (type == "mouseWheel")
++    return blink::WebInputEvent::Type::kMouseWheel;
++  return blink::WebInputEvent::Type::kUndefined;
++}
++
++bool GetDispatchMouseButton(const std::string& button,
++                            blink::WebPointerProperties::Button* event_button,
++                            int* event_modifiers) {
++  *event_modifiers = blink::WebInputEvent::kFromDebugger;
++  if (button.empty())
++    return true;
++
++  if (button == "none") {
++    *event_button = blink::WebMouseEvent::Button::kNoButton;
++  } else if (button == "left") {
++    *event_button = blink::WebMouseEvent::Button::kLeft;
++    *event_modifiers |= blink::WebInputEvent::kLeftButtonDown;
++  } else if (button == "middle") {
++    *event_button = blink::WebMouseEvent::Button::kMiddle;
++    *event_modifiers |= blink::WebInputEvent::kMiddleButtonDown;
++  } else if (button == "right") {
++    *event_button = blink::WebMouseEvent::Button::kRight;
++    *event_modifiers |= blink::WebInputEvent::kRightButtonDown;
++  } else if (button == "back") {
++    *event_button = blink::WebMouseEvent::Button::kBack;
++    *event_modifiers |= blink::WebInputEvent::kBackButtonDown;
++  } else if (button == "forward") {
++    *event_button = blink::WebMouseEvent::Button::kForward;
++    *event_modifiers |= blink::WebInputEvent::kForwardButtonDown;
++  } else {
++    return false;
++  }
++  return true;
++}
++
++blink::WebPointerProperties::PointerType GetDispatchPointerType(
++    const std::string& pointer_type) {
++  if (pointer_type == "pen")
++    return blink::WebPointerProperties::PointerType::kPen;
++  return blink::WebPointerProperties::PointerType::kMouse;
++}
++
++std::string ValidatePointerEventProperties(double force,
++                                           double tangential_pressure,
++                                           double tilt_x,
++                                           double tilt_y,
++                                           int twist) {
++  if (force < 0.0 || force > 1.0)
++    return "'force' should be in the range of [0,1]";
++  if (tangential_pressure < -1.0 || tangential_pressure > 1.0)
++    return "'tangentialPressure' should be in the range of [-1,1]";
++  if (tilt_x < -90.0 || tilt_x > 90.0)
++    return "'tiltX' should be in the range of [-90,90]";
++  if (tilt_y < -90.0 || tilt_y > 90.0)
++    return "'tiltY' should be in the range of [-90,90]";
++  if (twist < 0 || twist > 359)
++    return "'twist' should be in the range of [0,359]";
++  return "";
++}
++
++base::expected<std::unique_ptr<blink::WebMouseEvent>, std::string>
++CreateDispatchMouseEvent(const gin_helper::Dictionary& dict,
++                         float scale_factor) {
++  std::string event_type;
++  if (!dict.Get("type", &event_type))
++    return base::unexpected("Missing required option 'type'");
++
++  blink::WebInputEvent::Type type = GetDispatchMouseEventType(event_type);
++  if (type == blink::WebInputEvent::Type::kUndefined) {
++    return base::unexpected(base::StringPrintf(
++        "Unexpected mouse event type '%s'", event_type.c_str()));
++  }
++
++  double x = 0;
++  double y = 0;
++  if (!dict.Get("x", &x) || !dict.Get("y", &y))
++    return base::unexpected("Mouse input events require 'x' and 'y'");
++
++  blink::WebPointerProperties::Button event_button =
++      blink::WebPointerProperties::Button::kNoButton;
++  int button_modifiers = 0;
++  std::string button;
++  dict.Get("button", &button);
++  if (!GetDispatchMouseButton(button, &event_button, &button_modifiers))
++    return base::unexpected("Invalid mouse button");
++
++  int modifiers = 0;
++  dict.Get("modifiers", &modifiers);
++  int buttons = 0;
++  dict.Get("buttons", &buttons);
++  int event_modifiers =
++      GetDispatchInputEventModifiers(modifiers, false, false, 0, buttons) |
++      button_modifiers;
++
++  std::optional<double> timestamp;
++  double timestamp_value = 0;
++  if (dict.Get("timestamp", &timestamp_value))
++    timestamp = timestamp_value;
++  base::TimeTicks event_timestamp = GetDispatchInputEventTimeTicks(timestamp);
++
++  std::unique_ptr<blink::WebMouseEvent> mouse_event;
++  if (type == blink::WebInputEvent::Type::kMouseWheel) {
++    auto wheel_event = std::make_unique<blink::WebMouseWheelEvent>(
++        type, event_modifiers, event_timestamp);
++    double delta_x = 0;
++    double delta_y = 0;
++    if (!dict.Get("deltaX", &delta_x) || !dict.Get("deltaY", &delta_y))
++      return base::unexpected(
++          "'deltaX' and 'deltaY' are required for mouseWheel events");
++
++    wheel_event->delta_x = static_cast<float>(-delta_x);
++    wheel_event->delta_y = static_cast<float>(-delta_y);
++    if (wheel_event->delta_x != 0.0f)
++      wheel_event->wheel_ticks_x = wheel_event->delta_x > 0.0f ? 1.0f : -1.0f;
++    if (wheel_event->delta_y != 0.0f)
++      wheel_event->wheel_ticks_y = wheel_event->delta_y > 0.0f ? 1.0f : -1.0f;
++    wheel_event->phase = blink::WebMouseWheelEvent::kPhaseBegan;
++    wheel_event->delta_units = ui::ScrollGranularity::kScrollByPrecisePixel;
++    wheel_event->dispatch_type = blink::WebInputEvent::DispatchType::kBlocking;
++    mouse_event = std::move(wheel_event);
++  } else {
++    mouse_event = std::make_unique<blink::WebMouseEvent>(type, event_modifiers,
++                                                         event_timestamp);
++  }
++
++  int click_count = 0;
++  dict.Get("clickCount", &click_count);
++  double force = 0;
++  dict.Get("force", &force);
++  double tangential_pressure = 0;
++  dict.Get("tangentialPressure", &tangential_pressure);
++  double tilt_x = 0;
++  dict.Get("tiltX", &tilt_x);
++  double tilt_y = 0;
++  dict.Get("tiltY", &tilt_y);
++  int twist = 0;
++  dict.Get("twist", &twist);
++
++  std::string validation_error = ValidatePointerEventProperties(
++      force, tangential_pressure, tilt_x, tilt_y, twist);
++  if (!validation_error.empty())
++    return base::unexpected(validation_error);
++
++  std::string pointer_type;
++  dict.Get("pointerType", &pointer_type);
++  mouse_event->button = event_button;
++  mouse_event->click_count = click_count;
++  mouse_event->pointer_type = GetDispatchPointerType(pointer_type);
++  mouse_event->force = force;
++  mouse_event->tangential_pressure = tangential_pressure;
++  mouse_event->tilt_x = tilt_x;
++  mouse_event->tilt_y = tilt_y;
++  mouse_event->twist = twist;
++  mouse_event->SetPositionInWidget(CssPixelsToPointF(x, y, scale_factor));
++  mouse_event->SetPositionInScreen(mouse_event->PositionInWidget());
++
++  return mouse_event;
++}
++
++blink::WebInputEvent::Type GetDispatchTouchEventType(const std::string& type) {
++  if (type == "touchStart")
++    return blink::WebInputEvent::Type::kTouchStart;
++  if (type == "touchEnd")
++    return blink::WebInputEvent::Type::kTouchEnd;
++  if (type == "touchMove")
++    return blink::WebInputEvent::Type::kTouchMove;
++  if (type == "touchCancel")
++    return blink::WebInputEvent::Type::kTouchCancel;
++  return blink::WebInputEvent::Type::kUndefined;
++}
++
++bool GenerateDispatchTouchPoints(
++    blink::WebTouchEvent* event,
++    blink::WebInputEvent::Type type,
++    const base::flat_map<int, blink::WebTouchPoint>& points,
++    const blink::WebTouchPoint& changing) {
++  event->touches_length = 1;
++  event->touches[0] = changing;
++  for (const auto& it : points) {
++    if (it.first == changing.id)
++      continue;
++    if (event->touches_length == blink::WebTouchEvent::kTouchesLengthCap)
++      return false;
++    event->touches[event->touches_length] = it.second;
++    event->touches[event->touches_length].state =
++        type == blink::WebInputEvent::Type::kTouchCancel
++            ? blink::WebTouchPoint::State::kStateCancelled
++            : blink::WebTouchPoint::State::kStateStationary;
++    event->touches_length++;
++  }
++
++  if (type == blink::WebInputEvent::Type::kTouchCancel ||
++      type == blink::WebInputEvent::Type::kTouchEnd) {
++    event->touches[0].state = type == blink::WebInputEvent::Type::kTouchCancel
++                                  ? blink::WebTouchPoint::State::kStateCancelled
++                                  : blink::WebTouchPoint::State::kStateReleased;
++    event->SetType(type);
++  } else if (!points.contains(changing.id)) {
++    event->touches[0].state = blink::WebTouchPoint::State::kStatePressed;
++    event->SetType(blink::WebInputEvent::Type::kTouchStart);
++  } else {
++    event->touches[0].state = blink::WebTouchPoint::State::kStateMoved;
++    event->SetType(blink::WebInputEvent::Type::kTouchMove);
++  }
++  return true;
++}
++
++using DispatchTouchPointMap = base::flat_map<int, blink::WebTouchPoint>;
++
++base::flat_map<WebContents*, DispatchTouchPointMap>&
++GetDispatchInputTouchPoints() {
++  static base::NoDestructor<base::flat_map<WebContents*, DispatchTouchPointMap>>
++      touch_points;
++  return *touch_points;
++}
++
++void ClearDispatchInputTouchPoints(WebContents* contents) {
++  GetDispatchInputTouchPoints().erase(contents);
++}
++
++base::expected<std::vector<blink::WebTouchEvent>, std::string>
++CreateDispatchTouchEvents(WebContents* contents,
++                          const gin_helper::Dictionary& dict,
++                          float scale_factor) {
++  std::string event_type;
++  if (!dict.Get("type", &event_type))
++    return base::unexpected("Missing required option 'type'");
++
++  blink::WebInputEvent::Type type = GetDispatchTouchEventType(event_type);
++  if (type == blink::WebInputEvent::Type::kUndefined) {
++    return base::unexpected(base::StringPrintf(
++        "Unexpected touch event type '%s'", event_type.c_str()));
++  }
++
++  std::vector<gin_helper::Dictionary> touch_points;
++  dict.Get("touchPoints", &touch_points);
++  if ((type == blink::WebInputEvent::Type::kTouchStart ||
++       type == blink::WebInputEvent::Type::kTouchMove) &&
++      touch_points.empty()) {
++    return base::unexpected(
++        "touchStart and touchMove require at least one touch point");
++  }
++  if (type == blink::WebInputEvent::Type::kTouchCancel &&
++      !touch_points.empty()) {
++    return base::unexpected("touchCancel must not include touch points");
++  }
++
++  DispatchTouchPointMap& current_points =
++      GetDispatchInputTouchPoints()[contents];
++  if (type != blink::WebInputEvent::Type::kTouchStart &&
++      current_points.empty()) {
++    return base::unexpected(
++        "Must send touchStart before touchMove/touchEnd/touchCancel");
++  }
++
++  int modifiers = 0;
++  dict.Get("modifiers", &modifiers);
++  std::optional<double> timestamp;
++  double timestamp_value = 0;
++  if (dict.Get("timestamp", &timestamp_value))
++    timestamp = timestamp_value;
++  const int event_modifiers =
++      GetDispatchInputEventModifiers(modifiers, false, false, 0, 0);
++  const base::TimeTicks event_timestamp =
++      GetDispatchInputEventTimeTicks(timestamp);
++
++  DispatchTouchPointMap incoming_points;
++  size_t with_id = 0;
++  for (size_t i = 0; i < touch_points.size(); ++i) {
++    gin_helper::Dictionary point = touch_points[i];
++    int id = static_cast<int>(i);
++    if (point.Get("id", &id))
++      with_id++;
++
++    double x = 0;
++    double y = 0;
++    if (!point.Get("x", &x) || !point.Get("y", &y))
++      return base::unexpected("Touch points require 'x' and 'y'");
++
++    double radius_x = 1.0;
++    point.Get("radiusX", &radius_x);
++    double radius_y = 1.0;
++    point.Get("radiusY", &radius_y);
++    double rotation_angle = 0.0;
++    point.Get("rotationAngle", &rotation_angle);
++    double force = 1.0;
++    point.Get("force", &force);
++    double tangential_pressure = 0.0;
++    point.Get("tangentialPressure", &tangential_pressure);
++    double tilt_x = 0.0;
++    point.Get("tiltX", &tilt_x);
++    double tilt_y = 0.0;
++    point.Get("tiltY", &tilt_y);
++    int twist = 0;
++    point.Get("twist", &twist);
++
++    std::string validation_error = ValidatePointerEventProperties(
++        force, tangential_pressure, tilt_x, tilt_y, twist);
++    if (!validation_error.empty())
++      return base::unexpected(validation_error);
++
++    blink::WebTouchPoint web_point;
++    web_point.id = id;
++    web_point.radius_x = radius_x;
++    web_point.radius_y = radius_y;
++    web_point.rotation_angle = rotation_angle;
++    web_point.force = force;
++    web_point.pointer_type = blink::WebPointerProperties::PointerType::kTouch;
++    web_point.SetPositionInWidget(CssPixelsToPointF(x, y, scale_factor));
++    web_point.SetPositionInScreen(web_point.PositionInWidget());
++    web_point.tilt_x = tilt_x;
++    web_point.tilt_y = tilt_y;
++    web_point.tangential_pressure = tangential_pressure;
++    web_point.twist = twist;
++    incoming_points[id] = web_point;
++  }
++
++  if (with_id > 0 && with_id < touch_points.size()) {
++    return base::unexpected(
++        "All or none of the provided touch points must supply ids");
++  }
++
++  std::vector<blink::WebTouchEvent> events;
++  bool ok = true;
++  for (auto& id_point : incoming_points) {
++    if (current_points.contains(id_point.first) &&
++        type == blink::WebInputEvent::Type::kTouchMove &&
++        current_points[id_point.first].PositionInWidget() ==
++            id_point.second.PositionInWidget()) {
++      continue;
++    }
++
++    events.emplace_back(type, event_modifiers, event_timestamp);
++    ok &= GenerateDispatchTouchPoints(&events.back(), type, current_points,
++                                      id_point.second);
++    if (type == blink::WebInputEvent::Type::kTouchStart ||
++        type == blink::WebInputEvent::Type::kTouchMove) {
++      current_points[id_point.first] = id_point.second;
++    } else if (type == blink::WebInputEvent::Type::kTouchEnd) {
++      current_points.erase(id_point.first);
++    }
++  }
++
++  if (touch_points.empty() && !current_points.empty()) {
++    if (type == blink::WebInputEvent::Type::kTouchCancel) {
++      events.emplace_back(type, event_modifiers, event_timestamp);
++      ok &= GenerateDispatchTouchPoints(&events.back(), type, current_points,
++                                        current_points.begin()->second);
++      current_points.clear();
++    } else if (type == blink::WebInputEvent::Type::kTouchEnd) {
++      for (auto it = current_points.begin(); it != current_points.end();) {
++        events.emplace_back(type, event_modifiers, event_timestamp);
++        ok &= GenerateDispatchTouchPoints(&events.back(), type, current_points,
++                                          it->second);
++        it = current_points.erase(it);
++      }
++    }
++  }
++
++  if (!ok) {
++    return base::unexpected(
++        base::StringPrintf("Exceeded maximum touch points limit of %d",
++                           blink::WebTouchEvent::kTouchesLengthCap));
++  }
++
++  return events;
++}
++
++const char* InputAckStateToString(blink::mojom::InputEventResultState state) {
++  switch (state) {
++    case blink::mojom::InputEventResultState::kConsumed:
++      return "consumed";
++    case blink::mojom::InputEventResultState::kNotConsumed:
++      return "not-consumed";
++    case blink::mojom::InputEventResultState::kNoConsumerExists:
++      return "no-consumer-exists";
++    case blink::mojom::InputEventResultState::kIgnored:
++      return "ignored";
++    case blink::mojom::InputEventResultState::kSetNonBlocking:
++      return "set-non-blocking";
++    case blink::mojom::InputEventResultState::kSetNonBlockingDueToFling:
++      return "set-non-blocking-due-to-fling";
++    case blink::mojom::InputEventResultState::kUnknown:
++      return "unknown";
++  }
++}
++
++const char* InputAckSourceToString(
++    blink::mojom::InputEventResultSource source) {
++  switch (source) {
++    case blink::mojom::InputEventResultSource::kMainThread:
++      return "main-thread";
++    case blink::mojom::InputEventResultSource::kCompositorThread:
++      return "compositor-thread";
++    case blink::mojom::InputEventResultSource::kBrowser:
++      return "browser";
++    case blink::mojom::InputEventResultSource::kUnknown:
++      return "unknown";
++  }
++}
++
++bool InputAckStateIsConsumed(blink::mojom::InputEventResultState state) {
++  return state == blink::mojom::InputEventResultState::kConsumed ||
++         state == blink::mojom::InputEventResultState::kSetNonBlocking ||
++         state ==
++             blink::mojom::InputEventResultState::kSetNonBlockingDueToFling;
++}
++
++content::RenderFrameHost* FindFrameForRenderWidgetHost(
++    content::WebContents* web_contents,
++    content::RenderWidgetHost* widget_host) {
++  if (!web_contents || !widget_host)
++    return nullptr;
++
++  content::RenderFrameHost* result = nullptr;
++  web_contents->ForEachRenderFrameHost([&](content::RenderFrameHost* rfh) {
++    if (!result && rfh->GetRenderWidgetHost() == widget_host)
++      result = rfh;
++  });
++  return result;
++}
++
++float GetDispatchInputScaleFactor(content::WebContents* web_contents) {
++  if (!web_contents || !web_contents->GetPrimaryMainFrame())
++    return 1.0f;
++
++  auto* web_contents_impl =
++      static_cast<content::WebContentsImpl*>(web_contents);
++  auto* widget_host_for_zoom = content::RenderWidgetHostImpl::From(
++      web_contents->GetPrimaryMainFrame()->GetRenderWidgetHost());
++  float scale_factor = blink::ZoomLevelToZoomFactor(
++      web_contents_impl->GetPendingZoomLevel(widget_host_for_zoom));
++  scale_factor *= web_contents_impl->GetPrimaryPage().GetPageScaleFactor();
++  return scale_factor;
++}
++
++content::RenderWidgetHostImpl* GetFocusedRenderWidgetHost(
++    content::WebContents* web_contents) {
++  if (auto* focused_frame = web_contents->GetFocusedFrame()) {
++    if (auto* focused_widget = content::RenderWidgetHostImpl::From(
++            focused_frame->GetRenderWidgetHost())) {
++      return focused_widget;
++    }
++  }
++
++  auto* main_frame = web_contents->GetPrimaryMainFrame();
++  if (!main_frame)
++    return nullptr;
++  auto* widget_host =
++      content::RenderWidgetHostImpl::From(main_frame->GetRenderWidgetHost());
++  if (!widget_host)
++    return nullptr;
++  if (widget_host->delegate()) {
++    if (auto* target_host =
++            widget_host->delegate()->GetFocusedRenderWidgetHost(widget_host)) {
++      widget_host = target_host;
++    }
++  }
++  return widget_host;
++}
++
++class DispatchInputDevToolsClient : public base::SupportsUserData::Data,
++                                    public content::DevToolsAgentHostClient,
++                                    public content::WebContentsObserver {
++ public:
++  using CommandCallback =
++      base::OnceCallback<void(std::optional<std::string> error_message)>;
++
++  explicit DispatchInputDevToolsClient(content::WebContents* web_contents)
++      : content::WebContentsObserver(web_contents),
++        web_contents_(web_contents) {}
++
++  DispatchInputDevToolsClient(const DispatchInputDevToolsClient&) = delete;
++  DispatchInputDevToolsClient& operator=(const DispatchInputDevToolsClient&) =
++      delete;
++
++  ~DispatchInputDevToolsClient() override {
++    if (agent_host_)
++      agent_host_->DetachClient(this);
++  }
++
++  void SendCommand(std::string method,
++                   base::DictValue params,
++                   CommandCallback callback) {
++    if (!EnsureAttached()) {
++      std::move(callback).Run("No target available");
++      return;
++    }
++
++    base::DictValue request;
++    int request_id = ++previous_request_id_;
++    pending_requests_.emplace(request_id, std::move(callback));
++    request.Set("id", request_id);
++    request.Set("method", std::move(method));
++    request.Set("params", std::move(params));
++
++    std::string json_args = base::WriteJson(request).value_or("");
++    agent_host_->DispatchProtocolMessage(this, base::as_byte_span(json_args));
++  }
++
++  void DispatchProtocolMessage(content::DevToolsAgentHost* agent_host,
++                               base::span<const uint8_t> message) override {
++    DCHECK(agent_host == agent_host_);
++
++    std::optional<base::Value> parsed_message = base::JSONReader::Read(
++        base::as_string_view(message), base::JSON_REPLACE_INVALID_CHARACTERS);
++    if (!parsed_message || !parsed_message->is_dict())
++      return;
++
++    base::DictValue& dict = parsed_message->GetDict();
++    std::optional<int> id = dict.FindInt("id");
++    if (!id)
++      return;
++
++    auto it = pending_requests_.find(*id);
++    if (it == pending_requests_.end())
++      return;
++
++    CommandCallback callback = std::move(it->second);
++    pending_requests_.erase(it);
++
++    base::DictValue* error = dict.FindDict("error");
++    if (error) {
++      std::string* error_message = error->FindString("message");
++      std::move(callback).Run(error_message
++                                  ? std::optional<std::string>(*error_message)
++                                  : std::optional<std::string>(""));
++      return;
++    }
++
++    std::move(callback).Run(std::nullopt);
++  }
++
++  void AgentHostClosed(content::DevToolsAgentHost* agent_host) override {
++    DCHECK(agent_host == agent_host_);
++    agent_host_ = nullptr;
++    for (auto& it : pending_requests_)
++      std::move(it.second).Run("target closed while handling command");
++    pending_requests_.clear();
++  }
++
++  void RenderFrameHostChanged(content::RenderFrameHost* old_rfh,
++                              content::RenderFrameHost* new_rfh) override {
++    if (agent_host_ && new_rfh && new_rfh->IsInPrimaryMainFrame()) {
++      agent_host_->DisconnectWebContents();
++      agent_host_->ConnectWebContents(web_contents_);
++    }
++  }
++
++ private:
++  bool EnsureAttached() {
++    if (agent_host_)
++      return true;
++
++    agent_host_ = content::DevToolsAgentHost::GetOrCreateFor(web_contents_);
++    if (!agent_host_)
++      return false;
++
++    if (!agent_host_->AttachClient(this)) {
++      agent_host_ = nullptr;
++      return false;
++    }
++
++    return true;
++  }
++
++  raw_ptr<content::WebContents> web_contents_;
++  scoped_refptr<content::DevToolsAgentHost> agent_host_;
++  int previous_request_id_ = 0;
++  std::map<int, CommandCallback> pending_requests_;
++};
++
++const void* kDispatchInputDevToolsClientKey = &kDispatchInputDevToolsClientKey;
++
++DispatchInputDevToolsClient* GetDispatchInputDevToolsClient(
++    content::WebContents* web_contents) {
++  auto* client = static_cast<DispatchInputDevToolsClient*>(
++      web_contents->GetUserData(kDispatchInputDevToolsClientKey));
++  if (client)
++    return client;
++
++  auto owned_client =
++      std::make_unique<DispatchInputDevToolsClient>(web_contents);
++  client = owned_client.get();
++  web_contents->SetUserData(kDispatchInputDevToolsClientKey,
++                            std::move(owned_client));
++  return client;
++}
++
++double TimeTicksToDevToolsTimestamp(base::TimeTicks timestamp) {
++  return (timestamp - base::TimeTicks::UnixEpoch()).InSecondsF();
++}
++
++base::DictValue CreateDevToolsMouseEventParams(
++    const gin_helper::Dictionary& dict,
++    const blink::WebMouseEvent& event) {
++  base::DictValue params;
++
++  std::string type;
++  dict.Get("type", &type);
++  params.Set("type", type);
++
++  double x = 0;
++  double y = 0;
++  dict.Get("x", &x);
++  dict.Get("y", &y);
++  params.Set("x", x);
++  params.Set("y", y);
++  params.Set("timestamp", TimeTicksToDevToolsTimestamp(event.TimeStamp()));
++
++  int modifiers = 0;
++  if (dict.Get("modifiers", &modifiers))
++    params.Set("modifiers", modifiers);
++
++  std::string button;
++  if (dict.Get("button", &button))
++    params.Set("button", button);
++
++  int buttons = 0;
++  if (dict.Get("buttons", &buttons))
++    params.Set("buttons", buttons);
++
++  int click_count = 0;
++  if (dict.Get("clickCount", &click_count))
++    params.Set("clickCount", click_count);
++
++  double force = 0;
++  if (dict.Get("force", &force))
++    params.Set("force", force);
++
++  double tangential_pressure = 0;
++  if (dict.Get("tangentialPressure", &tangential_pressure))
++    params.Set("tangentialPressure", tangential_pressure);
++
++  double tilt_x = 0;
++  if (dict.Get("tiltX", &tilt_x))
++    params.Set("tiltX", tilt_x);
++
++  double tilt_y = 0;
++  if (dict.Get("tiltY", &tilt_y))
++    params.Set("tiltY", tilt_y);
++
++  int twist = 0;
++  if (dict.Get("twist", &twist))
++    params.Set("twist", twist);
++
++  double delta_x = 0;
++  if (dict.Get("deltaX", &delta_x))
++    params.Set("deltaX", delta_x);
++
++  double delta_y = 0;
++  if (dict.Get("deltaY", &delta_y))
++    params.Set("deltaY", delta_y);
++
++  std::string pointer_type;
++  if (dict.Get("pointerType", &pointer_type))
++    params.Set("pointerType", pointer_type);
++
++  return params;
++}
++
++class InputDispatchRequest
++    : public content::RenderWidgetHost::InputEventObserver {
++ public:
++  InputDispatchRequest(base::WeakPtr<WebContents> owner,
++                       gin_helper::Promise<gin_helper::Dictionary> promise,
++                       std::string input_event_id)
++      : owner_(std::move(owner)),
++        promise_(std::move(promise)),
++        input_event_id_(std::move(input_event_id)) {}
++
++  InputDispatchRequest(const InputDispatchRequest&) = delete;
++  InputDispatchRequest& operator=(const InputDispatchRequest&) = delete;
++
++  ~InputDispatchRequest() override { ClearObservers(); }
++
++  void DispatchKeyboard(content::RenderWidgetHostImpl* target_widget,
++                        const input::NativeWebKeyboardEvent& event) {
++    if (!StartObserving(target_widget, event)) {
++      ResolveUnknown();
++      return;
++    }
++
++    target_widget->Focus();
++    auto weak_this = weak_factory_.GetWeakPtr();
++    target_widget->ForwardKeyboardEvent(event);
++    if (!weak_this)
++      return;
++    ResolveIfNotQueued();
++  }
++
++  void DispatchMouse(content::RenderWidgetHostImpl* target_widget,
++                     const blink::WebMouseEvent& event) {
++    if (!StartObserving(target_widget, event)) {
++      ResolveUnknown();
++      return;
++    }
++
++    auto weak_this = weak_factory_.GetWeakPtr();
++    target_widget->ForwardMouseEvent(event);
++    if (!weak_this)
++      return;
++    ResolveIfNotQueued();
++  }
++
++  void RouteMouse(content::WebContents* web_contents,
++                  content::RenderWidgetHostImpl* root_widget,
++                  const blink::WebMouseEvent& event) {
++    if (!root_widget || !root_widget->delegate() ||
++        !root_widget->delegate()->GetInputEventRouter() ||
++        !root_widget->GetView()) {
++      ResolveUnknown();
++      return;
++    }
++    if (!StartObservingAll(web_contents, event)) {
++      ResolveUnknown();
++      return;
++    }
++
++    root_widget->delegate()->GetInputEventRouter()->RouteMouseEvent(
++        root_widget->GetView(), &event, ui::LatencyInfo());
++  }
++
++  void DispatchMouseViaDevTools(content::WebContents* web_contents,
++                                const blink::WebMouseEvent& event,
++                                base::DictValue params) {
++    if (!StartObservingAll(web_contents, event)) {
++      ResolveUnknown();
++      return;
++    }
++
++    GetDispatchInputDevToolsClient(web_contents)
++        ->SendCommand(
++            "Input.dispatchMouseEvent", std::move(params),
++            base::BindOnce(&InputDispatchRequest::OnDevToolsCommandResult,
++                           weak_factory_.GetWeakPtr()));
++  }
++
++  void DispatchWheel(content::RenderWidgetHostImpl* target_widget,
++                     blink::WebMouseWheelEvent event) {
++    if (!StartObserving(target_widget, event)) {
++      ResolveUnknown();
++      return;
++    }
++
++    auto weak_this = weak_factory_.GetWeakPtr();
++    target_widget->ForwardWheelEvent(event);
++    if (!weak_this)
++      return;
++    if (!input_queued_) {
++      ResolveUnknown();
++      return;
++    }
++
++    event.delta_x = 0;
++    event.delta_y = 0;
++    event.wheel_ticks_x = 0;
++    event.wheel_ticks_y = 0;
++    event.phase = blink::WebMouseWheelEvent::kPhaseEnded;
++    event.has_synthetic_phase = true;
++    event.dispatch_type = blink::WebInputEvent::DispatchType::kEventNonBlocking;
++    target_widget->ForwardWheelEvent(event);
++  }
++
++  void RouteWheel(content::WebContents* web_contents,
++                  content::RenderWidgetHostImpl* root_widget,
++                  blink::WebMouseWheelEvent event) {
++    if (!root_widget || !root_widget->delegate() ||
++        !root_widget->delegate()->GetInputEventRouter() ||
++        !root_widget->GetView()) {
++      ResolveUnknown();
++      return;
++    }
++    if (!StartObservingAll(web_contents, event)) {
++      ResolveUnknown();
++      return;
++    }
++
++    root_widget->delegate()->GetInputEventRouter()->RouteMouseWheelEvent(
++        root_widget->GetView(), &event, ui::LatencyInfo());
++    if (!input_queued_) {
++      return;
++    }
++
++    event.delta_x = 0;
++    event.delta_y = 0;
++    event.wheel_ticks_x = 0;
++    event.wheel_ticks_y = 0;
++    event.phase = blink::WebMouseWheelEvent::kPhaseEnded;
++    event.has_synthetic_phase = true;
++    event.dispatch_type = blink::WebInputEvent::DispatchType::kEventNonBlocking;
++    root_widget->delegate()->GetInputEventRouter()->RouteMouseWheelEvent(
++        root_widget->GetView(), &event, ui::LatencyInfo());
++  }
++
++  void DispatchTouchEvents(content::RenderWidgetHostImpl* target_widget,
++                           std::vector<blink::WebTouchEvent> events) {
++    if (events.empty()) {
++      ResolveUnknown();
++      return;
++    }
++    if (!StartObserving(target_widget, events.front())) {
++      ResolveUnknown();
++      return;
++    }
++
++    target_widget->GetTouchEmulator(/*create_if_necessary=*/true)
++        ->Enable(input::TouchEmulator::Mode::kInjectingTouchEvents,
++                 ui::GestureProviderConfigType::CURRENT_PLATFORM);
++
++    base::OnceClosure closure = base::BindOnce([] {});
++    for (size_t i = 0; i < events.size(); ++i) {
++      target_widget->GetTouchEmulator(/*create_if_necessary=*/true)
++          ->InjectTouchEvent(events[i], target_widget->GetView(),
++                             i == events.size() - 1 ? std::move(closure)
++                                                    : base::OnceClosure());
++    }
++  }
++
++  void ResolveSynthetic(content::RenderWidgetHostImpl* target_widget) {
++    if (target_widget) {
++      target_widget_ = target_widget->GetWeakPtr();
++    } else {
++      target_widget_ = base::WeakPtr<content::RenderWidgetHostImpl>();
++    }
++    Resolve(blink::mojom::InputEventResultSource::kUnknown,
++            blink::mojom::InputEventResultState::kUnknown);
++  }
++
++  void RejectWithMessage(std::string_view message) {
++    v8::HandleScope handle_scope(promise_.isolate());
++    v8::Context::Scope context_scope(promise_.GetContext());
++    promise_.RejectWithErrorMessage(message);
++    delete this;
++  }
++
++ private:
++  bool StartObserving(content::RenderWidgetHostImpl* target_widget,
++                      const blink::WebInputEvent& event) {
++    if (!target_widget)
++      return false;
++
++    target_widget_ = target_widget->GetWeakPtr();
++    SetExpectedEvent(event);
++    AddObservedWidget(target_widget);
++    if (observed_widgets_.empty())
++      return false;
++
++    StartTimeout();
++    return true;
++  }
++
++  bool StartObservingAll(content::WebContents* web_contents,
++                         const blink::WebInputEvent& event) {
++    if (!web_contents)
++      return false;
++
++    SetExpectedEvent(event);
++    web_contents->ForEachRenderFrameHost([&](content::RenderFrameHost* rfh) {
++      auto* widget =
++          content::RenderWidgetHostImpl::From(rfh->GetRenderWidgetHost());
++      AddObservedWidget(widget);
++    });
++
++    if (observed_widgets_.empty())
++      return false;
++
++    StartTimeout();
++    return true;
++  }
++
++  void SetExpectedEvent(const blink::WebInputEvent& event) {
++    expected_type_ = event.GetType();
++    expected_timestamp_ = event.TimeStamp();
++    input_queued_ = false;
++  }
++
++  void AddObservedWidget(content::RenderWidgetHostImpl* widget) {
++    if (!widget)
++      return;
++
++    for (const auto& observed_widget : observed_widgets_) {
++      if (observed_widget.get() == widget)
++        return;
++    }
++
++    widget->AddInputEventObserver(this);
++    observed_widgets_.push_back(widget->GetWeakPtr());
++  }
++
++  void StartTimeout() {
++    base::SingleThreadTaskRunner::GetCurrentDefault()->PostDelayedTask(
++        FROM_HERE,
++        base::BindOnce(&InputDispatchRequest::ResolveUnknownIfPending,
++                       weak_factory_.GetWeakPtr()),
++        base::Seconds(5));
++  }
++
++  void ClearObservers() {
++    for (auto& observed_widget : observed_widgets_) {
++      if (observed_widget)
++        observed_widget->RemoveInputEventObserver(this);
++    }
++    observed_widgets_.clear();
++  }
++
++  bool Matches(const content::RenderWidgetHost& widget,
++               const blink::WebInputEvent& event) const {
++    return FindObservedWidget(widget) &&
++           (event.GetModifiers() & blink::WebInputEvent::kFromDebugger) != 0 &&
++           event.GetType() == expected_type_ &&
++           event.TimeStamp() == expected_timestamp_;
++  }
++
++  content::RenderWidgetHostImpl* FindObservedWidget(
++      const content::RenderWidgetHost& widget) const {
++    for (const auto& observed_widget : observed_widgets_) {
++      if (observed_widget.get() == &widget)
++        return observed_widget.get();
++    }
++    return nullptr;
++  }
++
++  void OnInputEvent(const content::RenderWidgetHost& widget,
++                    const blink::WebInputEvent& event,
++                    input::InputEventSource source) override {
++    if (Matches(widget, event)) {
++      if (auto* widget_impl = FindObservedWidget(widget))
++        target_widget_ = widget_impl->GetWeakPtr();
++      input_queued_ = true;
++    }
++  }
++
++  void OnInputEventAck(const content::RenderWidgetHost& widget,
++                       blink::mojom::InputEventResultSource source,
++                       blink::mojom::InputEventResultState state,
++                       const blink::WebInputEvent& event) override {
++    if (!Matches(widget, event))
++      return;
++
++    if (auto* widget_impl = FindObservedWidget(widget))
++      target_widget_ = widget_impl->GetWeakPtr();
++
++    base::SingleThreadTaskRunner::GetCurrentDefault()->PostTask(
++        FROM_HERE, base::BindOnce(&InputDispatchRequest::Resolve,
++                                  weak_factory_.GetWeakPtr(), source, state));
++  }
++
++  void ResolveIfNotQueued() {
++    if (!input_queued_)
++      ResolveUnknown();
++  }
++
++  void ResolveUnknownIfPending() {
++    if (settled_)
++      return;
++    ResolveUnknown();
++  }
++
++  void OnDevToolsCommandResult(std::optional<std::string> error_message) {
++    if (settled_)
++      return;
++    if (error_message.has_value()) {
++      RejectWithMessage(*error_message);
++      return;
++    }
++    if (!input_queued_)
++      ResolveUnknown();
++  }
++
++  void ResolveUnknown() {
++    Resolve(blink::mojom::InputEventResultSource::kUnknown,
++            blink::mojom::InputEventResultState::kUnknown);
++  }
++
++  void Resolve(blink::mojom::InputEventResultSource source,
++               blink::mojom::InputEventResultState state) {
++    if (settled_)
++      return;
++    settled_ = true;
++
++    ClearObservers();
++
++    v8::HandleScope handle_scope(promise_.isolate());
++    v8::Context::Scope context_scope(promise_.GetContext());
++    auto dict = gin_helper::Dictionary::CreateEmpty(promise_.isolate());
++    dict.Set("inputEventId", input_event_id_);
++    dict.Set("consumed", InputAckStateIsConsumed(state));
++    dict.Set("ackState", std::string(InputAckStateToString(state)));
++    dict.Set("ackSource", std::string(InputAckSourceToString(source)));
++    if (owner_ && owner_->GetWebContents() && target_widget_) {
++      dict.Set("frame", FindFrameForRenderWidgetHost(owner_->GetWebContents(),
++                                                     target_widget_.get()));
++    }
++    promise_.Resolve(dict);
++    delete this;
++  }
++
++  base::WeakPtr<WebContents> owner_;
++  gin_helper::Promise<gin_helper::Dictionary> promise_;
++  std::string input_event_id_;
++  base::WeakPtr<content::RenderWidgetHostImpl> target_widget_;
++  std::vector<base::WeakPtr<content::RenderWidgetHostImpl>> observed_widgets_;
++  blink::WebInputEvent::Type expected_type_ =
++      blink::WebInputEvent::Type::kUndefined;
++  base::TimeTicks expected_timestamp_;
++  bool input_queued_ = false;
++  bool settled_ = false;
++  base::WeakPtrFactory<InputDispatchRequest> weak_factory_{this};
++};
++
+ struct UserDataLink : public base::SupportsUserData::Data {
+   explicit UserDataLink(base::WeakPtr<WebContents> contents)
+       : web_contents(contents) {}
+@@ -773,8 +1988,7 @@ std::string_view TextInputActionToString(ui::TextInputAction action) {
+   return "unknown";
+ }
+
+-void SetRangeDetails(gin_helper::Dictionary* target,
+-                     const gfx::Range& range) {
++void SetRangeDetails(gin_helper::Dictionary* target, const gfx::Range& range) {
+   target->Set("isCollapsed", range.is_empty());
+   target->Set("start", static_cast<uint32_t>(range.start()));
+   target->Set("end", static_cast<uint32_t>(range.end()));
+@@ -805,10 +2019,9 @@ class TextCaretFrameObserver : public base::SupportsUserData::Data,
+       return;
+     }
+
+-    web_contents->SetUserData(
+-        kTextCaretFrameObserverKey,
+-        std::make_unique<TextCaretFrameObserver>(web_contents,
+-                                                 api_web_contents));
++    web_contents->SetUserData(kTextCaretFrameObserverKey,
++                              std::make_unique<TextCaretFrameObserver>(
++                                  web_contents, api_web_contents));
+   }
+
+   using content::WebContentsObserver::OnTextSelectionChanged;
+@@ -853,9 +2066,8 @@ class TextCaretFrameObserver : public base::SupportsUserData::Data,
+
+     content::RenderWidgetHost* widget = view->GetRenderWidgetHost();
+     content::RenderFrameHost* focused_frame = contents->GetFocusedFrame();
+-    if (focused_frame &&
+-        (focused_frame->GetView() == view ||
+-         focused_frame->GetRenderWidgetHost() == widget)) {
++    if (focused_frame && (focused_frame->GetView() == view ||
++                          focused_frame->GetRenderWidgetHost() == widget)) {
+       return focused_frame;
+     }
+
+@@ -940,12 +2152,10 @@ class TextCaretFrameObserver : public base::SupportsUserData::Data,
+     auto composition = gin_helper::Dictionary::CreateEmpty(isolate);
+     composition.Set("isComposing", has_composition);
+     if (has_composition) {
+-      composition.Set("start",
+-                      static_cast<uint32_t>(
+-                          text_input_state->composition->start()));
+-      composition.Set("end",
+-                      static_cast<uint32_t>(
+-                          text_input_state->composition->end()));
++      composition.Set("start", static_cast<uint32_t>(
++                                   text_input_state->composition->start()));
++      composition.Set(
++          "end", static_cast<uint32_t>(text_input_state->composition->end()));
+     }
+     details.Set("composition", composition);
+
+@@ -3693,9 +4903,8 @@ v8::Local<v8::Object> CreatePrintRequestHandle(
+ }
+
+ struct PrintRequestHandlerState {
+-  explicit PrintRequestHandlerState(
+-      content::GlobalRenderFrameHostId frame_id,
+-      base::OnceCallback<void(bool)> callback)
++  explicit PrintRequestHandlerState(content::GlobalRenderFrameHostId frame_id,
++                                    base::OnceCallback<void(bool)> callback)
+       : frame_id(frame_id), callback(std::move(callback)) {}
+
+   content::GlobalRenderFrameHostId frame_id;
+@@ -4294,6 +5503,296 @@ void WebContents::SendInputEvent(v8::Isolate* isolate,
+       v8::Exception::Error(gin::StringToV8(isolate, "Invalid event object")));
+ }
+
++v8::Local<v8::Promise> WebContents::DispatchInputEvent(
++    v8::Isolate* isolate,
++    const gin_helper::Dictionary& input_event) {
++  gin_helper::Promise<gin_helper::Dictionary> promise(isolate);
++  v8::Local<v8::Promise> handle = promise.GetHandle();
++
++  std::string kind;
++  if (!input_event.Get("kind", &kind)) {
++    promise.RejectWithErrorMessage("Missing required option 'kind'");
++    return handle;
++  }
++
++  std::string input_event_id =
++      base::Uuid::GenerateRandomV4().AsLowercaseString();
++
++  if (kind == "key") {
++    auto maybe_event = CreateDispatchKeyEvent(input_event);
++    if (!maybe_event.has_value()) {
++      promise.RejectWithErrorMessage(maybe_event.error());
++      return handle;
++    }
++
++    auto* target_widget = GetFocusedRenderWidgetHost(web_contents());
++    if (!target_widget) {
++      promise.RejectWithErrorMessage("Unable to find a focused frame");
++      return handle;
++    }
++
++    input::NativeWebKeyboardEvent event = std::move(maybe_event).value();
++    auto* request = new InputDispatchRequest(GetWeakPtr(), std::move(promise),
++                                             std::move(input_event_id));
++    request->DispatchKeyboard(target_widget, event);
++    return handle;
++  }
++
++  if (kind == "mouse") {
++    auto maybe_event = CreateDispatchMouseEvent(
++        input_event, GetDispatchInputScaleFactor(web_contents()));
++    if (!maybe_event.has_value()) {
++      promise.RejectWithErrorMessage(maybe_event.error());
++      return handle;
++    }
++
++    auto* root_frame = web_contents()->GetPrimaryMainFrame();
++    auto* root_widget = root_frame ? content::RenderWidgetHostImpl::From(
++                                         root_frame->GetRenderWidgetHost())
++                                   : nullptr;
++    if (!root_widget || !root_widget->delegate() ||
++        !root_widget->delegate()->GetInputEventRouter() ||
++        !root_widget->GetView()) {
++      promise.RejectWithErrorMessage("Unable to find a target frame");
++      return handle;
++    }
++
++    auto event = std::move(maybe_event).value();
++    base::DictValue devtools_params =
++        CreateDevToolsMouseEventParams(input_event, *event);
++    auto* request = new InputDispatchRequest(GetWeakPtr(), std::move(promise),
++                                             std::move(input_event_id));
++    auto dispatch_after_visual_state = base::BindOnce(
++        [](base::WeakPtr<WebContents> owner,
++           base::WeakPtr<content::RenderWidgetHostImpl> root_widget,
++           InputDispatchRequest* request, base::DictValue devtools_params,
++           std::unique_ptr<blink::WebMouseEvent> event, bool success) {
++          if (!owner || !root_widget || !root_widget->delegate() ||
++              !root_widget->delegate()->GetInputEventRouter() ||
++              !root_widget->GetView()) {
++            request->RejectWithMessage("Unable to find a target frame");
++            return;
++          }
++
++          event->SetPositionInScreen(ConvertWidgetPointToScreenPoint(
++              *root_widget->GetView(), event->PositionInWidget()));
++
++          if (event->GetType() == blink::WebInputEvent::Type::kMouseWheel) {
++            request->RouteWheel(
++                owner->GetWebContents(), root_widget.get(),
++                *static_cast<blink::WebMouseWheelEvent*>(event.get()));
++          } else {
++            request->DispatchMouseViaDevTools(owner->GetWebContents(), *event,
++                                              std::move(devtools_params));
++          }
++        },
++        GetWeakPtr(), root_widget->GetWeakPtr(), request,
++        std::move(devtools_params), std::move(event));
++
++    root_widget->InsertVisualStateCallback(
++        std::move(dispatch_after_visual_state));
++    return handle;
++  }
++
++  if (kind == "touch") {
++    auto maybe_events = CreateDispatchTouchEvents(
++        this, input_event, GetDispatchInputScaleFactor(web_contents()));
++    if (!maybe_events.has_value()) {
++      promise.RejectWithErrorMessage(maybe_events.error());
++      return handle;
++    }
++
++    auto events = std::move(maybe_events).value();
++    if (events.empty()) {
++      auto dict = gin_helper::Dictionary::CreateEmpty(isolate);
++      dict.Set("inputEventId", input_event_id);
++      dict.Set("consumed", false);
++      dict.Set("ackState", std::string(InputAckStateToString(
++                               blink::mojom::InputEventResultState::kUnknown)));
++      dict.Set("ackSource",
++               std::string(InputAckSourceToString(
++                   blink::mojom::InputEventResultSource::kUnknown)));
++      promise.Resolve(dict);
++      return handle;
++    }
++
++    auto* root_frame = web_contents()->GetPrimaryMainFrame();
++    auto* root_widget = root_frame ? content::RenderWidgetHostImpl::From(
++                                         root_frame->GetRenderWidgetHost())
++                                   : nullptr;
++    if (!root_widget || !root_widget->delegate() ||
++        !root_widget->delegate()->GetInputEventRouter() ||
++        !root_widget->GetView()) {
++      promise.RejectWithErrorMessage("Unable to find a target frame");
++      return handle;
++    }
++
++    auto* request = new InputDispatchRequest(GetWeakPtr(), std::move(promise),
++                                             std::move(input_event_id));
++    root_widget->InsertVisualStateCallback(base::BindOnce(
++        [](base::WeakPtr<WebContents> owner,
++           base::WeakPtr<content::RenderWidgetHostImpl> root_widget,
++           InputDispatchRequest* request,
++           std::vector<blink::WebTouchEvent> events, bool success) {
++          if (!owner || !root_widget || !root_widget->delegate() ||
++              !root_widget->GetView()) {
++            request->RejectWithMessage("Unable to find a target frame");
++            return;
++          }
++
++          gfx::PointF point(events.front().touches[0].PositionInWidget());
++          root_widget->delegate()->GetRenderWidgetHostAtPointAsynchronously(
++              root_widget->GetView(), point,
++              base::BindOnce(
++                  [](InputDispatchRequest* request,
++                     std::vector<blink::WebTouchEvent> events,
++                     base::WeakPtr<content::RenderWidgetHostViewBase> target,
++                     std::optional<gfx::PointF> transformed) {
++                    if (!target || !transformed.has_value()) {
++                      request->RejectWithMessage(
++                          "Unable to find a target frame");
++                      return;
++                    }
++
++                    auto* target_widget = content::RenderWidgetHostImpl::From(
++                        target->GetRenderWidgetHost());
++                    if (!target_widget) {
++                      request->RejectWithMessage(
++                          "Unable to find a target frame");
++                      return;
++                    }
++
++                    gfx::PointF original(
++                        events.front().touches[0].PositionInWidget());
++                    gfx::Vector2dF delta = *transformed - original;
++                    for (auto& event : events) {
++                      event.dispatch_type =
++                          event.GetType() ==
++                                  blink::WebInputEvent::Type::kTouchCancel
++                              ? blink::WebInputEvent::DispatchType::
++                                    kEventNonBlocking
++                              : blink::WebInputEvent::DispatchType::kBlocking;
++                      event.moved_beyond_slop_region = true;
++                      event.unique_touch_event_id = ui::GetNextTouchEventId();
++                      for (unsigned j = 0; j < event.touches_length; ++j) {
++                        gfx::PointF point = event.touches[j].PositionInWidget();
++                        gfx::PointF position_in_widget(point.x() + delta.x(),
++                                                       point.y() + delta.y());
++                        event.touches[j].SetPositionInWidget(
++                            position_in_widget);
++                        event.touches[j].SetPositionInScreen(
++                            ConvertWidgetPointToScreenPoint(
++                                *target.get(), position_in_widget));
++                      }
++                    }
++
++                    request->DispatchTouchEvents(target_widget,
++                                                 std::move(events));
++                  },
++                  request, std::move(events)));
++        },
++        GetWeakPtr(), root_widget->GetWeakPtr(), request, std::move(events)));
++    return handle;
++  }
++
++  if (kind == "insertText") {
++    std::string text;
++    if (!input_event.Get("text", &text)) {
++      promise.RejectWithErrorMessage("Missing required option 'text'");
++      return handle;
++    }
++
++    auto* target_widget = GetFocusedRenderWidgetHost(web_contents());
++    if (!target_widget) {
++      promise.RejectWithErrorMessage("Unable to find a focused frame");
++      return handle;
++    }
++
++    auto* request = new InputDispatchRequest(GetWeakPtr(), std::move(promise),
++                                             std::move(input_event_id));
++    auto target_widget_weak = target_widget->GetWeakPtr();
++    target_widget->Focus();
++    target_widget->GetWidgetInputHandler()->ImeCommitText(
++        base::UTF8ToUTF16(text), std::vector<ui::ImeTextSpan>(),
++        gfx::Range::InvalidRange(), 0,
++        base::BindOnce(
++            [](InputDispatchRequest* request,
++               base::WeakPtr<content::RenderWidgetHostImpl> target_widget) {
++              request->ResolveSynthetic(target_widget.get());
++            },
++            request, target_widget_weak));
++    return handle;
++  }
++
++  if (kind == "imeSetComposition") {
++    std::string text;
++    int selection_start = 0;
++    int selection_end = 0;
++    if (!input_event.Get("text", &text) ||
++        !input_event.Get("selectionStart", &selection_start) ||
++        !input_event.Get("selectionEnd", &selection_end)) {
++      promise.RejectWithErrorMessage(
++          "'text', 'selectionStart', and 'selectionEnd' are required");
++      return handle;
++    }
++
++    if (selection_start < 0 || selection_end < 0) {
++      promise.RejectWithErrorMessage(
++          "'selectionStart' and 'selectionEnd' must be non-negative");
++      return handle;
++    }
++
++    gfx::Range replacement_range = gfx::Range::InvalidRange();
++    int replacement_start = 0;
++    int replacement_end = 0;
++    bool has_replacement_start =
++        input_event.Get("replacementStart", &replacement_start);
++    bool has_replacement_end =
++        input_event.Get("replacementEnd", &replacement_end);
++    if (has_replacement_start != has_replacement_end) {
++      promise.RejectWithErrorMessage(
++          "Either both replacementStart/replacementEnd are specified or "
++          "neither");
++      return handle;
++    }
++    if (has_replacement_start) {
++      if (replacement_start < 0 || replacement_end < 0) {
++        promise.RejectWithErrorMessage(
++            "'replacementStart' and 'replacementEnd' must be non-negative");
++        return handle;
++      }
++      replacement_range.set_start(replacement_start);
++      replacement_range.set_end(replacement_end);
++    }
++
++    auto* target_widget = GetFocusedRenderWidgetHost(web_contents());
++    if (!target_widget) {
++      promise.RejectWithErrorMessage("Unable to find a focused frame");
++      return handle;
++    }
++
++    auto* request = new InputDispatchRequest(GetWeakPtr(), std::move(promise),
++                                             std::move(input_event_id));
++    auto target_widget_weak = target_widget->GetWeakPtr();
++    target_widget->Focus();
++    target_widget->GetWidgetInputHandler()->ImeSetComposition(
++        base::UTF8ToUTF16(text), std::vector<ui::ImeTextSpan>(),
++        replacement_range, selection_start, selection_end,
++        blink::mojom::ImeState::kNone,
++        base::BindOnce(
++            [](InputDispatchRequest* request,
++               base::WeakPtr<content::RenderWidgetHostImpl> target_widget) {
++              request->ResolveSynthetic(target_widget.get());
++            },
++            request, target_widget_weak));
++    return handle;
++  }
++
++  promise.RejectWithErrorMessage(
++      base::StringPrintf("Unexpected input event kind '%s'", kind.c_str()));
++  return handle;
++}
++
+ void WebContents::BeginFrameSubscription(gin::Arguments* args) {
+   bool only_dirty = false;
+   FrameSubscriber::FrameCaptureCallback callback;
+@@ -5306,6 +6805,7 @@ void WebContents::FillObjectTemplate(v8::Isolate* isolate,
+       .SetMethod("focus", &WebContents::Focus)
+       .SetMethod("isFocused", &WebContents::IsFocused)
+       .SetMethod("sendInputEvent", &WebContents::SendInputEvent)
++      .SetMethod("dispatchInputEvent", &WebContents::DispatchInputEvent)
+       .SetMethod("beginFrameSubscription", &WebContents::BeginFrameSubscription)
+       .SetMethod("endFrameSubscription", &WebContents::EndFrameSubscription)
+       .SetMethod("startDrag", &WebContents::StartDrag)
+@@ -5378,6 +6878,7 @@ const char* WebContents::GetTypeName() {
+ }
+
+ void WebContents::WillBeDestroyed() {
++  ClearDispatchInputTouchPoints(this);
+   ClearWeak();
+ }
+
+diff --git a/shell/browser/api/electron_api_web_contents.h b/shell/browser/api/electron_api_web_contents.h
+index f384c39fda..5def18f9d4 100644
+--- a/shell/browser/api/electron_api_web_contents.h
++++ b/shell/browser/api/electron_api_web_contents.h
+@@ -308,6 +308,9 @@ class WebContents final : public ExclusiveAccessContext,
+
+   // Send WebInputEvent to the page.
+   void SendInputEvent(v8::Isolate* isolate, v8::Local<v8::Value> input_event);
++  v8::Local<v8::Promise> DispatchInputEvent(
++      v8::Isolate* isolate,
++      const gin_helper::Dictionary& input_event);
+
+   // Subscribe to the frame updates.
+   void BeginFrameSubscription(gin::Arguments* args);
+diff --git a/spec/api-web-contents-spec.ts b/spec/api-web-contents-spec.ts
+index 50f86ffe54..77d3195ea4 100644
+--- a/spec/api-web-contents-spec.ts
++++ b/spec/api-web-contents-spec.ts
+@@ -23,7 +23,7 @@ import { setTimeout } from 'node:timers/promises';
+ import * as url from 'node:url';
+
+ import { captureWithTabSourceId } from './lib/media-helpers';
+-import { ifdescribe, defer, waitUntil, listen, ifit } from './lib/spec-helpers';
++import { ifdescribe, defer, waitUntil, listen, ifit, spawnAndWait } from './lib/spec-helpers';
+ import { cleanupWebContents, closeAllWindows } from './lib/window-helpers';
+
+ const fixturesPath = path.resolve(__dirname, 'fixtures');
+@@ -1712,6 +1712,1545 @@ describe('webContents module', () => {
+     });
+   });
+
++  describe('dispatchInputEvent(inputEvent)', () => {
++    afterEach(closeAllWindows);
++
++    const expectDispatchInputEventRejected = async (
++      w: BrowserWindow,
++      inputEvent: any,
++      message: string | RegExp
++    ) => {
++      await expect(w.webContents.dispatchInputEvent(inputEvent)).to.eventually.be.rejectedWith(message);
++    };
++
++    it('rejects invalid input event parameters before dispatching', async () => {
++      const w = new BrowserWindow({ show: false });
++      await w.loadURL('about:blank');
++
++      await expectDispatchInputEventRejected(w, {}, "Missing required option 'kind'");
++      await expectDispatchInputEventRejected(w, { kind: 'unknown' }, "Unexpected input event kind 'unknown'");
++      await expectDispatchInputEventRejected(w, { kind: 'key' }, "Missing required option 'type'");
++      await expectDispatchInputEventRejected(
++        w,
++        { kind: 'key', type: 'invalid' },
++        "Unexpected key event type 'invalid'"
++      );
++      await expectDispatchInputEventRejected(
++        w,
++        { kind: 'key', type: 'keyDown', text: 'x'.repeat(64) },
++        "Invalid 'text' parameter"
++      );
++      await expectDispatchInputEventRejected(w, { kind: 'mouse' }, "Missing required option 'type'");
++      await expectDispatchInputEventRejected(
++        w,
++        { kind: 'mouse', type: 'invalid', x: 1, y: 1 },
++        "Unexpected mouse event type 'invalid'"
++      );
++      await expectDispatchInputEventRejected(
++        w,
++        { kind: 'mouse', type: 'mousePressed' },
++        "Mouse input events require 'x' and 'y'"
++      );
++      await expectDispatchInputEventRejected(
++        w,
++        { kind: 'mouse', type: 'mousePressed', x: 1, y: 1, button: 'invalid' },
++        'Invalid mouse button'
++      );
++      await expectDispatchInputEventRejected(
++        w,
++        { kind: 'mouse', type: 'mouseWheel', x: 1, y: 1 },
++        "'deltaX' and 'deltaY' are required for mouseWheel events"
++      );
++      await expectDispatchInputEventRejected(
++        w,
++        { kind: 'mouse', type: 'mousePressed', x: 1, y: 1, force: 2 },
++        "'force' should be in the range of [0,1]"
++      );
++      await expectDispatchInputEventRejected(w, { kind: 'touch' }, "Missing required option 'type'");
++      await expectDispatchInputEventRejected(
++        w,
++        { kind: 'touch', type: 'invalid' },
++        "Unexpected touch event type 'invalid'"
++      );
++      await expectDispatchInputEventRejected(
++        w,
++        { kind: 'touch', type: 'touchStart' },
++        'touchStart and touchMove require at least one touch point'
++      );
++      await expectDispatchInputEventRejected(
++        w,
++        { kind: 'touch', type: 'touchMove', touchPoints: [{ id: 1, x: 1, y: 1 }] },
++        'Must send touchStart before touchMove/touchEnd/touchCancel'
++      );
++      await expectDispatchInputEventRejected(
++        w,
++        { kind: 'touch', type: 'touchCancel' },
++        'Must send touchStart before touchMove/touchEnd/touchCancel'
++      );
++      await expectDispatchInputEventRejected(
++        w,
++        { kind: 'touch', type: 'touchCancel', touchPoints: [{ id: 1, x: 1, y: 1 }] },
++        'touchCancel must not include touch points'
++      );
++      await expectDispatchInputEventRejected(
++        w,
++        { kind: 'touch', type: 'touchStart', touchPoints: [{ id: 1, x: 1, y: 1 }, { x: 2, y: 2 }] },
++        'All or none of the provided touch points must supply ids'
++      );
++      await expectDispatchInputEventRejected(
++        w,
++        { kind: 'touch', type: 'touchStart', touchPoints: [{ id: 1, x: 1 }] },
++        "Touch points require 'x' and 'y'"
++      );
++      await expectDispatchInputEventRejected(
++        w,
++        { kind: 'touch', type: 'touchStart', touchPoints: [{ id: 1, x: 1, y: 1, tiltX: 120 }] },
++        "'tiltX' should be in the range of [-90,90]"
++      );
++      await expectDispatchInputEventRejected(w, { kind: 'insertText' }, "Missing required option 'text'");
++      await expectDispatchInputEventRejected(
++        w,
++        { kind: 'imeSetComposition' },
++        "'text', 'selectionStart', and 'selectionEnd' are required"
++      );
++      await expectDispatchInputEventRejected(
++        w,
++        { kind: 'imeSetComposition', text: 'a', selectionStart: -1, selectionEnd: 0 },
++        "'selectionStart' and 'selectionEnd' must be non-negative"
++      );
++      await expectDispatchInputEventRejected(
++        w,
++        { kind: 'imeSetComposition', text: 'a', selectionStart: 0, selectionEnd: 1, replacementStart: 0 },
++        'Either both replacementStart/replacementEnd are specified or neither'
++      );
++    });
++
++    it('reports consumed keyboard events when the page prevents default', async () => {
++      const w = new BrowserWindow({ show: false });
++      await w.loadURL(
++        `data:text/html,${encodeURIComponent(`
++        <html>
++          <body tabindex="0">
++            <script>
++              window.keyEvents = [];
++              document.body.focus();
++              window.addEventListener('keydown', event => {
++                event.preventDefault();
++                window.keyEvents.push({
++                  key: event.key,
++                  code: event.code,
++                  keyCode: event.keyCode,
++                  isTrusted: event.isTrusted,
++                  defaultPrevented: event.defaultPrevented
++                });
++              });
++            </script>
++          </body>
++        </html>
++      `)}`
++      );
++
++      const result = await w.webContents.dispatchInputEvent({
++        kind: 'key',
++        type: 'keyDown',
++        key: 'a',
++        code: 'KeyA'
++      });
++
++      expect(result.inputEventId).to.be.a('string').and.not.be.empty();
++      expect(result.consumed).to.equal(true);
++      expect(result.ackState).to.equal('consumed');
++      expect(result.ackSource).to.equal('main-thread');
++      expect(result.frame?.url).to.contain('data:text/html');
++
++      const keyEvents = await w.webContents.executeJavaScript('window.keyEvents');
++      expect(keyEvents).to.deep.equal([
++        {
++          key: 'a',
++          code: 'KeyA',
++          keyCode: 65,
++          isTrusted: true,
++          defaultPrevented: true
++        }
++      ]);
++    });
++
++    it('reports unconsumed keyboard events when the page does not prevent default', async () => {
++      const w = new BrowserWindow({ show: false });
++      await w.loadURL(
++        `data:text/html,${encodeURIComponent(`
++        <html>
++          <body tabindex="0">
++            <script>
++              window.keyEvents = [];
++              document.body.focus();
++              window.addEventListener('keydown', event => {
++                window.keyEvents.push({
++                  key: event.key,
++                  code: event.code,
++                  isTrusted: event.isTrusted,
++                  defaultPrevented: event.defaultPrevented
++                });
++              });
++            </script>
++          </body>
++        </html>
++      `)}`
++      );
++
++      const result = await w.webContents.dispatchInputEvent({
++        kind: 'key',
++        type: 'keyDown',
++        key: 'a',
++        code: 'KeyA'
++      });
++
++      expect(result.consumed).to.equal(false);
++      expect(result.ackState).to.equal('not-consumed');
++      expect(result.ackSource).to.equal('main-thread');
++
++      const keyEvents = await w.webContents.executeJavaScript('window.keyEvents');
++      expect(keyEvents).to.deep.equal([
++        {
++          key: 'a',
++          code: 'KeyA',
++          isTrusted: true,
++          defaultPrevented: false
++        }
++      ]);
++    });
++
++    it('preserves keyboard modifiers, repeat state, and inferred key codes', async () => {
++      const w = new BrowserWindow({ show: false });
++      await w.loadURL(
++        `data:text/html,${encodeURIComponent(`
++        <html>
++          <body tabindex="0">
++            <script>
++              window.keyEvents = [];
++              document.body.focus();
++              window.addEventListener('keydown', event => {
++                window.keyEvents.push({
++                  key: event.key,
++                  code: event.code,
++                  keyCode: event.keyCode,
++                  altKey: event.altKey,
++                  ctrlKey: event.ctrlKey,
++                  metaKey: event.metaKey,
++                  shiftKey: event.shiftKey,
++                  repeat: event.repeat,
++                  isTrusted: event.isTrusted
++                });
++              });
++            </script>
++          </body>
++        </html>
++      `)}`
++      );
++
++      const result = await w.webContents.dispatchInputEvent({
++        kind: 'key',
++        type: 'keyDown',
++        key: 'a',
++        code: 'KeyA',
++        modifiers: 1 | 2 | 8,
++        autoRepeat: true
++      });
++
++      expect(result.consumed).to.equal(false);
++      expect(result.ackState).to.equal('not-consumed');
++
++      const keyEvents = await w.webContents.executeJavaScript('window.keyEvents');
++      expect(keyEvents).to.deep.equal([
++        {
++          key: 'a',
++          code: 'KeyA',
++          keyCode: 65,
++          altKey: true,
++          ctrlKey: true,
++          metaKey: false,
++          shiftKey: true,
++          repeat: true,
++          isTrusted: true
++        }
++      ]);
++    });
++
++    it('dispatches all supported keyboard event phases as trusted DOM events', async () => {
++      const w = new BrowserWindow({ show: false });
++      await w.loadURL(
++        `data:text/html,${encodeURIComponent(`
++        <html>
++          <body tabindex="0">
++            <script>
++              window.keyEvents = [];
++              document.body.focus();
++              for (const type of ['keydown', 'keypress', 'keyup']) {
++                window.addEventListener(type, event => {
++                  window.keyEvents.push({
++                    type: event.type,
++                    key: event.key,
++                    code: event.code,
++                    keyCode: event.keyCode,
++                    charCode: event.charCode,
++                    isTrusted: event.isTrusted
++                  });
++                });
++              }
++            </script>
++          </body>
++        </html>
++      `)}`
++      );
++
++      const rawKeyDownResult = await w.webContents.dispatchInputEvent({
++        kind: 'key',
++        type: 'rawKeyDown',
++        key: 'a',
++        code: 'KeyA'
++      });
++      const keyDownResult = await w.webContents.dispatchInputEvent({
++        kind: 'key',
++        type: 'keyDown',
++        key: 'a',
++        code: 'KeyA'
++      });
++      const charResult = await w.webContents.dispatchInputEvent({
++        kind: 'key',
++        type: 'char',
++        key: 'a',
++        text: 'a',
++        unmodifiedText: 'a',
++        windowsVirtualKeyCode: 65,
++        nativeVirtualKeyCode: 65
++      });
++      const keyUpResult = await w.webContents.dispatchInputEvent({
++        kind: 'key',
++        type: 'keyUp',
++        key: 'a',
++        code: 'KeyA'
++      });
++
++      expect(rawKeyDownResult.inputEventId).to.be.a('string').and.not.be.empty();
++      expect(keyDownResult.inputEventId).to.be.a('string').and.not.be.empty();
++      expect(charResult.inputEventId).to.be.a('string').and.not.be.empty();
++      expect(keyUpResult.inputEventId).to.be.a('string').and.not.be.empty();
++
++      await waitUntil(async () => {
++        return w.webContents.executeJavaScript('window.keyEvents.length === 4');
++      });
++      const keyEvents = await w.webContents.executeJavaScript('window.keyEvents');
++      expect(keyEvents).to.deep.equal([
++        {
++          type: 'keydown',
++          key: 'a',
++          code: 'KeyA',
++          keyCode: 65,
++          charCode: 0,
++          isTrusted: true
++        },
++        {
++          type: 'keydown',
++          key: 'a',
++          code: 'KeyA',
++          keyCode: 65,
++          charCode: 0,
++          isTrusted: true
++        },
++        {
++          type: 'keypress',
++          key: 'a',
++          code: '',
++          keyCode: 97,
++          charCode: 97,
++          isTrusted: true
++        },
++        {
++          type: 'keyup',
++          key: 'a',
++          code: 'KeyA',
++          keyCode: 65,
++          charCode: 0,
++          isTrusted: true
++        }
++      ]);
++    });
++
++    it('preserves keyboard location, keypad, system-key, and explicit key-code options', async () => {
++      const w = new BrowserWindow({ show: false });
++      await w.loadURL(
++        `data:text/html,${encodeURIComponent(`
++        <html>
++          <body tabindex="0">
++            <script>
++              window.keyEvents = [];
++              document.body.focus();
++              window.addEventListener('keydown', event => {
++                window.keyEvents.push({
++                  key: event.key,
++                  code: event.code,
++                  keyCode: event.keyCode,
++                  location: event.location,
++                  isTrusted: event.isTrusted
++                });
++              });
++            </script>
++          </body>
++        </html>
++      `)}`
++      );
++
++      await w.webContents.dispatchInputEvent({
++        kind: 'key',
++        type: 'keyDown',
++        key: 'Shift',
++        code: 'ShiftRight',
++        location: 2,
++        isSystemKey: true
++      });
++      await w.webContents.dispatchInputEvent({
++        kind: 'key',
++        type: 'keyDown',
++        key: '1',
++        code: 'Numpad1',
++        windowsVirtualKeyCode: 97,
++        nativeVirtualKeyCode: 97,
++        isKeypad: true
++      });
++
++      await waitUntil(async () => {
++        return w.webContents.executeJavaScript('window.keyEvents.length === 2');
++      });
++      const keyEvents = await w.webContents.executeJavaScript('window.keyEvents');
++      expect(keyEvents).to.deep.equal([
++        {
++          key: 'Shift',
++          code: 'ShiftRight',
++          keyCode: 161,
++          location: 2,
++          isTrusted: true
++        },
++        {
++          key: '1',
++          code: 'Numpad1',
++          keyCode: 97,
++          location: 3,
++          isTrusted: true
++        }
++      ]);
++    });
++
++    it('commits text into the focused editable element', async () => {
++      const w = new BrowserWindow({ show: false });
++      await w.loadURL(
++        `data:text/html,${encodeURIComponent(`
++        <html>
++          <body><input id="target"></body>
++          <script>document.getElementById('target').focus();</script>
++        </html>
++      `)}`
++      );
++
++      const result = await w.webContents.dispatchInputEvent({
++        kind: 'insertText',
++        text: 'hello'
++      });
++
++      expect(result.inputEventId).to.be.a('string').and.not.be.empty();
++      expect(result.consumed).to.equal(false);
++      expect(result.ackState).to.equal('unknown');
++
++      const value = await w.webContents.executeJavaScript('document.getElementById("target").value');
++      expect(value).to.equal('hello');
++    });
++
++    it('sets IME composition text in the focused editable element', async () => {
++      const w = new BrowserWindow({ show: false });
++      await w.loadURL(
++        `data:text/html,${encodeURIComponent(`
++        <html>
++          <body><input id="target"></body>
++          <script>document.getElementById('target').focus();</script>
++        </html>
++      `)}`
++      );
++
++      const result = await w.webContents.dispatchInputEvent({
++        kind: 'imeSetComposition',
++        text: 'compose',
++        selectionStart: 2,
++        selectionEnd: 5
++      });
++
++      expect(result.inputEventId).to.be.a('string').and.not.be.empty();
++      expect(result.consumed).to.equal(false);
++      expect(result.ackState).to.equal('unknown');
++      expect(result.frame?.url).to.contain('data:text/html');
++
++      const value = await w.webContents.executeJavaScript('document.getElementById("target").value');
++      expect(value).to.equal('compose');
++    });
++
++    it('sets IME composition text with a replacement range', async () => {
++      const w = new BrowserWindow({ show: false });
++      await w.loadURL(
++        `data:text/html,${encodeURIComponent(`
++        <html>
++          <body><input id="target" value="abcdef"></body>
++          <script>document.getElementById('target').focus();</script>
++        </html>
++      `)}`
++      );
++
++      const result = await w.webContents.dispatchInputEvent({
++        kind: 'imeSetComposition',
++        text: 'XY',
++        selectionStart: 0,
++        selectionEnd: 2,
++        replacementStart: 2,
++        replacementEnd: 4
++      });
++
++      expect(result.inputEventId).to.be.a('string').and.not.be.empty();
++      expect(result.consumed).to.equal(false);
++      expect(result.ackState).to.equal('unknown');
++
++      const state = await w.webContents.executeJavaScript(`(() => {
++        const target = document.getElementById('target');
++        return {
++          value: target.value,
++          selectionStart: target.selectionStart,
++          selectionEnd: target.selectionEnd
++        };
++      })()`);
++      expect(state).to.deep.equal({
++        value: 'abXYef',
++        selectionStart: 2,
++        selectionEnd: 4
++      });
++    });
++
++    it('reports consumed mouse events when the page prevents default', async () => {
++      const w = new BrowserWindow({ show: false, width: 300, height: 200 });
++      await w.loadURL(
++        `data:text/html,${encodeURIComponent(`
++        <html>
++          <body style="margin: 0; width: 100vw; height: 100vh;">
++            <script>
++              window.mouseEvents = [];
++              window.addEventListener('mousedown', event => {
++                event.preventDefault();
++                window.mouseEvents.push({
++                  clientX: event.clientX,
++                  clientY: event.clientY,
++                  isTrusted: event.isTrusted,
++                  defaultPrevented: event.defaultPrevented
++                });
++              });
++            </script>
++          </body>
++        </html>
++      `)}`
++      );
++
++      const result = await w.webContents.dispatchInputEvent({
++        kind: 'mouse',
++        type: 'mousePressed',
++        x: 50,
++        y: 40,
++        button: 'left',
++        buttons: 1,
++        clickCount: 1
++      });
++
++      expect(result.consumed).to.equal(true);
++      expect(result.ackState).to.equal('consumed');
++      expect(result.ackSource).to.equal('main-thread');
++      expect(result.frame?.url).to.contain('data:text/html');
++
++      const mouseEvents = await w.webContents.executeJavaScript('window.mouseEvents');
++      expect(mouseEvents).to.deep.equal([
++        {
++          clientX: 50,
++          clientY: 40,
++          isTrusted: true,
++          defaultPrevented: true
++        }
++      ]);
++
++      await w.webContents.dispatchInputEvent({
++        kind: 'mouse',
++        type: 'mouseReleased',
++        x: 50,
++        y: 40,
++        button: 'left',
++        buttons: 0,
++        clickCount: 1
++      });
++    });
++
++    it('dispatches mouse moved, pressed, and released phases as trusted DOM events', async () => {
++      const w = new BrowserWindow({ show: false, width: 300, height: 200 });
++      await w.loadURL(
++        `data:text/html,${encodeURIComponent(`
++        <html>
++          <body style="margin: 0; width: 100vw; height: 100vh;">
++            <script>
++              window.mouseEvents = [];
++              for (const type of ['mousemove', 'mousedown', 'mouseup']) {
++                window.addEventListener(type, event => {
++                  window.mouseEvents.push({
++                    type: event.type,
++                    clientX: event.clientX,
++                    clientY: event.clientY,
++                    button: event.button,
++                    buttons: event.buttons,
++                    isTrusted: event.isTrusted
++                  });
++                });
++              }
++            </script>
++          </body>
++        </html>
++      `)}`
++      );
++
++      const movedResult = await w.webContents.dispatchInputEvent({
++        kind: 'mouse',
++        type: 'mouseMoved',
++        x: 20,
++        y: 15,
++        button: 'none'
++      });
++      const pressedResult = await w.webContents.dispatchInputEvent({
++        kind: 'mouse',
++        type: 'mousePressed',
++        x: 30,
++        y: 25,
++        button: 'left',
++        buttons: 1,
++        clickCount: 1
++      });
++      const releasedResult = await w.webContents.dispatchInputEvent({
++        kind: 'mouse',
++        type: 'mouseReleased',
++        x: 30,
++        y: 25,
++        button: 'left',
++        buttons: 0,
++        clickCount: 1
++      });
++
++      expect(movedResult.inputEventId).to.be.a('string').and.not.be.empty();
++      expect(pressedResult.inputEventId).to.be.a('string').and.not.be.empty();
++      expect(releasedResult.inputEventId).to.be.a('string').and.not.be.empty();
++
++      await waitUntil(async () => {
++        return w.webContents.executeJavaScript('window.mouseEvents.length === 3');
++      });
++      const mouseEvents = await w.webContents.executeJavaScript('window.mouseEvents');
++      expect(mouseEvents).to.deep.equal([
++        {
++          type: 'mousemove',
++          clientX: 20,
++          clientY: 15,
++          button: 0,
++          buttons: 0,
++          isTrusted: true
++        },
++        {
++          type: 'mousedown',
++          clientX: 30,
++          clientY: 25,
++          button: 0,
++          buttons: 1,
++          isTrusted: true
++        },
++        {
++          type: 'mouseup',
++          clientX: 30,
++          clientY: 25,
++          button: 0,
++          buttons: 0,
++          isTrusted: true
++        }
++      ]);
++    });
++
++    it('dispatches trusted wheel events with pixel deltas', async () => {
++      const w = new BrowserWindow({ show: false, width: 300, height: 200 });
++      await w.loadURL(
++        `data:text/html,${encodeURIComponent(`
++        <html>
++          <body style="margin: 0; width: 100vw; height: 100vh;">
++            <script>
++              window.wheelEvents = [];
++              window.addEventListener('wheel', event => {
++                event.preventDefault();
++                window.wheelEvents.push({
++                  clientX: event.clientX,
++                  clientY: event.clientY,
++                  deltaX: event.deltaX,
++                  deltaY: event.deltaY,
++                  deltaMode: event.deltaMode,
++                  isTrusted: event.isTrusted,
++                  defaultPrevented: event.defaultPrevented
++                });
++              }, { passive: false });
++            </script>
++          </body>
++        </html>
++      `)}`
++      );
++
++      const result = await w.webContents.dispatchInputEvent({
++        kind: 'mouse',
++        type: 'mouseWheel',
++        x: 30,
++        y: 25,
++        deltaX: 15,
++        deltaY: -25
++      });
++
++      expect(result.consumed).to.equal(true);
++      expect(result.ackState).to.equal('consumed');
++      expect(result.ackSource).to.equal('main-thread');
++
++      await waitUntil(async () => {
++        return w.webContents.executeJavaScript('window.wheelEvents.length === 1');
++      });
++      const wheelEvents = await w.webContents.executeJavaScript('window.wheelEvents');
++      expect(wheelEvents).to.deep.equal([
++        {
++          clientX: 30,
++          clientY: 25,
++          deltaX: 15,
++          deltaY: -25,
++          deltaMode: 0,
++          isTrusted: true,
++          defaultPrevented: true
++        }
++      ]);
++    });
++
++    it('preserves pointer properties for pen mouse events', async () => {
++      const w = new BrowserWindow({ show: false, width: 300, height: 200 });
++      await w.loadURL(
++        `data:text/html,${encodeURIComponent(`
++        <html>
++          <body style="margin: 0; width: 100vw; height: 100vh;">
++            <script>
++              window.pointerEvents = [];
++              window.addEventListener('pointerdown', event => {
++                window.pointerEvents.push({
++                  pointerType: event.pointerType,
++                  clientX: event.clientX,
++                  clientY: event.clientY,
++                  pressure: event.pressure,
++                  tangentialPressure: event.tangentialPressure,
++                  tiltX: event.tiltX,
++                  tiltY: event.tiltY,
++                  twist: event.twist,
++                  isTrusted: event.isTrusted
++                });
++              });
++            </script>
++          </body>
++        </html>
++      `)}`
++      );
++
++      const result = await w.webContents.dispatchInputEvent({
++        kind: 'mouse',
++        type: 'mousePressed',
++        x: 30,
++        y: 25,
++        button: 'left',
++        buttons: 1,
++        pointerType: 'pen',
++        force: 0.5,
++        tangentialPressure: 0.25,
++        tiltX: 10,
++        tiltY: -20,
++        twist: 30
++      });
++
++      expect(result.inputEventId).to.be.a('string').and.not.be.empty();
++
++      await waitUntil(async () => {
++        return w.webContents.executeJavaScript('window.pointerEvents.length === 1');
++      });
++      const pointerEvents = await w.webContents.executeJavaScript('window.pointerEvents');
++      expect(pointerEvents).to.deep.equal([
++        {
++          pointerType: 'pen',
++          clientX: 30,
++          clientY: 25,
++          pressure: 0.5,
++          tangentialPressure: 0.25,
++          tiltX: 10,
++          tiltY: -20,
++          twist: 30,
++          isTrusted: true
++        }
++      ]);
++
++      await w.webContents.dispatchInputEvent({
++        kind: 'mouse',
++        type: 'mouseReleased',
++        x: 30,
++        y: 25,
++        button: 'left',
++        buttons: 0,
++        pointerType: 'pen'
++      });
++    });
++
++    it('sets mouse screen coordinates from the webContents screen position', async () => {
++      const w = new BrowserWindow({
++        show: false,
++        frame: false,
++        x: 120,
++        y: 140,
++        width: 300,
++        height: 200
++      });
++      const readyToShow = once(w, 'ready-to-show');
++      await w.loadURL(
++        `data:text/html,${encodeURIComponent(`
++        <html>
++          <body style="margin: 0; width: 100vw; height: 100vh;">
++            <script>
++              window.mouseEvents = [];
++              window.addEventListener('mousemove', event => {
++                window.mouseEvents.push({
++                  clientX: event.clientX,
++                  clientY: event.clientY,
++                  screenX: event.screenX,
++                  screenY: event.screenY,
++                  isTrusted: event.isTrusted
++                });
++              });
++            </script>
++          </body>
++        </html>
++      `)}`
++      );
++      await readyToShow;
++      const shown = once(w, 'show');
++      w.show();
++      await shown;
++      w.focus();
++      await setTimeout(100);
++
++      const bounds = w.getContentBounds();
++      await w.webContents.dispatchInputEvent({
++        kind: 'mouse',
++        type: 'mouseMoved',
++        x: 50,
++        y: 40,
++        button: 'none'
++      });
++
++      await waitUntil(async () => {
++        return w.webContents.executeJavaScript('window.mouseEvents.length === 1');
++      });
++      const mouseEvents = await w.webContents.executeJavaScript('window.mouseEvents');
++      expect(mouseEvents).to.deep.equal([
++        {
++          clientX: 50,
++          clientY: 40,
++          screenX: bounds.x + 50,
++          screenY: bounds.y + 40,
++          isTrusted: true
++        }
++      ]);
++    });
++
++    it('dispatches mouse events to cross-origin iframes', async () => {
++      const server = http.createServer((req, res) => {
++        res.setHeader('Content-Type', 'text/html');
++        if (req.url?.startsWith('/child')) {
++          res.end(`
++            <html>
++              <body style="margin: 0; width: 100vw; height: 100vh;">
++                <script>
++                  window.addEventListener('load', () => {
++                    parent.postMessage({ type: 'ready' }, '*');
++                  });
++                  window.addEventListener('mousedown', event => {
++                    event.preventDefault();
++                    parent.postMessage({
++                      type: 'mousedown',
++                      clientX: event.clientX,
++                      clientY: event.clientY,
++                      isTrusted: event.isTrusted,
++                      defaultPrevented: event.defaultPrevented
++                    }, '*');
++                  });
++                </script>
++              </body>
++            </html>
++          `);
++          return;
++        }
++
++        const requestUrl = new URL(req.url || '/', `http://${req.headers.host}`);
++        const childUrl = requestUrl.searchParams.get('child');
++        res.end(`
++          <html>
++            <body style="margin: 0; width: 100vw; height: 100vh;">
++              <iframe
++                name="target-frame"
++                src="${childUrl}"
++                style="position: absolute; left: 40px; top: 30px; width: 160px; height: 100px; border: 0;"
++              ></iframe>
++              <script>
++                window.childReady = false;
++                window.childEvents = [];
++                window.addEventListener('message', event => {
++                  if (event.data?.type === 'ready') {
++                    window.childReady = true;
++                  } else {
++                    window.childEvents.push(event.data);
++                  }
++                });
++              </script>
++            </body>
++          </html>
++        `);
++      });
++      const serverUrl = (await listen(server)).url;
++      const childUrl = `${serverUrl.replace('127.0.0.1', 'localhost')}/child`;
++
++      try {
++        const w = new BrowserWindow({ show: false, width: 300, height: 200 });
++        await w.loadURL(`${serverUrl}/parent?child=${encodeURIComponent(childUrl)}`);
++        await waitUntil(async () => {
++          return w.webContents.executeJavaScript('window.childReady');
++        });
++        await waitUntil(async () => {
++          return w.webContents.executeJavaScript('document.elementFromPoint(50, 40)?.tagName === "IFRAME"');
++        });
++
++        const childFrame = w.webContents.mainFrame.frames.find((frame) => frame.url === childUrl);
++        expect(childFrame).to.not.be.undefined();
++
++        const result = await w.webContents.dispatchInputEvent({
++          kind: 'mouse',
++          type: 'mousePressed',
++          x: 50,
++          y: 40,
++          button: 'left',
++          buttons: 1,
++          clickCount: 1
++        });
++
++        expect(result.consumed).to.equal(true);
++        expect(result.ackState).to.equal('consumed');
++        expect(result.ackSource).to.equal('main-thread');
++        expect(result.frame?.frameToken).to.equal(childFrame?.frameToken);
++        expect(result.frame?.url).to.equal(childUrl);
++
++        await waitUntil(async () => {
++          return w.webContents.executeJavaScript('window.childEvents.length === 1');
++        });
++        const childEvents = await w.webContents.executeJavaScript('window.childEvents');
++        expect(childEvents).to.deep.equal([
++          {
++            type: 'mousedown',
++            clientX: 10,
++            clientY: 10,
++            isTrusted: true,
++            defaultPrevented: true
++          }
++        ]);
++
++        await w.webContents.dispatchInputEvent({
++          kind: 'mouse',
++          type: 'mouseReleased',
++          x: 50,
++          y: 40,
++          button: 'left',
++          buttons: 0,
++          clickCount: 1
++        });
++      } finally {
++        await new Promise<void>((resolve) => server.close(() => resolve()));
++      }
++    });
++
++    it('dispatches trusted touch events and tracks touch identifiers', async () => {
++      const w = new BrowserWindow({ show: false, width: 300, height: 200 });
++      await w.loadURL(
++        `data:text/html,${encodeURIComponent(`
++        <html>
++          <body style="margin: 0; width: 100vw; height: 100vh; touch-action: none;">
++            <script>
++              window.touchEvents = [];
++              const handler = event => {
++                event.preventDefault();
++                const changed = event.changedTouches[0];
++                window.touchEvents.push({
++                  type: event.type,
++                  changedLength: event.changedTouches.length,
++                  touchesLength: event.touches.length,
++                  identifier: changed.identifier,
++                  clientX: changed.clientX,
++                  clientY: changed.clientY,
++                  isTrusted: event.isTrusted,
++                  defaultPrevented: event.defaultPrevented
++                });
++              };
++              for (const type of ['touchstart', 'touchmove', 'touchend']) {
++                document.body.addEventListener(type, handler, { passive: false });
++              }
++            </script>
++          </body>
++        </html>
++      `)}`
++      );
++
++      const startResult = await w.webContents.dispatchInputEvent({
++        kind: 'touch',
++        type: 'touchStart',
++        touchPoints: [{ id: 7, x: 50, y: 40 }]
++      });
++      const moveResult = await w.webContents.dispatchInputEvent({
++        kind: 'touch',
++        type: 'touchMove',
++        touchPoints: [{ id: 7, x: 70, y: 60 }]
++      });
++      const endResult = await w.webContents.dispatchInputEvent({
++        kind: 'touch',
++        type: 'touchEnd',
++        touchPoints: [{ id: 7, x: 70, y: 60 }]
++      });
++
++      expect(startResult.inputEventId).to.be.a('string').and.not.be.empty();
++      expect(startResult.consumed).to.equal(true);
++      expect(startResult.ackState).to.equal('consumed');
++      expect(startResult.ackSource).to.equal('main-thread');
++      expect(startResult.frame?.url).to.contain('data:text/html');
++      expect(moveResult.consumed).to.equal(true);
++      expect(endResult.consumed).to.equal(true);
++
++      await waitUntil(async () => {
++        return w.webContents.executeJavaScript('window.touchEvents.length === 3');
++      });
++      const touchEvents = await w.webContents.executeJavaScript('window.touchEvents');
++      expect(touchEvents).to.deep.equal([
++        {
++          type: 'touchstart',
++          changedLength: 1,
++          touchesLength: 1,
++          identifier: 7,
++          clientX: 50,
++          clientY: 40,
++          isTrusted: true,
++          defaultPrevented: true
++        },
++        {
++          type: 'touchmove',
++          changedLength: 1,
++          touchesLength: 1,
++          identifier: 7,
++          clientX: 70,
++          clientY: 60,
++          isTrusted: true,
++          defaultPrevented: true
++        },
++        {
++          type: 'touchend',
++          changedLength: 1,
++          touchesLength: 0,
++          identifier: 7,
++          clientX: 70,
++          clientY: 60,
++          isTrusted: true,
++          defaultPrevented: true
++        }
++      ]);
++    });
++
++    it('ignores no-op touch moves without dispatching duplicate DOM events', async () => {
++      const w = new BrowserWindow({ show: false, width: 300, height: 200 });
++      await w.loadURL(
++        `data:text/html,${encodeURIComponent(`
++        <html>
++          <body style="margin: 0; width: 100vw; height: 100vh; touch-action: none;">
++            <script>
++              window.touchEvents = [];
++              for (const type of ['touchstart', 'touchmove', 'touchend']) {
++                document.body.addEventListener(type, event => {
++                  event.preventDefault();
++                  window.touchEvents.push(event.type);
++                }, { passive: false });
++              }
++            </script>
++          </body>
++        </html>
++      `)}`
++      );
++
++      await w.webContents.dispatchInputEvent({
++        kind: 'touch',
++        type: 'touchStart',
++        touchPoints: [{ id: 3, x: 50, y: 40 }]
++      });
++      const result = await w.webContents.dispatchInputEvent({
++        kind: 'touch',
++        type: 'touchMove',
++        touchPoints: [{ id: 3, x: 50, y: 40 }]
++      });
++      await w.webContents.dispatchInputEvent({
++        kind: 'touch',
++        type: 'touchEnd',
++        touchPoints: [{ id: 3, x: 50, y: 40 }]
++      });
++
++      expect(result.consumed).to.equal(false);
++      expect(result.ackState).to.equal('unknown');
++
++      await waitUntil(async () => {
++        return w.webContents.executeJavaScript('window.touchEvents.length === 2');
++      });
++      const touchEvents = await w.webContents.executeJavaScript('window.touchEvents');
++      expect(touchEvents).to.deep.equal(['touchstart', 'touchend']);
++    });
++
++    it('cancels active touch points and resets touch sequence state', async () => {
++      const w = new BrowserWindow({ show: false, width: 300, height: 200 });
++      await w.loadURL(
++        `data:text/html,${encodeURIComponent(`
++        <html>
++          <body style="margin: 0; width: 100vw; height: 100vh; touch-action: none;">
++            <script>
++              window.touchEvents = [];
++              for (const type of ['touchstart', 'touchcancel']) {
++                document.body.addEventListener(type, event => {
++                  const changed = event.changedTouches[0];
++                  window.touchEvents.push({
++                    type: event.type,
++                    identifier: changed.identifier,
++                    changedLength: event.changedTouches.length,
++                    touchesLength: event.touches.length,
++                    isTrusted: event.isTrusted
++                  });
++                }, { passive: false });
++              }
++            </script>
++          </body>
++        </html>
++      `)}`
++      );
++
++      await w.webContents.dispatchInputEvent({
++        kind: 'touch',
++        type: 'touchStart',
++        touchPoints: [{ id: 9, x: 50, y: 40 }]
++      });
++      const cancelResult = await w.webContents.dispatchInputEvent({
++        kind: 'touch',
++        type: 'touchCancel'
++      });
++
++      expect(cancelResult.inputEventId).to.be.a('string').and.not.be.empty();
++
++      await waitUntil(async () => {
++        return w.webContents.executeJavaScript('window.touchEvents.length === 2');
++      });
++      const touchEvents = await w.webContents.executeJavaScript('window.touchEvents');
++      expect(touchEvents).to.deep.equal([
++        {
++          type: 'touchstart',
++          identifier: 9,
++          changedLength: 1,
++          touchesLength: 1,
++          isTrusted: true
++        },
++        {
++          type: 'touchcancel',
++          identifier: 9,
++          changedLength: 1,
++          touchesLength: 0,
++          isTrusted: true
++        }
++      ]);
++
++      await expectDispatchInputEventRejected(
++        w,
++        { kind: 'touch', type: 'touchMove', touchPoints: [{ id: 9, x: 60, y: 50 }] },
++        'Must send touchStart before touchMove/touchEnd/touchCancel'
++      );
++    });
++
++    it('tracks multiple active touch points and can end them together', async () => {
++      const w = new BrowserWindow({ show: false, width: 300, height: 200 });
++      await w.loadURL(
++        `data:text/html,${encodeURIComponent(`
++        <html>
++          <body style="margin: 0; width: 100vw; height: 100vh; touch-action: none;">
++            <script>
++              window.touchEvents = [];
++              for (const type of ['touchstart', 'touchend']) {
++                document.body.addEventListener(type, event => {
++                  const changed = Array.from(event.changedTouches).map(touch => touch.identifier);
++                  const active = Array.from(event.touches).map(touch => touch.identifier);
++                  window.touchEvents.push({
++                    type: event.type,
++                    changed,
++                    active,
++                    isTrusted: event.isTrusted
++                  });
++                }, { passive: false });
++              }
++            </script>
++          </body>
++        </html>
++      `)}`
++      );
++
++      await w.webContents.dispatchInputEvent({
++        kind: 'touch',
++        type: 'touchStart',
++        touchPoints: [
++          { id: 4, x: 40, y: 30 },
++          { id: 8, x: 80, y: 70 }
++        ]
++      });
++      await w.webContents.dispatchInputEvent({
++        kind: 'touch',
++        type: 'touchEnd'
++      });
++
++      await waitUntil(async () => {
++        return w.webContents.executeJavaScript('window.touchEvents.length === 4');
++      });
++      const touchEvents = await w.webContents.executeJavaScript('window.touchEvents');
++      expect(touchEvents).to.deep.equal([
++        {
++          type: 'touchstart',
++          changed: [4],
++          active: [4],
++          isTrusted: true
++        },
++        {
++          type: 'touchstart',
++          changed: [8],
++          active: [4, 8],
++          isTrusted: true
++        },
++        {
++          type: 'touchend',
++          changed: [4],
++          active: [8],
++          isTrusted: true
++        },
++        {
++          type: 'touchend',
++          changed: [8],
++          active: [],
++          isTrusted: true
++        }
++      ]);
++    });
++
++    it('dispatches touch events to cross-origin iframes', async () => {
++      const server = http.createServer((req, res) => {
++        res.setHeader('Content-Type', 'text/html');
++        if (req.url?.startsWith('/child')) {
++          res.end(`
++            <html>
++              <body style="margin: 0; width: 100vw; height: 100vh; touch-action: none;">
++                <script>
++                  window.addEventListener('load', () => {
++                    parent.postMessage({ type: 'ready' }, '*');
++                  });
++                  window.addEventListener('touchstart', event => {
++                    event.preventDefault();
++                    const touch = event.changedTouches[0];
++                    parent.postMessage({
++                      type: 'touchstart',
++                      clientX: touch.clientX,
++                      clientY: touch.clientY,
++                      identifier: touch.identifier,
++                      changedLength: event.changedTouches.length,
++                      touchesLength: event.touches.length,
++                      isTrusted: event.isTrusted,
++                      defaultPrevented: event.defaultPrevented
++                    }, '*');
++                  }, { passive: false });
++                </script>
++              </body>
++            </html>
++          `);
++          return;
++        }
++
++        const requestUrl = new URL(req.url || '/', `http://${req.headers.host}`);
++        const childUrl = requestUrl.searchParams.get('child');
++        res.end(`
++          <html>
++            <body style="margin: 0; width: 100vw; height: 100vh;">
++              <iframe
++                name="target-frame"
++                src="${childUrl}"
++                style="position: absolute; left: 40px; top: 30px; width: 160px; height: 100px; border: 0;"
++              ></iframe>
++              <script>
++                window.childReady = false;
++                window.childEvents = [];
++                window.addEventListener('message', event => {
++                  if (event.data?.type === 'ready') {
++                    window.childReady = true;
++                  } else {
++                    window.childEvents.push(event.data);
++                  }
++                });
++              </script>
++            </body>
++          </html>
++        `);
++      });
++      const serverUrl = (await listen(server)).url;
++      const childUrl = `${serverUrl.replace('127.0.0.1', 'localhost')}/child`;
++
++      try {
++        const w = new BrowserWindow({ show: false, width: 300, height: 200 });
++        await w.loadURL(`${serverUrl}/parent?child=${encodeURIComponent(childUrl)}`);
++        await waitUntil(async () => {
++          return w.webContents.executeJavaScript('window.childReady');
++        });
++        await waitUntil(async () => {
++          return w.webContents.executeJavaScript('document.elementFromPoint(50, 40)?.tagName === "IFRAME"');
++        });
++
++        const childFrame = w.webContents.mainFrame.frames.find((frame) => frame.url === childUrl);
++        expect(childFrame).to.not.be.undefined();
++
++        const result = await w.webContents.dispatchInputEvent({
++          kind: 'touch',
++          type: 'touchStart',
++          touchPoints: [{ id: 11, x: 50, y: 40 }]
++        });
++
++        expect(result.consumed).to.equal(true);
++        expect(result.ackState).to.equal('consumed');
++        expect(result.ackSource).to.equal('main-thread');
++        expect(result.frame?.frameToken).to.equal(childFrame?.frameToken);
++        expect(result.frame?.url).to.equal(childUrl);
++
++        await waitUntil(async () => {
++          return w.webContents.executeJavaScript('window.childEvents.length === 1');
++        });
++        const childEvents = await w.webContents.executeJavaScript('window.childEvents');
++        expect(childEvents).to.deep.equal([
++          {
++            type: 'touchstart',
++            clientX: 10,
++            clientY: 10,
++            identifier: 11,
++            changedLength: 1,
++            touchesLength: 1,
++            isTrusted: true,
++            defaultPrevented: true
++          }
++        ]);
++
++        await w.webContents.dispatchInputEvent({
++          kind: 'touch',
++          type: 'touchEnd',
++          touchPoints: [{ id: 11, x: 50, y: 40 }]
++        });
++      } finally {
++        await new Promise<void>((resolve) => server.close(() => resolve()));
++      }
++    });
++
++    it('dispatches keyboard and text insertion to focused cross-origin iframes', async () => {
++      const server = http.createServer((req, res) => {
++        res.setHeader('Content-Type', 'text/html');
++        if (req.url?.startsWith('/child')) {
++          res.end(`
++            <html>
++              <body style="margin: 0; width: 100vw; height: 100vh;">
++                <input id="target" style="width: 100%; height: 100%; box-sizing: border-box;">
++                <script>
++                  const target = document.getElementById('target');
++                  window.addEventListener('load', () => {
++                    parent.postMessage({ type: 'ready' }, '*');
++                  });
++                  target.addEventListener('focus', () => {
++                    parent.postMessage({ type: 'focus' }, '*');
++                  });
++                  target.addEventListener('keydown', event => {
++                    event.preventDefault();
++                    parent.postMessage({
++                      type: 'keydown',
++                      key: event.key,
++                      code: event.code,
++                      keyCode: event.keyCode,
++                      isTrusted: event.isTrusted,
++                      defaultPrevented: event.defaultPrevented
++                    }, '*');
++                  });
++                  target.addEventListener('input', event => {
++                    parent.postMessage({
++                      type: 'input',
++                      value: target.value,
++                      isTrusted: event.isTrusted
++                    }, '*');
++                  });
++                </script>
++              </body>
++            </html>
++          `);
++          return;
++        }
++
++        const requestUrl = new URL(req.url || '/', `http://${req.headers.host}`);
++        const childUrl = requestUrl.searchParams.get('child');
++        res.end(`
++          <html>
++            <body style="margin: 0; width: 100vw; height: 100vh;">
++              <iframe
++                name="target-frame"
++                src="${childUrl}"
++                style="position: absolute; left: 40px; top: 30px; width: 160px; height: 100px; border: 0;"
++              ></iframe>
++              <script>
++                window.childReady = false;
++                window.childEvents = [];
++                window.addEventListener('message', event => {
++                  if (event.data?.type === 'ready') {
++                    window.childReady = true;
++                  } else {
++                    window.childEvents.push(event.data);
++                  }
++                });
++              </script>
++            </body>
++          </html>
++        `);
++      });
++      const serverUrl = (await listen(server)).url;
++      const childUrl = `${serverUrl.replace('127.0.0.1', 'localhost')}/child`;
++
++      try {
++        const w = new BrowserWindow({ show: false, width: 300, height: 200 });
++        await w.loadURL(`${serverUrl}/parent?child=${encodeURIComponent(childUrl)}`);
++        await waitUntil(async () => {
++          return w.webContents.executeJavaScript('window.childReady');
++        });
++
++        const childFrame = w.webContents.mainFrame.frames.find((frame) => frame.url === childUrl);
++        expect(childFrame).to.not.be.undefined();
++        const activeElement = await childFrame!.executeJavaScript(
++          'document.getElementById("target").focus(); document.activeElement.id'
++        );
++        expect(activeElement).to.equal('target');
++
++        const keyResult = await w.webContents.dispatchInputEvent({
++          kind: 'key',
++          type: 'keyDown',
++          key: 'b',
++          code: 'KeyB'
++        });
++
++        expect(keyResult.consumed).to.equal(true);
++        expect(keyResult.ackState).to.equal('consumed');
++        expect(keyResult.ackSource).to.equal('main-thread');
++        expect(keyResult.frame?.frameToken).to.equal(childFrame?.frameToken);
++        expect(keyResult.frame?.url).to.equal(childUrl);
++
++        await waitUntil(async () => {
++          return w.webContents.executeJavaScript('window.childEvents.some(event => event.type === "keydown")');
++        });
++        const keyEvents = await w.webContents.executeJavaScript(
++          'window.childEvents.filter(event => event.type === "keydown")'
++        );
++        expect(keyEvents).to.deep.equal([
++          {
++            type: 'keydown',
++            key: 'b',
++            code: 'KeyB',
++            keyCode: 66,
++            isTrusted: true,
++            defaultPrevented: true
++          }
++        ]);
++
++        const insertResult = await w.webContents.dispatchInputEvent({
++          kind: 'insertText',
++          text: 'hello'
++        });
++
++        expect(insertResult.frame?.frameToken).to.equal(childFrame?.frameToken);
++        expect(insertResult.frame?.url).to.equal(childUrl);
++        await waitUntil(async () => {
++          return w.webContents.executeJavaScript(
++            'window.childEvents.some(event => event.type === "input" && event.value === "hello")'
++          );
++        });
++      } finally {
++        await new Promise<void>((resolve) => server.close(() => resolve()));
++      }
++    });
++
++    it('does not hang while completing a renderer-started drag sequence', async function () {
++      this.timeout(8000);
++
++      const appPath = path.join(fixturesPath, 'api', 'dispatch-input-drag-hang');
++      const env = { ...process.env };
++      delete env.ELECTRON_RUN_AS_NODE;
++      const { code, stdout } = await spawnAndWait(process.execPath, [appPath], {
++        env,
++        timeout: 6000,
++        killTimeout: 500,
++        stripOutput: true
++      });
++
++      expect(code, stdout).to.equal(0);
++
++      const resultLine = stdout.split(/\r?\n/).find((line) => line.startsWith('RESULT:'));
++      expect(resultLine).to.be.a('string');
++
++      const result = JSON.parse(resultLine!.slice('RESULT:'.length));
++      expect(result.events).to.include.members(['dragstart', 'dragover', 'drop', 'dragend']);
++      expect(result.droppedText).to.equal('dragged-text');
++    });
++
++    it('finishes a renderer-started drag after dropping into another frame', async function () {
++      this.timeout(15000);
++
++      const appPath = path.join(fixturesPath, 'api', 'dispatch-input-cross-frame-drag');
++      const env = { ...process.env };
++      delete env.ELECTRON_RUN_AS_NODE;
++      const { code, stdout, stderr } = await spawnAndWait(process.execPath, [appPath], {
++        env,
++        timeout: 13000,
++        killTimeout: 500,
++        stripOutput: true
++      });
++
++      expect(code, `stdout:\n${stdout}\n\nstderr:\n${stderr}`).to.equal(0);
++
++      const resultLine = stdout.split(/\r?\n/).find((line) => line.startsWith('RESULT:'));
++      expect(resultLine).to.be.a('string');
++
++      const result = JSON.parse(resultLine!.slice('RESULT:'.length));
++      expect(result.droppedText).to.equal('dragged-text');
++      expect(result.events).to.include.members([
++        'a:dragstart',
++        'a:dragend',
++        'b:drop',
++        'a:mouseover',
++        'a:click'
++      ]);
++    });
++  });
++
+   describe('insertCSS', () => {
+     afterEach(closeAllWindows);
+     it('supports inserting CSS', async () => {
+diff --git a/spec/fixtures/api/dispatch-input-cross-frame-drag/main.js b/spec/fixtures/api/dispatch-input-cross-frame-drag/main.js
+new file mode 100644
+index 0000000000..e7adf8440b
+--- /dev/null
++++ b/spec/fixtures/api/dispatch-input-cross-frame-drag/main.js
+@@ -0,0 +1,301 @@
++const { app, BrowserWindow } = require('electron');
++const http = require('node:http');
++
++const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
++let progress = 'initializing';
++
++function createServer() {
++  const server = http.createServer((req, res) => {
++    res.setHeader('Content-Type', 'text/html');
++
++    if (req.url.startsWith('/a')) {
++      res.end(`
++        <!doctype html>
++        <html>
++        <head>
++          <meta charset="utf-8">
++          <style>
++            body { margin: 0; font: 14px sans-serif; }
++            #source {
++              position: absolute;
++              left: 20px;
++              top: 20px;
++              width: 140px;
++              height: 32px;
++              border: 1px solid #222;
++              user-select: none;
++            }
++            #button {
++              position: absolute;
++              left: 20px;
++              top: 90px;
++              width: 120px;
++              height: 32px;
++            }
++          </style>
++        </head>
++        <body>
++          <div id="source" draggable="true">dragged-text</div>
++          <button id="button">click me</button>
++          <script>
++            const post = type => parent.postMessage({ frame: 'a', type }, '*');
++            const source = document.getElementById('source');
++            const button = document.getElementById('button');
++
++            source.addEventListener('dragstart', event => {
++              event.dataTransfer.setData('text/plain', 'dragged-text');
++              event.dataTransfer.effectAllowed = 'copyMove';
++              post('dragstart');
++            });
++            source.addEventListener('dragend', () => post('dragend'));
++
++            button.addEventListener('mouseover', () => post('mouseover'));
++            button.addEventListener('mousedown', () => post('mousedown'));
++            button.addEventListener('mouseup', () => post('mouseup'));
++            button.addEventListener('click', () => post('click'));
++
++            window.addEventListener('load', () => post('ready'));
++          </script>
++        </body>
++        </html>
++      `);
++      return;
++    }
++
++    if (req.url.startsWith('/b')) {
++      res.end(`
++        <!doctype html>
++        <html>
++        <head>
++          <meta charset="utf-8">
++          <style>
++            body { margin: 0; }
++            #target {
++              position: absolute;
++              left: 20px;
++              top: 40px;
++              width: 150px;
++              height: 70px;
++            }
++          </style>
++        </head>
++        <body>
++          <textarea id="target"></textarea>
++          <script>
++            const target = document.getElementById('target');
++            const post = (type, extra = {}) => parent.postMessage({ frame: 'b', type, ...extra }, '*');
++            target.addEventListener('drop', () => {
++              setTimeout(() => post('drop', { value: target.value }), 0);
++            });
++            window.addEventListener('load', () => post('ready'));
++          </script>
++        </body>
++        </html>
++      `);
++      return;
++    }
++
++    const host = req.headers.host;
++    const aUrl = `http://${host}/a`;
++    const bUrl = `http://${host.replace('127.0.0.1', 'localhost')}/b`;
++    res.end(`
++      <!doctype html>
++      <html>
++      <head>
++        <meta charset="utf-8">
++        <style>
++          body { margin: 0; }
++          iframe {
++            position: absolute;
++            top: 20px;
++            width: 220px;
++            height: 160px;
++            border: 0;
++          }
++          #a { left: 20px; }
++          #b { left: 280px; }
++        </style>
++      </head>
++      <body>
++        <iframe id="a" src="${aUrl}"></iframe>
++        <iframe id="b" src="${bUrl}"></iframe>
++        <script>
++          window.messages = [];
++          window.readyFrames = {};
++          window.addEventListener('message', event => {
++            window.messages.push(event.data);
++            if (event.data?.type === 'ready') {
++              window.readyFrames[event.data.frame] = true;
++            }
++          });
++        </script>
++      </body>
++      </html>
++    `);
++  });
++
++  return new Promise((resolve) => {
++    server.listen(0, '127.0.0.1', () => {
++      const { port } = server.address();
++      resolve({ server, url: `http://127.0.0.1:${port}` });
++    });
++  });
++}
++
++async function waitFor(webContents, expression, timeout = 5000) {
++  const started = Date.now();
++  while (Date.now() - started < timeout) {
++    if (await webContents.executeJavaScript(expression)) {
++      return;
++    }
++    await delay(50);
++  }
++  throw new Error(`Timed out waiting for ${expression}`);
++}
++
++async function dispatchCrossFrameDrag(webContents) {
++  progress = 'drag mousePressed';
++  await webContents.dispatchInputEvent({
++    kind: 'mouse',
++    type: 'mousePressed',
++    x: 90,
++    y: 56,
++    button: 'left',
++    buttons: 1,
++    clickCount: 1
++  });
++  await delay(100);
++
++  for (const [x, y] of [
++    [140, 56],
++    [220, 56],
++    [270, 70],
++    [300, 80],
++    [340, 88],
++    [370, 92]
++  ]) {
++    progress = `drag mouseMoved ${x},${y}`;
++    await webContents.dispatchInputEvent({
++      kind: 'mouse',
++      type: 'mouseMoved',
++      x,
++      y,
++      button: 'left',
++      buttons: 1
++    });
++    await delay(100);
++  }
++
++  await delay(150);
++  progress = 'drag mouseReleased';
++  await webContents.dispatchInputEvent({
++    kind: 'mouse',
++    type: 'mouseReleased',
++    x: 370,
++    y: 92,
++    button: 'left',
++    buttons: 0,
++    clickCount: 1
++  });
++}
++
++async function dispatchSourceFrameClick(webContents) {
++  await delay(200);
++  progress = 'source mouseMoved';
++  await webContents.dispatchInputEvent({
++    kind: 'mouse',
++    type: 'mouseMoved',
++    x: 90,
++    y: 126,
++    button: 'none',
++    buttons: 0
++  });
++  await delay(50);
++  progress = 'source mousePressed';
++  await webContents.dispatchInputEvent({
++    kind: 'mouse',
++    type: 'mousePressed',
++    x: 90,
++    y: 126,
++    button: 'left',
++    buttons: 1,
++    clickCount: 1
++  });
++  await delay(50);
++  progress = 'source mouseReleased';
++  await webContents.dispatchInputEvent({
++    kind: 'mouse',
++    type: 'mouseReleased',
++    x: 90,
++    y: 126,
++    button: 'left',
++    buttons: 0,
++    clickCount: 1
++  });
++}
++
++async function main() {
++  const timeout = setTimeout(() => {
++    console.error(`dispatch-input-cross-frame-drag fixture timed out at ${progress}`);
++    app.exit(124);
++  }, 12000);
++
++  const { server, url } = await createServer();
++  progress = 'creating window';
++  const window = new BrowserWindow({
++    show: true,
++    width: 560,
++    height: 240,
++    webPreferences: {
++      sandbox: false
++    }
++  });
++
++  try {
++    progress = 'loading parent page';
++    await window.loadURL(url);
++    progress = 'waiting for frames';
++    await waitFor(window.webContents, 'window.readyFrames.a && window.readyFrames.b');
++    window.focus();
++    await delay(200);
++
++    await dispatchCrossFrameDrag(window.webContents);
++    progress = 'waiting for drop';
++    await waitFor(window.webContents, 'window.messages.some(message => message.frame === "b" && message.type === "drop")');
++    await dispatchSourceFrameClick(window.webContents);
++    await delay(300);
++
++    progress = 'collecting result';
++    const result = await window.webContents.executeJavaScript(`(() => {
++      const events = window.messages.map(message => message.frame + ':' + message.type);
++      const drop = window.messages.find(message => message.frame === 'b' && message.type === 'drop');
++      return { events, droppedText: drop?.value || '' };
++    })()`);
++
++    await new Promise((resolve) => process.stdout.write(`RESULT:${JSON.stringify(result)}\n`, resolve));
++
++    if (
++      result.droppedText !== 'dragged-text' ||
++      !result.events.includes('a:dragstart') ||
++      !result.events.includes('a:dragend') ||
++      !result.events.includes('b:drop') ||
++      !result.events.includes('a:mouseover') ||
++      !result.events.includes('a:click')
++    ) {
++      await new Promise((resolve) => process.stderr.write(`FAIL:${JSON.stringify(result)}\n`, resolve));
++      app.exitCode = 1;
++    }
++  } finally {
++    clearTimeout(timeout);
++    window.close();
++    server.close(() => app.quit());
++  }
++}
++
++app
++  .whenReady()
++  .then(main)
++  .catch((error) => {
++    console.error(error);
++    app.exit(1);
++  });
+diff --git a/spec/fixtures/api/dispatch-input-cross-frame-drag/package.json b/spec/fixtures/api/dispatch-input-cross-frame-drag/package.json
+new file mode 100644
+index 0000000000..19c7948d0f
+--- /dev/null
++++ b/spec/fixtures/api/dispatch-input-cross-frame-drag/package.json
+@@ -0,0 +1,4 @@
++{
++  "name": "electron-test-dispatch-input-cross-frame-drag",
++  "main": "main.js"
++}
+diff --git a/spec/fixtures/api/dispatch-input-drag-hang/main.js b/spec/fixtures/api/dispatch-input-drag-hang/main.js
+new file mode 100644
+index 0000000000..b8e6902a80
+--- /dev/null
++++ b/spec/fixtures/api/dispatch-input-drag-hang/main.js
+@@ -0,0 +1,186 @@
++const { app, BrowserWindow } = require('electron');
++
++const page = `
++<!doctype html>
++<html>
++<head>
++  <meta charset="utf-8">
++  <style>
++    html,
++    body {
++      height: 100%;
++      margin: 0;
++    }
++
++    #source,
++    #target {
++      box-sizing: border-box;
++      position: absolute;
++      width: 120px;
++      height: 80px;
++      border: 1px solid #222;
++      font: 14px sans-serif;
++      user-select: none;
++    }
++
++    #source {
++      left: 20px;
++      top: 20px;
++      background: #cfe8ff;
++    }
++
++    #target {
++      left: 170px;
++      top: 20px;
++      background: #d8f5d0;
++    }
++  </style>
++</head>
++<body>
++  <div id="source" draggable="true">drag me</div>
++  <div id="target">drop here</div>
++  <script>
++    window.dragEvents = [];
++
++    const record = event => {
++      const dragEvent = {
++        type: event.type,
++        clientX: event.clientX,
++        clientY: event.clientY,
++        isTrusted: event.isTrusted
++      };
++      window.dragEvents.push(dragEvent);
++      console.log('DRAG_EVENT:' + JSON.stringify(dragEvent));
++    };
++
++    const source = document.getElementById('source');
++    const target = document.getElementById('target');
++
++    source.addEventListener('dragstart', event => {
++      record(event);
++      event.dataTransfer.setData('text/plain', 'dragged-text');
++      event.dataTransfer.effectAllowed = 'copyMove';
++    });
++
++    source.addEventListener('dragend', record);
++
++    target.addEventListener('dragenter', event => {
++      record(event);
++      event.preventDefault();
++    });
++
++    target.addEventListener('dragover', event => {
++      record(event);
++      event.preventDefault();
++    });
++
++    target.addEventListener('drop', event => {
++      record(event);
++      window.droppedText = event.dataTransfer.getData('text/plain');
++      event.preventDefault();
++    });
++  </script>
++</body>
++</html>
++`;
++
++const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
++
++async function dispatchDragSequence(webContents) {
++  await webContents.dispatchInputEvent({
++    kind: 'mouse',
++    type: 'mousePressed',
++    x: 60,
++    y: 50,
++    button: 'left',
++    buttons: 1,
++    clickCount: 1
++  });
++
++  await delay(50);
++
++  for (const [x, y] of [
++    [90, 50],
++    [130, 50],
++    [180, 50],
++    [210, 50]
++  ]) {
++    await webContents.dispatchInputEvent({
++      kind: 'mouse',
++      type: 'mouseMoved',
++      x,
++      y,
++      button: 'left',
++      buttons: 1
++    });
++    await delay(50);
++  }
++
++  await webContents.dispatchInputEvent({
++    kind: 'mouse',
++    type: 'mouseReleased',
++    x: 210,
++    y: 50,
++    button: 'left',
++    buttons: 0,
++    clickCount: 1
++  });
++}
++
++async function main() {
++  const timeout = setTimeout(() => {
++    console.error('dispatch-input-drag-hang fixture timed out');
++    app.exit(124);
++  }, 5000);
++
++  const window = new BrowserWindow({
++    show: true,
++    width: 360,
++    height: 180,
++    webPreferences: {
++      sandbox: false
++    }
++  });
++
++  window.webContents.on('console-message', ({ message }) => {
++    if (message.startsWith('DRAG_EVENT:')) {
++      console.log(message);
++    }
++  });
++
++  await window.loadURL(`data:text/html,${encodeURIComponent(page)}`);
++  window.focus();
++  await delay(200);
++
++  await dispatchDragSequence(window.webContents);
++  await delay(300);
++
++  const result = await window.webContents.executeJavaScript(`({
++    events: window.dragEvents.map(event => event.type),
++    droppedText: window.droppedText || ''
++  })`);
++
++  console.log(`RESULT:${JSON.stringify(result)}`);
++
++  if (
++    !result.events.includes('dragstart') ||
++    !result.events.includes('dragover') ||
++    !result.events.includes('drop') ||
++    !result.events.includes('dragend') ||
++    result.droppedText !== 'dragged-text'
++  ) {
++    app.exitCode = 1;
++  }
++
++  clearTimeout(timeout);
++  window.close();
++  app.quit();
++}
++
++app
++  .whenReady()
++  .then(main)
++  .catch((error) => {
++    console.error(error);
++    app.exit(1);
++  });
+diff --git a/spec/fixtures/api/dispatch-input-drag-hang/package.json b/spec/fixtures/api/dispatch-input-drag-hang/package.json
+new file mode 100644
+index 0000000000..c265e4b8e8
+--- /dev/null
++++ b/spec/fixtures/api/dispatch-input-drag-hang/package.json
+@@ -0,0 +1,4 @@
++{
++  "name": "electron-test-dispatch-input-drag-hang",
++  "main": "main.js"
++}

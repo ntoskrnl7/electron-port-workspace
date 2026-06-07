@@ -1,0 +1,908 @@
+From beb5875049e33e529ad75a8b51458e5029264d90 Mon Sep 17 00:00:00 2001
+From: Codex <codex@localhost>
+Date: Wed, 3 Jun 2026 19:41:41 +0900
+Subject: feat: add focused editable text snapshot API
+
+---
+ .../focused-editable-text-composition.md      |   8 +
+ .../focused-editable-text-options.md          |  12 +
+ .../focused-editable-text-selection.md        |   8 +
+ docs/api/structures/focused-editable-text.md  |  32 ++
+ docs/api/web-contents.md                      |  19 +
+ .../browser/api/electron_api_web_contents.cc  | 534 ++++++++++++++++++
+ shell/browser/api/electron_api_web_contents.h |   1 +
+ spec/api-web-contents-spec.ts                 | 192 +++++++
+ 8 files changed, 806 insertions(+)
+ create mode 100644 docs/api/structures/focused-editable-text-composition.md
+ create mode 100644 docs/api/structures/focused-editable-text-options.md
+ create mode 100644 docs/api/structures/focused-editable-text-selection.md
+ create mode 100644 docs/api/structures/focused-editable-text.md
+
+diff --git a/docs/api/structures/focused-editable-text-composition.md b/docs/api/structures/focused-editable-text-composition.md
+new file mode 100644
+index 0000000000..fc76e3dbf4
+--- /dev/null
++++ b/docs/api/structures/focused-editable-text-composition.md
+@@ -0,0 +1,8 @@
++# FocusedEditableTextComposition Object
++
++* `isComposing` boolean - Whether IME composition is currently active and fully
++  represented in the returned `text`.
++* `start` number (optional) - The start UTF-16 offset of the active composition
++  range in the returned `text`.
++* `end` number (optional) - The end UTF-16 offset of the active composition
++  range in the returned `text`.
+diff --git a/docs/api/structures/focused-editable-text-options.md b/docs/api/structures/focused-editable-text-options.md
+new file mode 100644
+index 0000000000..e3a498a961
+--- /dev/null
++++ b/docs/api/structures/focused-editable-text-options.md
+@@ -0,0 +1,12 @@
++# FocusedEditableTextOptions Object
++
++* `mode` string (optional) - The text range to read. Can be `value`,
++  `surrounding`, or `full`. Default is `full`.
++* `maxLength` number (optional) - Maximum number of UTF-16 code units to return
++  in `text`. Must be between `1` and `1000000`. Default is `100000`.
++
++When `mode` is `value`, Electron reads Chromium's current focused input value
++snapshot when available. When `mode` is `surrounding`, Electron reads text
++around the current selection from Blink. When `mode` is `full`, Electron reads
++the full focused editable DOM text on a best-effort basis and truncates around
++the current selection if the text is longer than `maxLength`.
+diff --git a/docs/api/structures/focused-editable-text-selection.md b/docs/api/structures/focused-editable-text-selection.md
+new file mode 100644
+index 0000000000..aebade4a45
+--- /dev/null
++++ b/docs/api/structures/focused-editable-text-selection.md
+@@ -0,0 +1,8 @@
++# FocusedEditableTextSelection Object
++
++* `isCollapsed` boolean - Whether the current selection is collapsed to a
++  caret. When this is `false`, typing normally replaces the selected text.
++* `start` number - The start UTF-16 offset of the current selection in the
++  returned `text`.
++* `end` number - The end UTF-16 offset of the current selection in the returned
++  `text`.
+diff --git a/docs/api/structures/focused-editable-text.md b/docs/api/structures/focused-editable-text.md
+new file mode 100644
+index 0000000000..2ccb89cdd8
+--- /dev/null
++++ b/docs/api/structures/focused-editable-text.md
+@@ -0,0 +1,32 @@
++# FocusedEditableText Object
++
++* `frame` [WebFrameMain](../web-frame-main.md) - The frame that owns the
++  focused editable element.
++* `url` string - The current URL of `frame`.
++* `isMainFrame` boolean - Whether `frame` is the main frame of the WebContents.
++* `inputType` string - The current Chromium text input type for the focused
++  editable context. Can be `text`, `password`, `search`, `email`, `number`,
++  `telephone`, `url`, `date`, `dateTime`, `dateTimeLocal`, `month`, `time`,
++  `week`, `textArea`, `contentEditable`, `dateTimeField`, `null`, or
++  `unknown`.
++* `inputMode` string - The current input mode requested by the focused editable
++  context. Can be `default`, `none`, `text`, `tel`, `url`, `email`, `numeric`,
++  `decimal`, `search`, or `unknown`.
++* `inputAction` string - The current enter-key action requested by the focused
++  editable context. Can be `default`, `enter`, `done`, `go`, `next`,
++  `previous`, `search`, `send`, or `unknown`.
++* `text` string - The text snapshot selected by `mode`.
++* `selection` [FocusedEditableTextSelection](focused-editable-text-selection.md) -
++  The current selection range relative to `text`.
++* `composition` [FocusedEditableTextComposition](focused-editable-text-composition.md) -
++  The current IME composition state relative to `text` when it is fully inside
++  the returned text snapshot.
++* `source` string - How `text` was obtained. Can be `text-input-state`,
++  `surrounding-selection`, or `dom`.
++* `mode` string - The requested mode used for this snapshot. Can be `value`,
++  `surrounding`, or `full`.
++* `isPartial` boolean - Whether `text` is a partial snapshot of the focused
++  editable text.
++
++`selection.start` and `selection.end` are UTF-16 offsets into `text`, so
++`text.slice(selection.start, selection.end)` returns the selected text.
+diff --git a/docs/api/web-contents.md b/docs/api/web-contents.md
+index 7eff9ff67e..e541957660 100644
+--- a/docs/api/web-contents.md
++++ b/docs/api/web-contents.md
+@@ -1250,6 +1250,25 @@ Returns [`TextCaretInfo | null`](structures/text-caret-info.md) - The current
+ text caret state for the focused editable element, or `null` if no editable
+ caret information is available.
+
++#### `contents.getFocusedEditableText([options])` _Experimental_
++
++* `options` [FocusedEditableTextOptions](structures/focused-editable-text-options.md) (optional)
++
++Returns `Promise<FocusedEditableText | null>` - resolves with a
++[`FocusedEditableText`](structures/focused-editable-text.md) snapshot for the
++focused editable element, or `null` if no focused editable text can be read.
++
++The returned `selection.start` and `selection.end` offsets are relative to the
++returned `text` string. The selected text can be read with:
++
++```js
++const selectedText = info.text.slice(info.selection.start, info.selection.end)
++```
++
++Password inputs return `null`. Custom editors backed by DOM-editable content are
++handled on a best-effort basis. Editors backed by canvas, virtual documents, or
++application-internal models may only expose the focused DOM control.
++
+ #### `contents.isLoading()`
+
+ Returns `boolean` - Whether web page is still loading resources.
+diff --git a/shell/browser/api/electron_api_web_contents.cc b/shell/browser/api/electron_api_web_contents.cc
+index 707ee4acc7..283f1ba4ba 100644
+--- a/shell/browser/api/electron_api_web_contents.cc
++++ b/shell/browser/api/electron_api_web_contents.cc
+@@ -2105,6 +2105,481 @@ v8::Local<v8::Value> CreateTextCaretInfo(
+   return details.GetHandle();
+ }
+
++constexpr uint32_t kDefaultFocusedEditableTextMaxLength = 100000;
++constexpr uint32_t kMaxFocusedEditableTextMaxLength = 1000000;
++
++enum class FocusedEditableTextMode {
++  kValue,
++  kSurrounding,
++  kFull,
++};
++
++struct FocusedEditableTextOptions {
++  FocusedEditableTextMode mode = FocusedEditableTextMode::kFull;
++  uint32_t max_length = kDefaultFocusedEditableTextMaxLength;
++};
++
++struct FocusedEditableTextInputState {
++  ui::TextInputType type = ui::TEXT_INPUT_TYPE_NONE;
++  ui::TextInputMode mode = ui::TEXT_INPUT_MODE_DEFAULT;
++  ui::TextInputAction action = ui::TextInputAction::kDefault;
++  gfx::Range selection;
++  std::optional<gfx::Range> composition;
++};
++
++struct FocusedEditableTextSnapshot {
++  std::u16string text;
++  gfx::Range selection;
++  std::optional<gfx::Range> composition;
++  std::string source;
++  bool is_partial = false;
++};
++
++std::string_view FocusedEditableTextModeToString(
++    FocusedEditableTextMode mode) {
++  switch (mode) {
++    case FocusedEditableTextMode::kValue:
++      return "value";
++    case FocusedEditableTextMode::kSurrounding:
++      return "surrounding";
++    case FocusedEditableTextMode::kFull:
++      return "full";
++  }
++  return "full";
++}
++
++bool IsPasswordTextInputType(ui::TextInputType type) {
++  return type == ui::TEXT_INPUT_TYPE_PASSWORD;
++}
++
++FocusedEditableTextInputState CaptureFocusedEditableTextInputState(
++    const ui::mojom::TextInputState& state) {
++  FocusedEditableTextInputState result;
++  result.type = state.type;
++  result.mode = state.mode;
++  result.action = state.action;
++  result.selection = state.selection;
++  if (state.composition && state.composition->IsValid())
++    result.composition = *state.composition;
++  return result;
++}
++
++gfx::Range ClampRangeToText(const gfx::Range& range, size_t text_length) {
++  if (!range.IsValid())
++    return gfx::Range(0, 0);
++
++  const size_t start = std::min<size_t>(range.start(), text_length);
++  const size_t end = std::min<size_t>(range.end(), text_length);
++  if (start <= end)
++    return gfx::Range(start, end);
++  return gfx::Range(end, start);
++}
++
++std::optional<gfx::Range> ClampCompositionToText(
++    const std::optional<gfx::Range>& composition,
++    size_t text_length) {
++  if (!composition || !composition->IsValid())
++    return std::nullopt;
++  return ClampRangeToText(*composition, text_length);
++}
++
++void ClampFocusedEditableTextSnapshot(FocusedEditableTextSnapshot* snapshot,
++                                      uint32_t max_length) {
++  // The public API promises offsets relative to the returned `text`. Keep that
++  // invariant even when a large editable value must be truncated.
++  snapshot->selection =
++      ClampRangeToText(snapshot->selection, snapshot->text.length());
++  snapshot->composition =
++      ClampCompositionToText(snapshot->composition, snapshot->text.length());
++
++  if (snapshot->text.length() <= max_length)
++    return;
++
++  const size_t text_length = snapshot->text.length();
++  const size_t selection_start = snapshot->selection.start();
++  const size_t selection_end = snapshot->selection.end();
++  const size_t selection_length = selection_end - selection_start;
++
++  size_t window_start = 0;
++  size_t window_end = max_length;
++  if (selection_length >= max_length) {
++    window_start = selection_start;
++    window_end = std::min(text_length, window_start + max_length);
++  } else {
++    const size_t remaining = max_length - selection_length;
++    size_t before = std::min(selection_start, remaining / 2);
++    size_t after = std::min(text_length - selection_end, remaining - before);
++    before = std::min(selection_start, remaining - after);
++    window_start = selection_start - before;
++    window_end = selection_end + after;
++  }
++
++  snapshot->text =
++      snapshot->text.substr(window_start, window_end - window_start);
++  snapshot->selection = gfx::Range(selection_start - window_start,
++                                  selection_end - window_start);
++  if (snapshot->composition && snapshot->composition->start() >= window_start &&
++      snapshot->composition->end() <= window_end) {
++    snapshot->composition =
++        gfx::Range(snapshot->composition->start() - window_start,
++                   snapshot->composition->end() - window_start);
++  } else {
++    snapshot->composition = std::nullopt;
++  }
++  snapshot->is_partial = true;
++}
++
++std::optional<FocusedEditableTextSnapshot>
++CreateFocusedEditableTextSnapshotFromInputState(
++    const ui::mojom::TextInputState& state,
++    uint32_t max_length) {
++  if (!state.value)
++    return std::nullopt;
++
++  FocusedEditableTextSnapshot snapshot;
++  snapshot.text = *state.value;
++  snapshot.selection = state.selection;
++  snapshot.composition = ClampCompositionToText(
++      state.composition ? std::make_optional(*state.composition) : std::nullopt,
++      snapshot.text.length());
++  snapshot.source = "text-input-state";
++  ClampFocusedEditableTextSnapshot(&snapshot, max_length);
++  return snapshot;
++}
++
++v8::Local<v8::Value> CreateFocusedEditableTextValue(
++    v8::Isolate* isolate,
++    content::RenderFrameHost* render_frame_host,
++    const FocusedEditableTextInputState& input_state,
++    FocusedEditableTextMode mode,
++    const FocusedEditableTextSnapshot& snapshot) {
++  auto details = gin_helper::Dictionary::CreateEmpty(isolate);
++  details.SetGetter("frame", render_frame_host);
++  details.Set("url", render_frame_host->GetLastCommittedURL().spec());
++  details.Set("isMainFrame", render_frame_host->GetParent() == nullptr);
++  details.Set("inputType", std::string(TextInputTypeToString(input_state.type)));
++  details.Set("inputMode", std::string(TextInputModeToString(input_state.mode)));
++  details.Set("inputAction",
++              std::string(TextInputActionToString(input_state.action)));
++  details.Set("text", snapshot.text);
++
++  auto selection = gin_helper::Dictionary::CreateEmpty(isolate);
++  SetRangeDetails(&selection, snapshot.selection);
++  details.Set("selection", selection);
++
++  auto composition = gin_helper::Dictionary::CreateEmpty(isolate);
++  composition.Set("isComposing", snapshot.composition.has_value());
++  if (snapshot.composition) {
++    composition.Set("start",
++                    static_cast<uint32_t>(snapshot.composition->start()));
++    composition.Set("end", static_cast<uint32_t>(snapshot.composition->end()));
++  }
++  details.Set("composition", composition);
++
++  details.Set("source", snapshot.source);
++  details.Set("mode", std::string(FocusedEditableTextModeToString(mode)));
++  details.Set("isPartial", snapshot.is_partial);
++  return details.GetHandle();
++}
++
++bool ParseFocusedEditableTextOptions(gin::Arguments* args,
++                                     FocusedEditableTextOptions* options,
++                                     std::string* error) {
++  gin_helper::Dictionary dict =
++      gin_helper::Dictionary::CreateEmpty(args->isolate());
++  if (args->Length() >= 1 && !args->PeekNext()->IsNullOrUndefined() &&
++      !args->GetNext(&dict)) {
++    *error = "options must be an object when provided";
++    return false;
++  }
++
++  if (dict.Has("mode")) {
++    std::string mode;
++    if (!dict.Get("mode", &mode)) {
++      *error = "mode must be a string";
++      return false;
++    }
++    if (mode == "value") {
++      options->mode = FocusedEditableTextMode::kValue;
++    } else if (mode == "surrounding") {
++      options->mode = FocusedEditableTextMode::kSurrounding;
++    } else if (mode == "full") {
++      options->mode = FocusedEditableTextMode::kFull;
++    } else {
++      *error = "mode must be 'value', 'surrounding', or 'full'";
++      return false;
++    }
++  }
++
++  if (dict.Has("maxLength")) {
++    int max_length = 0;
++    if (!dict.Get("maxLength", &max_length)) {
++      *error = "maxLength must be an integer";
++      return false;
++    }
++    if (max_length < 1 ||
++        static_cast<uint32_t>(max_length) > kMaxFocusedEditableTextMaxLength) {
++      *error = base::StringPrintf(
++          "maxLength must be between 1 and %u",
++          kMaxFocusedEditableTextMaxLength);
++      return false;
++    }
++    options->max_length = static_cast<uint32_t>(max_length);
++  }
++
++  return true;
++}
++
++content::RenderFrameHost* GetFocusedEditableTextFrame(
++    content::WebContents* contents,
++    FocusedEditableTextInputState* input_state,
++    const ui::mojom::TextInputState** text_input_state_out = nullptr) {
++  auto* web_contents_impl = static_cast<content::WebContentsImpl*>(contents);
++  auto* text_input_manager = web_contents_impl->GetTextInputManager();
++  if (!text_input_manager)
++    return nullptr;
++
++  content::RenderWidgetHostImpl* active_widget =
++      text_input_manager->GetActiveWidget();
++  content::RenderWidgetHostViewBase* active_view =
++      active_widget ? active_widget->GetView() : nullptr;
++  if (!active_view || !text_input_manager->IsRegistered(active_view))
++    return nullptr;
++
++  const ui::mojom::TextInputState* text_input_state =
++      text_input_manager->GetTextInputState();
++  if (!text_input_state ||
++      text_input_state->type == ui::TEXT_INPUT_TYPE_NONE ||
++      IsPasswordTextInputType(text_input_state->type)) {
++    return nullptr;
++  }
++
++  content::RenderFrameHost* render_frame_host =
++      GetRenderFrameHostForView(contents, active_view);
++  if (!render_frame_host)
++    return nullptr;
++
++  *input_state = CaptureFocusedEditableTextInputState(*text_input_state);
++  if (text_input_state_out)
++    *text_input_state_out = text_input_state;
++  return render_frame_host;
++}
++
++void ResolveFocusedEditableTextNull(
++    gin_helper::Promise<v8::Local<v8::Value>> promise) {
++  v8::Isolate* isolate = JavascriptEnvironment::GetIsolate();
++  v8::HandleScope handle_scope(isolate);
++  v8::Local<v8::Value> null_value = v8::Null(isolate);
++  promise.Resolve(null_value);
++}
++
++void ResolveFocusedEditableTextSnapshot(
++    gin_helper::Promise<v8::Local<v8::Value>> promise,
++    base::WeakPtr<content::WebContents> contents,
++    content::GlobalRenderFrameHostId frame_id,
++    FocusedEditableTextInputState input_state,
++    FocusedEditableTextMode mode,
++    FocusedEditableTextSnapshot snapshot) {
++  v8::Isolate* isolate = JavascriptEnvironment::GetIsolate();
++  v8::HandleScope handle_scope(isolate);
++  auto* web_contents = contents.get();
++  auto* render_frame_host = content::RenderFrameHost::FromID(frame_id);
++  if (!web_contents || !render_frame_host) {
++    v8::Local<v8::Value> null_value = v8::Null(isolate);
++    promise.Resolve(null_value);
++    return;
++  }
++
++  promise.Resolve(CreateFocusedEditableTextValue(
++      isolate, render_frame_host, input_state, mode, snapshot));
++}
++
++void OnFocusedEditableTextSurroundingSelection(
++    gin_helper::Promise<v8::Local<v8::Value>> promise,
++    base::WeakPtr<content::WebContents> contents,
++    content::GlobalRenderFrameHostId frame_id,
++    FocusedEditableTextInputState input_state,
++    FocusedEditableTextMode mode,
++    uint32_t max_length,
++    const std::u16string& text,
++    uint32_t start_offset,
++    uint32_t end_offset) {
++  if (text.empty()) {
++    ResolveFocusedEditableTextNull(std::move(promise));
++    return;
++  }
++
++  FocusedEditableTextSnapshot snapshot;
++  snapshot.text = text;
++  snapshot.selection = ClampRangeToText(gfx::Range(start_offset, end_offset),
++                                        snapshot.text.length());
++  snapshot.composition =
++      ClampCompositionToText(input_state.composition, snapshot.text.length());
++  snapshot.source = "surrounding-selection";
++  snapshot.is_partial = true;
++  ClampFocusedEditableTextSnapshot(&snapshot, max_length);
++  ResolveFocusedEditableTextSnapshot(std::move(promise), std::move(contents),
++                                      frame_id, input_state, mode,
++                                      std::move(snapshot));
++}
++
++std::u16string CreateFocusedEditableTextDomScript(uint32_t max_length) {
++  // DOM extraction is intentionally best-effort. Contenteditable hosts can be
++  // represented as DOM text, while application-model editors backed by canvas
++  // or hidden controls can only expose the focused DOM control.
++  return base::UTF8ToUTF16(base::StringPrintf(R"JS(
++(() => {
++  const maxLength = %u;
++  const clamp = (text, start, end) => {
++    start = Math.max(0, Math.min(start, text.length));
++    end = Math.max(0, Math.min(end, text.length));
++    if (start > end) [start, end] = [end, start];
++    if (text.length <= maxLength) {
++      return { ok: true, text, selectionStart: start, selectionEnd: end, isPartial: false };
++    }
++    const selectionLength = end - start;
++    let windowStart = 0;
++    let windowEnd = maxLength;
++    if (selectionLength >= maxLength) {
++      windowStart = start;
++      windowEnd = Math.min(text.length, windowStart + maxLength);
++    } else {
++      const remaining = maxLength - selectionLength;
++      let before = Math.min(start, Math.floor(remaining / 2));
++      let after = Math.min(text.length - end, remaining - before);
++      before = Math.min(start, remaining - after);
++      windowStart = start - before;
++      windowEnd = end + after;
++    }
++    return {
++      ok: true,
++      text: text.slice(windowStart, windowEnd),
++      selectionStart: start - windowStart,
++      selectionEnd: end - windowStart,
++      isPartial: true
++    };
++  };
++
++  const activeElementDeep = (doc) => {
++    let active = doc.activeElement;
++    while (active && active.shadowRoot && active.shadowRoot.activeElement) {
++      active = active.shadowRoot.activeElement;
++    }
++    return active;
++  };
++
++  const parentElementOrHost = (node) => {
++    if (!node) return null;
++    if (node.parentElement) return node.parentElement;
++    const root = node.getRootNode && node.getRootNode();
++    return root && root.host instanceof Element ? root.host : null;
++  };
++
++  const isInside = (node, host) => {
++    let current = node && (node.nodeType === Node.ELEMENT_NODE ? node : node.parentNode);
++    while (current) {
++      if (current === host) return true;
++      if (current.parentNode) {
++        current = current.parentNode;
++        continue;
++      }
++      const root = current.getRootNode && current.getRootNode();
++      current = root && root.host instanceof Element ? root.host : null;
++    }
++    return false;
++  };
++
++  const active = activeElementDeep(document);
++  if (!active) return { ok: false };
++
++  const tag = active.localName;
++  if (tag === 'input' || tag === 'textarea') {
++    const type = (active.getAttribute('type') || 'text').toLowerCase();
++    if (tag === 'input' && type === 'password') return { ok: false };
++    const value = String(active.value ?? '');
++    const start = typeof active.selectionStart === 'number' ? active.selectionStart : value.length;
++    const end = typeof active.selectionEnd === 'number' ? active.selectionEnd : start;
++    return clamp(value, start, end);
++  }
++
++  let host = null;
++  for (let element = active; element; element = parentElementOrHost(element)) {
++    if (element.isContentEditable) {
++      host = element;
++      for (let parent = parentElementOrHost(element); parent && parent.isContentEditable; parent = parentElementOrHost(parent)) {
++        host = parent;
++      }
++      break;
++    }
++  }
++  if (!host && String(document.designMode).toLowerCase() === 'on') {
++    host = document.body || document.documentElement;
++  }
++  if (!host) return { ok: false };
++
++  const selection = document.getSelection();
++  if (!selection || selection.rangeCount === 0) return { ok: false };
++  const range = selection.getRangeAt(0);
++  if (!isInside(range.startContainer, host) || !isInside(range.endContainer, host)) {
++    return { ok: false };
++  }
++
++  const fullRange = document.createRange();
++  fullRange.selectNodeContents(host);
++  const text = fullRange.toString();
++  const beforeStart = document.createRange();
++  beforeStart.selectNodeContents(host);
++  beforeStart.setEnd(range.startContainer, range.startOffset);
++  const beforeEnd = document.createRange();
++  beforeEnd.selectNodeContents(host);
++  beforeEnd.setEnd(range.endContainer, range.endOffset);
++  return clamp(text, beforeStart.toString().length, beforeEnd.toString().length);
++})()
++)JS",
++                                          max_length));
++}
++
++void OnFocusedEditableTextDomResult(
++    gin_helper::Promise<v8::Local<v8::Value>> promise,
++    base::WeakPtr<content::WebContents> contents,
++    content::GlobalRenderFrameHostId frame_id,
++    FocusedEditableTextInputState input_state,
++    FocusedEditableTextMode mode,
++    base::Value value) {
++  if (!value.is_dict()) {
++    ResolveFocusedEditableTextNull(std::move(promise));
++    return;
++  }
++
++  const base::DictValue& dict = value.GetDict();
++  if (!dict.FindBool("ok").value_or(false)) {
++    ResolveFocusedEditableTextNull(std::move(promise));
++    return;
++  }
++
++  const std::string* text = dict.FindString("text");
++  std::optional<int> selection_start = dict.FindInt("selectionStart");
++  std::optional<int> selection_end = dict.FindInt("selectionEnd");
++  if (!text || !selection_start || !selection_end || *selection_start < 0 ||
++      *selection_end < 0) {
++    ResolveFocusedEditableTextNull(std::move(promise));
++    return;
++  }
++
++  FocusedEditableTextSnapshot snapshot;
++  snapshot.text = base::UTF8ToUTF16(*text);
++  snapshot.selection =
++      ClampRangeToText(gfx::Range(*selection_start, *selection_end),
++                       snapshot.text.length());
++  snapshot.composition =
++      ClampCompositionToText(input_state.composition, snapshot.text.length());
++  snapshot.source = "dom";
++  snapshot.is_partial = dict.FindBool("isPartial").value_or(false);
++  ResolveFocusedEditableTextSnapshot(std::move(promise), std::move(contents),
++                                      frame_id, input_state, mode,
++                                      std::move(snapshot));
++}
++
+ class TextCaretFrameObserver : public base::SupportsUserData::Data,
+                                public content::WebContentsObserver,
+                                public content::TextInputManager::Observer {
+@@ -5476,6 +5951,63 @@ v8::Local<v8::Value> WebContents::GetTextCaretInfo(v8::Isolate* isolate) {
+                              active_view, std::nullopt);
+ }
+
++v8::Local<v8::Promise> WebContents::GetFocusedEditableText(
++    gin::Arguments* args) {
++  v8::Isolate* isolate = args->isolate();
++  gin_helper::Promise<v8::Local<v8::Value>> promise(isolate);
++  v8::Local<v8::Promise> handle = promise.GetHandle();
++
++  FocusedEditableTextOptions options;
++  std::string error;
++  if (!ParseFocusedEditableTextOptions(args, &options, &error)) {
++    promise.RejectWithErrorMessage(error);
++    return handle;
++  }
++
++  FocusedEditableTextInputState input_state;
++  const ui::mojom::TextInputState* text_input_state = nullptr;
++  content::RenderFrameHost* render_frame_host = GetFocusedEditableTextFrame(
++      web_contents(), &input_state, &text_input_state);
++  if (!render_frame_host) {
++    v8::Local<v8::Value> null_value = v8::Null(isolate);
++    promise.Resolve(null_value);
++    return handle;
++  }
++
++  if (options.mode == FocusedEditableTextMode::kValue) {
++    std::optional<FocusedEditableTextSnapshot> snapshot =
++        CreateFocusedEditableTextSnapshotFromInputState(*text_input_state,
++                                                        options.max_length);
++    if (!snapshot) {
++      v8::Local<v8::Value> null_value = v8::Null(isolate);
++      promise.Resolve(null_value);
++      return handle;
++    }
++    promise.Resolve(CreateFocusedEditableTextValue(
++        isolate, render_frame_host, input_state, options.mode, *snapshot));
++    return handle;
++  }
++
++  content::GlobalRenderFrameHostId frame_id = render_frame_host->GetGlobalId();
++  if (options.mode == FocusedEditableTextMode::kSurrounding) {
++    render_frame_host->RequestTextSurroundingSelection(
++        base::BindOnce(&OnFocusedEditableTextSurroundingSelection,
++                       std::move(promise), web_contents()->GetWeakPtr(),
++                       frame_id, input_state, options.mode,
++                       options.max_length),
++        options.max_length);
++    return handle;
++  }
++
++  render_frame_host->ExecuteJavaScriptForTests(
++      CreateFocusedEditableTextDomScript(options.max_length),
++      base::BindOnce(&OnFocusedEditableTextDomResult, std::move(promise),
++                     web_contents()->GetWeakPtr(), frame_id, input_state,
++                     options.mode),
++      content::ISOLATED_WORLD_ID_GLOBAL);
++  return handle;
++}
++
+ void WebContents::SendInputEvent(v8::Isolate* isolate,
+                                  v8::Local<v8::Value> input_event) {
+   content::RenderWidgetHostView* view =
+@@ -6890,6 +7422,8 @@ void WebContents::FillObjectTemplate(v8::Isolate* isolate,
+       .SetMethod("focus", &WebContents::Focus)
+       .SetMethod("isFocused", &WebContents::IsFocused)
+       .SetMethod("getTextCaretInfo", &WebContents::GetTextCaretInfo)
++      .SetMethod("getFocusedEditableText",
++                 &WebContents::GetFocusedEditableText)
+       .SetMethod("sendInputEvent", &WebContents::SendInputEvent)
+       .SetMethod("dispatchInputEvent", &WebContents::DispatchInputEvent)
+       .SetMethod("beginFrameSubscription", &WebContents::BeginFrameSubscription)
+diff --git a/shell/browser/api/electron_api_web_contents.h b/shell/browser/api/electron_api_web_contents.h
+index cd15f36333..a38091b7dd 100644
+--- a/shell/browser/api/electron_api_web_contents.h
++++ b/shell/browser/api/electron_api_web_contents.h
+@@ -309,6 +309,7 @@ class WebContents final : public ExclusiveAccessContext,
+   void Focus();
+   bool IsFocused() const;
+   v8::Local<v8::Value> GetTextCaretInfo(v8::Isolate* isolate);
++  v8::Local<v8::Promise> GetFocusedEditableText(gin::Arguments* args);
+
+   // Send WebInputEvent to the page.
+   void SendInputEvent(v8::Isolate* isolate, v8::Local<v8::Value> input_event);
+diff --git a/spec/api-web-contents-spec.ts b/spec/api-web-contents-spec.ts
+index 7850840175..08213124c9 100644
+--- a/spec/api-web-contents-spec.ts
++++ b/spec/api-web-contents-spec.ts
+@@ -1408,6 +1408,198 @@ describe('webContents module', () => {
+     });
+   });
+
++  describe('getFocusedEditableText() API', () => {
++    afterEach(closeAllWindows);
++
++    it('returns null when no focused editable text is available', async () => {
++      const w = new BrowserWindow({ show: false, width: 400, height: 300 });
++      await w.loadURL('data:text/html;charset=utf-8,<p>no editable element</p>');
++
++      expect(await w.webContents.getFocusedEditableText()).to.equal(null);
++    });
++
++    it('returns null for password inputs', async () => {
++      const w = new BrowserWindow({ show: false, width: 400, height: 300 });
++      await w.loadURL(
++        `data:text/html;charset=utf-8,${encodeURIComponent(`
++        <!DOCTYPE html>
++        <input id="field" type="password" value="secret">
++      `)}`
++      );
++
++      await w.webContents.executeJavaScript(`
++        document.getElementById('field').focus();
++      `);
++
++      expect(await w.webContents.getFocusedEditableText()).to.equal(null);
++    });
++
++    it('returns input text with selection offsets relative to text', async () => {
++      const w = new BrowserWindow({ show: false, width: 400, height: 300 });
++      await w.loadURL(
++        `data:text/html;charset=utf-8,${encodeURIComponent(`
++        <!DOCTYPE html>
++        <input id="field" value="hello world" style="font-size: 24px; margin: 20px;">
++      `)}`
++      );
++
++      await w.webContents.executeJavaScript(`
++        const field = document.getElementById('field');
++        field.focus();
++        field.setSelectionRange(6, 11);
++      `);
++
++      await waitUntil(async () => {
++        const info = await w.webContents.getFocusedEditableText({ mode: 'value' });
++        return info?.selection.start === 6 && info.selection.end === 11;
++      });
++
++      const info = await w.webContents.getFocusedEditableText({ mode: 'value' });
++      expect(info).to.not.equal(null);
++      if (info === null) {
++        throw new Error('Expected focused editable text');
++      }
++
++      expect(info.frame).to.equal(w.webContents.mainFrame);
++      expect(info.url).to.equal(w.webContents.mainFrame.url);
++      expect(info.isMainFrame).to.be.true();
++      expect(info.inputType).to.equal('text');
++      expect(info.text).to.equal('hello world');
++      expect(info.selection).to.deep.equal({
++        isCollapsed: false,
++        start: 6,
++        end: 11
++      });
++      expect(info.text.slice(info.selection.start, info.selection.end)).to.equal('world');
++      expect(info.composition).to.deep.equal({ isComposing: false });
++      expect(info.source).to.equal('text-input-state');
++      expect(info.mode).to.equal('value');
++      expect(info.isPartial).to.be.false();
++    });
++
++    it('returns full contenteditable text on a best-effort DOM path', async () => {
++      const w = new BrowserWindow({ show: false, width: 400, height: 300 });
++      await w.loadURL(
++        `data:text/html;charset=utf-8,${encodeURIComponent(`
++        <!DOCTYPE html>
++        <div id="editor" contenteditable="true">alpha beta gamma</div>
++      `)}`
++      );
++
++      await w.webContents.executeJavaScript(`
++        const editor = document.getElementById('editor');
++        const text = editor.firstChild;
++        const range = document.createRange();
++        range.setStart(text, 6);
++        range.setEnd(text, 10);
++        const selection = getSelection();
++        selection.removeAllRanges();
++        selection.addRange(range);
++        editor.focus();
++      `);
++
++      await waitUntil(async () => {
++        const info = await w.webContents.getFocusedEditableText();
++        return info?.text.slice(info.selection.start, info.selection.end) === 'beta';
++      });
++
++      const info = await w.webContents.getFocusedEditableText();
++      expect(info).to.not.equal(null);
++      if (info === null) {
++        throw new Error('Expected focused editable text');
++      }
++
++      expect(info.inputType).to.equal('contentEditable');
++      expect(info.text).to.equal('alpha beta gamma');
++      expect(info.text.slice(info.selection.start, info.selection.end)).to.equal('beta');
++      expect(info.source).to.equal('dom');
++      expect(info.mode).to.equal('full');
++      expect(info.isPartial).to.be.false();
++    });
++
++    it('keeps selection offsets relative to truncated text', async () => {
++      const w = new BrowserWindow({ show: false, width: 400, height: 300 });
++      await w.loadURL(
++        `data:text/html;charset=utf-8,${encodeURIComponent(`
++        <!DOCTYPE html>
++        <input id="field" value="0123456789" style="font-size: 24px; margin: 20px;">
++      `)}`
++      );
++
++      await w.webContents.executeJavaScript(`
++        const field = document.getElementById('field');
++        field.focus();
++        field.setSelectionRange(5, 6);
++      `);
++
++      await waitUntil(async () => {
++        const info = await w.webContents.getFocusedEditableText({ maxLength: 5 });
++        return info?.isPartial === true;
++      });
++
++      const info = await w.webContents.getFocusedEditableText({ maxLength: 5 });
++      expect(info).to.not.equal(null);
++      if (info === null) {
++        throw new Error('Expected focused editable text');
++      }
++
++      expect(info.text).to.have.lengthOf(5);
++      expect(info.text.slice(info.selection.start, info.selection.end)).to.equal('5');
++      expect(info.isPartial).to.be.true();
++    });
++
++    it('returns surrounding text around the active selection', async () => {
++      const w = new BrowserWindow({ show: false, width: 400, height: 300 });
++      await w.loadURL(
++        `data:text/html;charset=utf-8,${encodeURIComponent(`
++        <!DOCTYPE html>
++        <textarea id="field">abcdefghi</textarea>
++      `)}`
++      );
++
++      await w.webContents.executeJavaScript(`
++        const field = document.getElementById('field');
++        field.focus();
++        field.setSelectionRange(4, 5);
++      `);
++
++      await waitUntil(async () => {
++        const info = await w.webContents.getFocusedEditableText({
++          mode: 'surrounding',
++          maxLength: 5
++        });
++        return info?.text.slice(info.selection.start, info.selection.end) === 'e';
++      });
++
++      const info = await w.webContents.getFocusedEditableText({
++        mode: 'surrounding',
++        maxLength: 5
++      });
++      expect(info).to.not.equal(null);
++      if (info === null) {
++        throw new Error('Expected focused editable text');
++      }
++
++      expect(info.text.length).to.be.at.most(5);
++      expect(info.text.slice(info.selection.start, info.selection.end)).to.equal('e');
++      expect(info.source).to.equal('surrounding-selection');
++      expect(info.mode).to.equal('surrounding');
++      expect(info.isPartial).to.be.true();
++    });
++
++    it('rejects invalid options', async () => {
++      const w = new BrowserWindow({ show: false, width: 400, height: 300 });
++      await w.loadURL('about:blank');
++
++      await expect(
++        w.webContents.getFocusedEditableText({ mode: 'invalid' as any })
++      ).to.eventually.be.rejectedWith("mode must be 'value', 'surrounding', or 'full'");
++      await expect(
++        w.webContents.getFocusedEditableText({ maxLength: 0 })
++      ).to.eventually.be.rejectedWith('maxLength must be between 1 and 1000000');
++    });
++  });
++
+   describe('openDevTools() API', () => {
+     afterEach(closeAllWindows);
+     it('can show window with activation', async () => {

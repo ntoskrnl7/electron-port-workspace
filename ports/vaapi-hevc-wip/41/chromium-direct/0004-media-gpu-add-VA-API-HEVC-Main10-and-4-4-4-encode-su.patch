@@ -1,0 +1,2811 @@
+From a5786aafff4595c39189b7805568e119651aae1e Mon Sep 17 00:00:00 2001
+From: Jung-Kwang Lee <ntoskrnl7@gmail.com>
+Date: Mon, 23 Mar 2026 14:47:52 +0900
+Subject: media/gpu: add VA-API HEVC Main10 and 4:4:4 encode support
+
+Add the H.265 VA-API encoder delegate and wire the Linux VA-API encode path to support HEVC Main10, Main444, and Main444 10 profiles.
+
+Teach the frame conversion, packed-header generation, upload, and VEA adapter paths to handle P010, I444, and YUV444P10 input for these profiles.
+
+Patch-Dir: src/electron/patches/chromium
+Patch-Filename: media_gpu_add_va-api_hevc_main10_and_4_4_4_encode_support.patch
+(cherry picked from commit 6a79ad798c74fa4ef2e7078c3c70e38ee8eca846)
+---
+ media/base/video_frame_converter.cc           | 263 ++++++++
+ media/base/video_frame_converter.h            |   9 +
+ media/gpu/h265_builder.cc                     |  11 +-
+ media/gpu/h265_builder_unittest.cc            | 120 ++++
+ media/gpu/vaapi/BUILD.gn                      |   2 +
+ .../h265_vaapi_video_encoder_delegate.cc      | 549 ++++++++++++++++
+ .../vaapi/h265_vaapi_video_encoder_delegate.h |  59 ++
+ .../vaapi/vaapi_video_encode_accelerator.cc   | 221 ++++++-
+ .../vaapi/vaapi_video_encode_accelerator.h    |   8 +
+ ...vaapi_video_encode_accelerator_unittest.cc |  13 +-
+ media/gpu/vaapi/vaapi_wrapper.cc              | 588 ++++++++++++++++--
+ media/gpu/vaapi/vaapi_wrapper.h               |  16 +-
+ .../video/video_encode_accelerator_adapter.cc | 150 ++++-
+ .../video/video_encode_accelerator_adapter.h  |   9 +
+ .../video_encode_accelerator_adapter_test.cc  |  80 +++
+ 15 files changed, 1991 insertions(+), 107 deletions(-)
+ create mode 100644 media/gpu/vaapi/h265_vaapi_video_encoder_delegate.cc
+ create mode 100644 media/gpu/vaapi/h265_vaapi_video_encoder_delegate.h
+
+diff --git a/media/base/video_frame_converter.cc b/media/base/video_frame_converter.cc
+index 5759bca54bae7..e94626c4eb355 100644
+--- a/media/base/video_frame_converter.cc
++++ b/media/base/video_frame_converter.cc
+@@ -5,6 +5,7 @@
+ 
+ #include "media/base/video_frame_converter.h"
+ 
++#include "base/numerics/safe_conversions.h"
+ #include "base/trace_event/trace_event.h"
+ #include "media/base/video_frame_converter_internals.h"
+ #include "third_party/libyuv/include/libyuv.h"
+@@ -14,6 +15,7 @@ namespace media {
+ namespace {
+ 
+ constexpr auto kDefaultFiltering = libyuv::kFilterBox;
++constexpr int kConvert8To10BitScale = 1024;
+ 
+ std::optional<VideoPixelFormat> GetSourceFormatOverrideForABGRToARGB(
+     VideoPixelFormat src_format,
+@@ -73,6 +75,9 @@ EncoderStatus VideoFrameConverter::ConvertAndScale(const VideoFrame& src_frame,
+     case PIXEL_FORMAT_I444A:
+       return ConvertAndScaleI4xxx(&src_frame, dest_frame);
+ 
++    case PIXEL_FORMAT_YUV444P10:
++      return ConvertAndScaleYUV444P10(&src_frame, dest_frame);
++
+     case PIXEL_FORMAT_NV12:
+     case PIXEL_FORMAT_NV12A:
+       return ConvertAndScaleNV12x(&src_frame, dest_frame);
+@@ -222,6 +227,49 @@ EncoderStatus VideoFrameConverter::ConvertAndScaleRGB(
+                  ? OkStatus()
+                  : EncoderStatus(EncoderStatus::Codes::kFormatConversionError);
+ 
++    case PIXEL_FORMAT_P010LE: {
++      auto tmp_i420_frame =
++          CreateTempFrame(PIXEL_FORMAT_I420, dest_frame.coded_size(),
++                          dest_frame.visible_rect(), dest_frame.natural_size());
++      if (!tmp_i420_frame ||
++          !internals::ARGBToI420x(*src_frame, *tmp_i420_frame)) {
++        return EncoderStatus::Codes::kFormatConversionError;
++      }
++      return ConvertI420xToP010(*tmp_i420_frame, dest_frame);
++    }
++
++    case PIXEL_FORMAT_YUV444P10: {
++      auto tmp_i444_frame =
++          CreateTempFrame(PIXEL_FORMAT_I444, dest_frame.coded_size(),
++                          dest_frame.visible_rect(), dest_frame.natural_size());
++      if (!tmp_i444_frame) {
++        return EncoderStatus::Codes::kScalingError;
++      }
++
++      scoped_refptr<VideoFrame> argb_tmp_frame;
++      if (auto src_format_override = GetSourceFormatOverrideForABGRToARGB(
++              src_frame->format(), PIXEL_FORMAT_I444)) {
++        if (tmp_frame) {
++          argb_tmp_frame =
++              WrapTempFrameForABGRToARGB(*src_format_override, tmp_frame);
++        } else {
++          argb_tmp_frame = CreateTempFrame(
++              *src_format_override, dest_frame.coded_size(),
++              dest_frame.visible_rect(), dest_frame.natural_size());
++        }
++        if (!argb_tmp_frame ||
++            !internals::ABGRToARGB(*src_frame, *argb_tmp_frame)) {
++          return EncoderStatus::Codes::kScalingError;
++        }
++        src_frame = argb_tmp_frame.get();
++      }
++
++      if (!internals::ARGBToI444x(*src_frame, *tmp_i444_frame)) {
++        return EncoderStatus(EncoderStatus::Codes::kFormatConversionError);
++      }
++      return ConvertI444xToYUV444P10(*tmp_i444_frame, dest_frame);
++    }
++
+     default:
+       return EncoderStatus(EncoderStatus::Codes::kUnsupportedFrameFormat)
+           .WithData("src", src_frame->AsHumanReadableString())
+@@ -271,6 +319,40 @@ EncoderStatus VideoFrameConverter::ConvertAndScaleI4xxx(
+       return OkStatus();
+     }
+ 
++    case PIXEL_FORMAT_P010LE: {
++      if (src_frame->visible_rect().size() == dest_frame.visible_rect().size() &&
++          (src_frame->format() == PIXEL_FORMAT_I420 ||
++           src_frame->format() == PIXEL_FORMAT_I420A)) {
++        return ConvertI420xToP010(*src_frame, dest_frame);
++      }
++
++      auto tmp_frame =
++          CreateTempFrame(PIXEL_FORMAT_I420, dest_frame.coded_size(),
++                          dest_frame.visible_rect(), dest_frame.natural_size());
++      if (!tmp_frame) {
++        return EncoderStatus::Codes::kScalingError;
++      }
++      internals::I4xxxScale(*src_frame, *tmp_frame);
++      return ConvertI420xToP010(*tmp_frame, dest_frame);
++    }
++
++    case PIXEL_FORMAT_YUV444P10: {
++      if (src_frame->visible_rect().size() == dest_frame.visible_rect().size() &&
++          (src_frame->format() == PIXEL_FORMAT_I444 ||
++           src_frame->format() == PIXEL_FORMAT_I444A)) {
++        return ConvertI444xToYUV444P10(*src_frame, dest_frame);
++      }
++
++      auto tmp_frame =
++          CreateTempFrame(PIXEL_FORMAT_I444, dest_frame.coded_size(),
++                          dest_frame.visible_rect(), dest_frame.natural_size());
++      if (!tmp_frame) {
++        return EncoderStatus::Codes::kScalingError;
++      }
++      internals::I4xxxScale(*src_frame, *tmp_frame);
++      return ConvertI444xToYUV444P10(*tmp_frame, dest_frame);
++    }
++
+     default:
+       return EncoderStatus(EncoderStatus::Codes::kUnsupportedFrameFormat)
+           .WithData("src", src_frame->AsHumanReadableString())
+@@ -321,6 +403,47 @@ EncoderStatus VideoFrameConverter::ConvertAndScaleNV12x(
+                  ? OkStatus()
+                  : EncoderStatus(EncoderStatus::Codes::kScalingError);
+ 
++    case PIXEL_FORMAT_P010LE: {
++      auto tmp_frame =
++          CreateTempFrame(PIXEL_FORMAT_I420, dest_frame.coded_size(),
++                          dest_frame.visible_rect(), dest_frame.natural_size());
++      if (!tmp_frame) {
++        return EncoderStatus::Codes::kScalingError;
++      }
++
++      if (src_frame->visible_rect().size() == dest_frame.visible_rect().size()) {
++        if (!internals::NV12xToI420x(*src_frame, *tmp_frame)) {
++          return EncoderStatus(EncoderStatus::Codes::kFormatConversionError);
++        }
++      } else {
++        auto wrapped_frame = WrapNV12xFrameInI420xFrame(*src_frame);
++        if (!wrapped_frame) {
++          return EncoderStatus::Codes::kScalingError;
++        }
++        internals::SplitUV(*src_frame, *wrapped_frame);
++        internals::I4xxxScale(*wrapped_frame, *tmp_frame);
++      }
++
++      return ConvertI420xToP010(*tmp_frame, dest_frame);
++    }
++
++    case PIXEL_FORMAT_YUV444P10: {
++      auto tmp_frame =
++          CreateTempFrame(PIXEL_FORMAT_I444, dest_frame.coded_size(),
++                          dest_frame.visible_rect(), dest_frame.natural_size());
++      if (!tmp_frame) {
++        return EncoderStatus::Codes::kScalingError;
++      }
++
++      auto wrapped_frame = WrapNV12xFrameInI420xFrame(*src_frame);
++      if (!wrapped_frame) {
++        return EncoderStatus::Codes::kScalingError;
++      }
++      internals::SplitUV(*src_frame, *wrapped_frame);
++      internals::I4xxxScale(*wrapped_frame, *tmp_frame);
++      return ConvertI444xToYUV444P10(*tmp_frame, dest_frame);
++    }
++
+     default:
+       return EncoderStatus(EncoderStatus::Codes::kUnsupportedFrameFormat)
+           .WithData("src", src_frame->AsHumanReadableString())
+@@ -328,4 +451,144 @@ EncoderStatus VideoFrameConverter::ConvertAndScaleNV12x(
+   }
+ }
+ 
++EncoderStatus VideoFrameConverter::ConvertI420xToP010(
++    const VideoFrame& src_frame,
++    VideoFrame& dest_frame) {
++  DCHECK(src_frame.format() == PIXEL_FORMAT_I420 ||
++         src_frame.format() == PIXEL_FORMAT_I420A);
++  DCHECK_EQ(dest_frame.format(), PIXEL_FORMAT_P010LE);
++  DCHECK_EQ(src_frame.visible_rect().size(), dest_frame.visible_rect().size());
++
++  // Keep the 10-bit intermediate on a plain owned frame. The reusable scratch
++  // pool still covers the surrounding I420 staging, while this path gives
++  // libyuv a conventional writable I010 layout for the final 10-bit step.
++  auto tmp_i010 =
++      VideoFrame::CreateFrame(PIXEL_FORMAT_YUV420P10, dest_frame.coded_size(),
++                              dest_frame.visible_rect(),
++                              dest_frame.natural_size(),
++                              dest_frame.timestamp());
++  if (!tmp_i010) {
++    return EncoderStatus::Codes::kScalingError;
++  }
++
++  if (libyuv::I420ToI010(
++          src_frame.visible_data(VideoFrame::Plane::kY),
++          src_frame.stride(VideoFrame::Plane::kY),
++          src_frame.visible_data(VideoFrame::Plane::kU),
++          src_frame.stride(VideoFrame::Plane::kU),
++          src_frame.visible_data(VideoFrame::Plane::kV),
++          src_frame.stride(VideoFrame::Plane::kV),
++          reinterpret_cast<uint16_t*>(
++              tmp_i010->GetWritableVisibleData(VideoFrame::Plane::kY)),
++          tmp_i010->stride(VideoFrame::Plane::kY) /
++              base::checked_cast<int>(sizeof(uint16_t)),
++          reinterpret_cast<uint16_t*>(
++              tmp_i010->GetWritableVisibleData(VideoFrame::Plane::kU)),
++          tmp_i010->stride(VideoFrame::Plane::kU) /
++              base::checked_cast<int>(sizeof(uint16_t)),
++          reinterpret_cast<uint16_t*>(
++              tmp_i010->GetWritableVisibleData(VideoFrame::Plane::kV)),
++          tmp_i010->stride(VideoFrame::Plane::kV) /
++              base::checked_cast<int>(sizeof(uint16_t)),
++          dest_frame.visible_rect().width(), dest_frame.visible_rect().height()) !=
++      0) {
++    return EncoderStatus::Codes::kFormatConversionError;
++  }
++
++  if (libyuv::I010ToP010(
++          reinterpret_cast<const uint16_t*>(
++              tmp_i010->visible_data(VideoFrame::Plane::kY)),
++          tmp_i010->stride(VideoFrame::Plane::kY) /
++              base::checked_cast<int>(sizeof(uint16_t)),
++          reinterpret_cast<const uint16_t*>(
++              tmp_i010->visible_data(VideoFrame::Plane::kU)),
++          tmp_i010->stride(VideoFrame::Plane::kU) /
++              base::checked_cast<int>(sizeof(uint16_t)),
++          reinterpret_cast<const uint16_t*>(
++              tmp_i010->visible_data(VideoFrame::Plane::kV)),
++          tmp_i010->stride(VideoFrame::Plane::kV) /
++              base::checked_cast<int>(sizeof(uint16_t)),
++          reinterpret_cast<uint16_t*>(
++              dest_frame.GetWritableVisibleData(VideoFrame::Plane::kY)),
++          dest_frame.stride(VideoFrame::Plane::kY) /
++              base::checked_cast<int>(sizeof(uint16_t)),
++          reinterpret_cast<uint16_t*>(
++              dest_frame.GetWritableVisibleData(VideoFrame::Plane::kUV)),
++          dest_frame.stride(VideoFrame::Plane::kUV) /
++              base::checked_cast<int>(sizeof(uint16_t)),
++          dest_frame.visible_rect().width(),
++          dest_frame.visible_rect().height()) != 0) {
++    return EncoderStatus::Codes::kFormatConversionError;
++  }
++
++  return OkStatus();
++}
++
++EncoderStatus VideoFrameConverter::ConvertAndScaleYUV444P10(
++    const VideoFrame* src_frame,
++    VideoFrame& dest_frame) {
++  DCHECK_EQ(src_frame->format(), PIXEL_FORMAT_YUV444P10);
++
++  dest_frame.set_color_space(src_frame->ColorSpace());
++
++  switch (dest_frame.format()) {
++    case PIXEL_FORMAT_YUV444P10: {
++      const auto filtering =
++          src_frame->visible_rect() == dest_frame.visible_rect()
++              ? libyuv::kFilterNone
++              : libyuv::kFilterBox;
++      for (size_t i = 0; i < VideoFrame::NumPlanes(dest_frame.format()); ++i) {
++        if (libyuv::ScalePlane_16(
++                reinterpret_cast<const uint16_t*>(src_frame->visible_data(i)),
++                src_frame->stride(i) /
++                    base::checked_cast<int>(sizeof(uint16_t)),
++                VideoFrame::Columns(i, src_frame->format(),
++                                    src_frame->visible_rect().width()),
++                VideoFrame::Rows(i, src_frame->format(),
++                                 src_frame->visible_rect().height()),
++                reinterpret_cast<uint16_t*>(
++                    dest_frame.GetWritableVisibleData(i)),
++                dest_frame.stride(i) /
++                    base::checked_cast<int>(sizeof(uint16_t)),
++                VideoFrame::Columns(i, dest_frame.format(),
++                                    dest_frame.visible_rect().width()),
++                VideoFrame::Rows(i, dest_frame.format(),
++                                 dest_frame.visible_rect().height()),
++                filtering) != 0) {
++          return EncoderStatus::Codes::kScalingError;
++        }
++      }
++      return OkStatus();
++    }
++
++    default:
++      return EncoderStatus(EncoderStatus::Codes::kUnsupportedFrameFormat)
++          .WithData("src", src_frame->AsHumanReadableString())
++          .WithData("dst", dest_frame.AsHumanReadableString());
++  }
++}
++
++EncoderStatus VideoFrameConverter::ConvertI444xToYUV444P10(
++    const VideoFrame& src_frame,
++    VideoFrame& dest_frame) {
++  DCHECK(src_frame.format() == PIXEL_FORMAT_I444 ||
++         src_frame.format() == PIXEL_FORMAT_I444A);
++  DCHECK_EQ(dest_frame.format(), PIXEL_FORMAT_YUV444P10);
++  DCHECK_EQ(src_frame.visible_rect().size(), dest_frame.visible_rect().size());
++
++  for (size_t i = 0; i < VideoFrame::NumPlanes(dest_frame.format()); ++i) {
++    libyuv::Convert8To16Plane(
++        src_frame.visible_data(i), src_frame.stride(i),
++        reinterpret_cast<uint16_t*>(dest_frame.GetWritableVisibleData(i)),
++        dest_frame.stride(i) / base::checked_cast<int>(sizeof(uint16_t)),
++        kConvert8To10BitScale,
++        VideoFrame::Columns(i, dest_frame.format(),
++                            dest_frame.visible_rect().width()),
++        VideoFrame::Rows(i, dest_frame.format(),
++                         dest_frame.visible_rect().height()));
++  }
++
++  return OkStatus();
++}
++
+ }  // namespace media
+diff --git a/media/base/video_frame_converter.h b/media/base/video_frame_converter.h
+index 9f2ccd4059196..dbedad58c4193 100644
+--- a/media/base/video_frame_converter.h
++++ b/media/base/video_frame_converter.h
+@@ -32,6 +32,7 @@ class MEDIA_EXPORT VideoFrameConverter {
+   //   * PIXEL_FORMAT_I420A
+   //   * PIXEL_FORMAT_I444
+   //   * PIXEL_FORMAT_I444A
++  //   * PIXEL_FORMAT_YUV444P10
+   //   * PIXEL_FORMAT_NV12
+   //   * PIXEL_FORMAT_NV12A
+   //
+@@ -40,8 +41,10 @@ class MEDIA_EXPORT VideoFrameConverter {
+   //   * PIXEL_FORMAT_I420A
+   //   * PIXEL_FORMAT_I444
+   //   * PIXEL_FORMAT_I444A
++  //   * PIXEL_FORMAT_YUV444P10
+   //   * PIXEL_FORMAT_NV12
+   //   * PIXEL_FORMAT_NV12A
++  //   * PIXEL_FORMAT_P010LE
+   EncoderStatus ConvertAndScale(const VideoFrame& src_frame,
+                                 VideoFrame& dest_frame);
+ 
+@@ -72,8 +75,14 @@ class MEDIA_EXPORT VideoFrameConverter {
+                                    VideoFrame& dest_frame);
+   EncoderStatus ConvertAndScaleI4xxx(const VideoFrame* src_frame,
+                                      VideoFrame& dest_frame);
++  EncoderStatus ConvertAndScaleYUV444P10(const VideoFrame* src_frame,
++                                         VideoFrame& dest_frame);
+   EncoderStatus ConvertAndScaleNV12x(const VideoFrame* src_frame,
+                                      VideoFrame& dest_frame);
++  EncoderStatus ConvertI420xToP010(const VideoFrame& src_frame,
++                                   VideoFrame& dest_frame);
++  EncoderStatus ConvertI444xToYUV444P10(const VideoFrame& src_frame,
++                                        VideoFrame& dest_frame);
+ 
+   // NOTE: This class is currently thread safe without locking, take care when
+   // adding any shared class state.
+diff --git a/media/gpu/h265_builder.cc b/media/gpu/h265_builder.cc
+index 37a27313c5648..b6583e982c74f 100644
+--- a/media/gpu/h265_builder.cc
++++ b/media/gpu/h265_builder.cc
+@@ -24,10 +24,13 @@ void BuildPackedH265ProfileTierLevel(
+                        profile_tier_level.general_non_packed_constraint_flag);
+     builder.AppendBits(1,
+                        profile_tier_level.general_frame_only_constraint_flag);
+-    CHECK_LT(profile_tier_level.general_profile_idc, 4);
+-    // Check general_profile_compatibility_flag[ 2 ] == 0
+-    CHECK(!(profile_tier_level.general_profile_compatibility_flags & 1 << 29));
+-    builder.AppendBits(43, 0);  // general_reserved_zero_43bits
++    // Match the parser's currently supported syntax layout for profile_tier_level
++    // so packed VPS/SPS can round-trip for Main, Main10, REXT, and High
++    // Throughput profiles.
++    builder.AppendBits(7, 0);  // general_reserved_zero_7bits
++    builder.AppendBits(
++        1, profile_tier_level.general_one_picture_only_constraint_flag);
++    builder.AppendBits(35, 0);  // general_reserved_zero_35bits
+     builder.AppendBits(1, 0);   // general_inbld_flag
+   }
+   builder.AppendBits(8, profile_tier_level.general_level_idc);
+diff --git a/media/gpu/h265_builder_unittest.cc b/media/gpu/h265_builder_unittest.cc
+index 07f8d8399c04c..2e0744db3810e 100644
+--- a/media/gpu/h265_builder_unittest.cc
++++ b/media/gpu/h265_builder_unittest.cc
+@@ -167,4 +167,124 @@ TEST_F(H265BuilderTest, BuildSPSWithoutVUIParameters) {
+   EXPECT_EQ(sps.chroma_format_idc, parsed_sps->chroma_format_idc);
+ }
+ 
++TEST_F(H265BuilderTest, BuildRangeExtensionsSPS) {
++  H265SPS sps = {};
++  sps.sps_video_parameter_set_id = 0;
++  sps.sps_max_sub_layers_minus1 = 0;
++  sps.sps_temporal_id_nesting_flag = 1;
++  sps.profile_tier_level.general_profile_idc =
++      H265ProfileTierLevel::kProfileIdcRangeExtensions;
++  sps.profile_tier_level.general_profile_compatibility_flags = 1u << 27;
++  sps.profile_tier_level.general_progressive_source_flag = 1;
++  sps.profile_tier_level.general_interlaced_source_flag = 0;
++  sps.profile_tier_level.general_non_packed_constraint_flag = 1;
++  sps.profile_tier_level.general_frame_only_constraint_flag = 1;
++  sps.profile_tier_level.general_level_idc = 153;
++  sps.sps_seq_parameter_set_id = 0;
++  sps.chroma_format_idc = 3;
++  sps.pic_width_in_luma_samples = 1456;
++  sps.pic_height_in_luma_samples = 598;
++  sps.bit_depth_luma_minus8 = 0;
++  sps.bit_depth_chroma_minus8 = 0;
++  sps.log2_max_pic_order_cnt_lsb_minus4 = 4;
++  sps.sps_max_dec_pic_buffering_minus1[0] = 1;
++  sps.sps_max_num_reorder_pics[0] = 0;
++  sps.sps_max_latency_increase_plus1[0] = 0;
++  sps.log2_min_luma_coding_block_size_minus3 = 0;
++  sps.log2_diff_max_min_luma_coding_block_size = 3;
++  sps.log2_min_luma_transform_block_size_minus2 = 0;
++  sps.log2_diff_max_min_luma_transform_block_size = 3;
++  sps.max_transform_hierarchy_depth_inter = 0;
++  sps.max_transform_hierarchy_depth_intra = 0;
++  sps.scaling_list_enabled_flag = false;
++  sps.amp_enabled_flag = true;
++  sps.sample_adaptive_offset_enabled_flag = true;
++  sps.pcm_enabled_flag = false;
++  sps.num_short_term_ref_pic_sets = 0;
++  sps.long_term_ref_pics_present_flag = false;
++  sps.sps_temporal_mvp_enabled_flag = true;
++  sps.strong_intra_smoothing_enabled_flag = true;
++  sps.vui_parameters_present_flag = false;
++
++  H26xAnnexBBitstreamBuilder builder;
++  BuildPackedH265SPS(builder, sps);
++  builder.Flush();
++
++  parser_->SetStream(builder.data());
++  H265NALU nalu;
++  ASSERT_EQ(H265Parser::kOk, parser_->AdvanceToNextNALU(&nalu));
++  EXPECT_EQ(H265NALU::SPS_NUT, nalu.nal_unit_type);
++
++  int sps_id;
++  ASSERT_EQ(H265Parser::kOk, parser_->ParseSPS(&sps_id));
++
++  const H265SPS* parsed_sps = parser_->GetSPS(sps_id);
++  ASSERT_TRUE(parsed_sps);
++  EXPECT_EQ(H265ProfileTierLevel::kProfileIdcRangeExtensions,
++            parsed_sps->profile_tier_level.general_profile_idc);
++  EXPECT_EQ(3, parsed_sps->chroma_format_idc);
++  EXPECT_EQ(0, parsed_sps->bit_depth_luma_minus8);
++  EXPECT_EQ(0, parsed_sps->bit_depth_chroma_minus8);
++}
++
++TEST_F(H265BuilderTest, BuildHighThroughputSPS) {
++  H265SPS sps = {};
++  sps.sps_video_parameter_set_id = 0;
++  sps.sps_max_sub_layers_minus1 = 0;
++  sps.sps_temporal_id_nesting_flag = 1;
++  sps.profile_tier_level.general_profile_idc =
++      H265ProfileTierLevel::kProfileIdcHighThroughput;
++  sps.profile_tier_level.general_profile_compatibility_flags = 1u << 26;
++  sps.profile_tier_level.general_progressive_source_flag = 1;
++  sps.profile_tier_level.general_interlaced_source_flag = 0;
++  sps.profile_tier_level.general_non_packed_constraint_flag = 1;
++  sps.profile_tier_level.general_frame_only_constraint_flag = 1;
++  sps.profile_tier_level.general_level_idc = 153;
++  sps.sps_seq_parameter_set_id = 0;
++  sps.chroma_format_idc = 3;
++  sps.pic_width_in_luma_samples = 1456;
++  sps.pic_height_in_luma_samples = 598;
++  sps.bit_depth_luma_minus8 = 2;
++  sps.bit_depth_chroma_minus8 = 2;
++  sps.log2_max_pic_order_cnt_lsb_minus4 = 4;
++  sps.sps_max_dec_pic_buffering_minus1[0] = 1;
++  sps.sps_max_num_reorder_pics[0] = 0;
++  sps.sps_max_latency_increase_plus1[0] = 0;
++  sps.log2_min_luma_coding_block_size_minus3 = 0;
++  sps.log2_diff_max_min_luma_coding_block_size = 3;
++  sps.log2_min_luma_transform_block_size_minus2 = 0;
++  sps.log2_diff_max_min_luma_transform_block_size = 3;
++  sps.max_transform_hierarchy_depth_inter = 0;
++  sps.max_transform_hierarchy_depth_intra = 0;
++  sps.scaling_list_enabled_flag = false;
++  sps.amp_enabled_flag = true;
++  sps.sample_adaptive_offset_enabled_flag = true;
++  sps.pcm_enabled_flag = false;
++  sps.num_short_term_ref_pic_sets = 0;
++  sps.long_term_ref_pics_present_flag = false;
++  sps.sps_temporal_mvp_enabled_flag = true;
++  sps.strong_intra_smoothing_enabled_flag = true;
++  sps.vui_parameters_present_flag = false;
++
++  H26xAnnexBBitstreamBuilder builder;
++  BuildPackedH265SPS(builder, sps);
++  builder.Flush();
++
++  parser_->SetStream(builder.data());
++  H265NALU nalu;
++  ASSERT_EQ(H265Parser::kOk, parser_->AdvanceToNextNALU(&nalu));
++  EXPECT_EQ(H265NALU::SPS_NUT, nalu.nal_unit_type);
++
++  int sps_id;
++  ASSERT_EQ(H265Parser::kOk, parser_->ParseSPS(&sps_id));
++
++  const H265SPS* parsed_sps = parser_->GetSPS(sps_id);
++  ASSERT_TRUE(parsed_sps);
++  EXPECT_EQ(H265ProfileTierLevel::kProfileIdcHighThroughput,
++            parsed_sps->profile_tier_level.general_profile_idc);
++  EXPECT_EQ(3, parsed_sps->chroma_format_idc);
++  EXPECT_EQ(2, parsed_sps->bit_depth_luma_minus8);
++  EXPECT_EQ(2, parsed_sps->bit_depth_chroma_minus8);
++}
++
+ }  // namespace media
+diff --git a/media/gpu/vaapi/BUILD.gn b/media/gpu/vaapi/BUILD.gn
+index 950e83da6874b..95d541595974a 100644
+--- a/media/gpu/vaapi/BUILD.gn
++++ b/media/gpu/vaapi/BUILD.gn
+@@ -72,6 +72,8 @@ source_set("vaapi") {
+     sources += [
+       "h265_vaapi_video_decoder_delegate.cc",
+       "h265_vaapi_video_decoder_delegate.h",
++      "h265_vaapi_video_encoder_delegate.cc",
++      "h265_vaapi_video_encoder_delegate.h",
+     ]
+   }
+ 
+diff --git a/media/gpu/vaapi/h265_vaapi_video_encoder_delegate.cc b/media/gpu/vaapi/h265_vaapi_video_encoder_delegate.cc
+new file mode 100644
+index 0000000000000..0dece0fd75d8f
+--- /dev/null
++++ b/media/gpu/vaapi/h265_vaapi_video_encoder_delegate.cc
+@@ -0,0 +1,549 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifdef UNSAFE_BUFFERS_BUILD
++// TODO(crbug.com/40285824): Remove this and convert code to safer constructs.
++#pragma allow_unsafe_buffers
++#endif
++
++#include "media/gpu/vaapi/h265_vaapi_video_encoder_delegate.h"
++
++#include <va/va.h>
++#include <va/va_enc_hevc.h>
++
++#include <algorithm>
++#include <climits>
++#include <optional>
++
++#include "base/bits.h"
++#include "base/logging.h"
++#include "base/memory/ref_counted_memory.h"
++#include "base/notimplemented.h"
++#include "base/numerics/checked_math.h"
++#include "base/numerics/safe_conversions.h"
++#include "media/gpu/h265_builder.h"
++#include "media/gpu/gpu_video_encode_accelerator_helpers.h"
++#include "media/gpu/h265_dpb.h"
++#include "media/gpu/macros.h"
++#include "media/gpu/vaapi/vaapi_common.h"
++#include "media/gpu/vaapi/vaapi_wrapper.h"
++#include "media/parsers/h265_parser.h"
++#include "media/video/video_encode_accelerator.h"
++
++namespace media {
++
++namespace {
++
++constexpr size_t kIDRPeriod = 2048;
++constexpr uint32_t kCPBWindowSizeMs = 1500;
++constexpr uint8_t kDefaultInitialQp = 26;
++constexpr uint32_t kDefaultHevcLevelIdc = 120;  // Level 4.0.
++constexpr int kCTUSizeInPixels = 64;
++constexpr int kMinCodingBlockSizeInPixels = 8;
++
++bool SupportsPackedHeaders(VideoCodecProfile profile) {
++  switch (profile) {
++    case HEVCPROFILE_MAIN:
++    case HEVCPROFILE_MAIN10:
++    case HEVCPROFILE_MAIN_STILL_PICTURE:
++    case HEVCPROFILE_REXT:
++    case HEVCPROFILE_HIGH_THROUGHPUT:
++      return true;
++    default:
++      return false;
++  }
++}
++
++bool SuppressPackedHeadersForVisibleSizeShmemMain10(
++    const VideoEncodeAccelerator::Config& config,
++    const gfx::Size& visible_size,
++    const gfx::Size& coded_size) {
++  return config.output_profile == HEVCPROFILE_MAIN10 &&
++         config.storage_type ==
++             VideoEncodeAccelerator::Config::StorageType::kShmem &&
++         visible_size != coded_size;
++}
++
++void InitVAPictureHEVC(VAPictureHEVC* va_pic) {
++  *va_pic = {};
++  va_pic->picture_id = VA_INVALID_ID;
++  va_pic->flags = VA_PICTURE_HEVC_INVALID;
++}
++
++template <typename VAEncMiscParam>
++VAEncMiscParam& AllocateMiscParameterBuffer(
++    std::vector<uint8_t>& misc_buffer,
++    VAEncMiscParameterType misc_param_type) {
++  constexpr size_t kBufferSize =
++      sizeof(VAEncMiscParameterBuffer) + sizeof(VAEncMiscParam);
++  misc_buffer.resize(kBufferSize);
++  auto* va_buffer =
++      reinterpret_cast<VAEncMiscParameterBuffer*>(misc_buffer.data());
++  va_buffer->type = misc_param_type;
++  return *reinterpret_cast<VAEncMiscParam*>(va_buffer->data);
++}
++
++std::optional<uint8_t> ToGeneralProfileIdc(VideoCodecProfile profile) {
++  switch (profile) {
++    case HEVCPROFILE_MAIN:
++      return H265ProfileTierLevel::kProfileIdcMain;
++    case HEVCPROFILE_MAIN10:
++      return H265ProfileTierLevel::kProfileIdcMain10;
++    case HEVCPROFILE_MAIN_STILL_PICTURE:
++      return H265ProfileTierLevel::kProfileIdcMainStill;
++    case HEVCPROFILE_REXT:
++      return H265ProfileTierLevel::kProfileIdcRangeExtensions;
++    case HEVCPROFILE_HIGH_THROUGHPUT:
++      return H265ProfileTierLevel::kProfileIdcHighThroughput;
++    default:
++      return std::nullopt;
++  }
++}
++
++uint8_t GetBitDepthMinus8(VideoCodecProfile profile) {
++  switch (profile) {
++    case HEVCPROFILE_MAIN10:
++    case HEVCPROFILE_HIGH_THROUGHPUT:
++      return 2;
++    default:
++      return 0;
++  }
++}
++
++uint8_t GetChromaFormatIdc(VideoCodecProfile profile) {
++  switch (profile) {
++    case HEVCPROFILE_REXT:
++    case HEVCPROFILE_HIGH_THROUGHPUT:
++      return 3;
++    default:
++      return 1;
++  }
++}
++
++std::pair<int, int> GetConformanceWindowUnitSizes(uint8_t chroma_format_idc) {
++  switch (chroma_format_idc) {
++    case 0:
++      return {1, 1};
++    case 1:
++      return {2, 2};
++    case 2:
++      return {2, 1};
++    case 3:
++      return {1, 1};
++    default:
++      NOTREACHED();
++  }
++}
++
++scoped_refptr<H265Picture> GetH265Picture(
++    const VaapiVideoEncoderDelegate::EncodeJob& job) {
++  return base::WrapRefCounted(
++      reinterpret_cast<H265Picture*>(job.picture().get()));
++}
++
++}  // namespace
++
++H265VaapiVideoEncoderDelegate::H265VaapiVideoEncoderDelegate(
++    scoped_refptr<VaapiWrapper> vaapi_wrapper,
++    base::RepeatingClosure error_cb)
++    : VaapiVideoEncoderDelegate(std::move(vaapi_wrapper), error_cb) {}
++
++H265VaapiVideoEncoderDelegate::~H265VaapiVideoEncoderDelegate() = default;
++
++bool H265VaapiVideoEncoderDelegate::Initialize(
++    const VideoEncodeAccelerator::Config& config,
++    const VaapiVideoEncoderDelegate::Config& ave_config) {
++  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
++
++  profile_ = config.output_profile;
++  if (!ToGeneralProfileIdc(profile_).has_value()) {
++    NOTIMPLEMENTED() << "Unsupported H265 profile "
++                     << GetProfileName(config.output_profile);
++    return false;
++  }
++
++  if (config.input_visible_size.IsEmpty()) {
++    DVLOGF(1) << "Input visible size could not be empty";
++    return false;
++  }
++
++  if (config.HasSpatialLayer()) {
++    DVLOGF(1) << "Spatial layer encoding is not supported for H265";
++    return false;
++  }
++
++  if (GetChromaFormatIdc(profile_) == 1 &&
++      ((config.input_visible_size.width() % 2 != 0) ||
++       (config.input_visible_size.height() % 2 != 0))) {
++    DVLOGF(1) << "Input visible size should be even for 4:2:0";
++    return false;
++  }
++
++  visible_size_ = config.input_visible_size;
++  coded_size_ = gfx::Size(
++      base::bits::AlignUpDeprecatedDoNotUse(visible_size_.width(),
++                                            kMinCodingBlockSizeInPixels),
++      base::bits::AlignUpDeprecatedDoNotUse(visible_size_.height(),
++                                            kMinCodingBlockSizeInPixels));
++
++  if (ave_config.max_num_ref_frames == 0) {
++    DVLOGF(1) << "Invalid max reference frame setting from VEA";
++    return false;
++  }
++
++  initial_qp_ = kDefaultInitialQp;
++  frame_num_ = 0;
++  bitrate_allocation_ = VideoBitrateAllocation(config.bitrate.mode());
++
++  if (SupportsPackedHeaders(profile_)) {
++    bool submit_packed_sequence = false;
++    bool submit_packed_picture = false;
++    bool submit_packed_slice = false;
++    bool support_packed_raw = false;
++    if (!vaapi_wrapper_->GetSupportedPackedHeaders(
++            config.output_profile, submit_packed_sequence,
++            submit_packed_picture, submit_packed_slice, support_packed_raw)) {
++      DVLOGF(2) << "Failed getting supported packed headers for H265";
++    } else {
++      submit_packed_headers_ =
++          submit_packed_sequence && submit_packed_picture;
++    }
++    if (submit_packed_headers_ &&
++        SuppressPackedHeadersForVisibleSizeShmemMain10(config, visible_size_,
++                                                       coded_size_)) {
++      // Main10 SHMEM keeps the client/input surface at visible size. Let the
++      // backend emit SPS/PPS that match that effective encode size instead of
++      // prepending packed headers built from the aligned coded size.
++      submit_packed_headers_ = false;
++    }
++    if (submit_packed_headers_) {
++      packed_vps_.emplace();
++      packed_sps_.emplace();
++      packed_pps_.emplace();
++      if (!UpdatePackedHeaders()) {
++        return false;
++      }
++    } else if (visible_size_ != coded_size_) {
++      DVLOGF(1) << "Packed HEVC headers unsupported; conformance window won't "
++                   "be signaled for "
++                << visible_size_.ToString() << " -> "
++                << coded_size_.ToString();
++    }
++  }
++
++  return UpdateRates(AllocateBitrateForDefaultEncoding(config), config.framerate);
++}
++
++bool H265VaapiVideoEncoderDelegate::UpdateRates(
++    const VideoBitrateAllocation& bitrate_allocation,
++    uint32_t framerate) {
++  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
++
++  if (bitrate_allocation.GetMode() != bitrate_allocation_.GetMode()) {
++    DVLOGF(1) << "Unexpected bitrate mode update for H265";
++    return false;
++  }
++
++  if (bitrate_allocation.GetSumBps() == 0 || framerate == 0) {
++    return false;
++  }
++
++  bitrate_allocation_ = bitrate_allocation;
++  framerate_ = framerate;
++
++  base::CheckedNumeric<uint32_t> checked_cpb_size(bitrate_allocation.GetSumBps());
++  checked_cpb_size /= 1000;
++  checked_cpb_size *= kCPBWindowSizeMs;
++  if (!checked_cpb_size.AssignIfValid(&cpb_size_bits_)) {
++    DVLOGF(1) << "Invalid CPB size";
++    return false;
++  }
++
++  return true;
++}
++
++bool H265VaapiVideoEncoderDelegate::UpdatePackedHeaders() {
++  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
++  DCHECK(submit_packed_headers_);
++  DCHECK(packed_vps_);
++  DCHECK(packed_sps_);
++  DCHECK(packed_pps_);
++
++  const std::optional<uint8_t> profile_idc = ToGeneralProfileIdc(profile_);
++  if (!profile_idc.has_value()) {
++    DVLOGF(1) << "Invalid H265 profile";
++    return false;
++  }
++
++  const uint8_t bit_depth_minus8 = GetBitDepthMinus8(profile_);
++  const uint8_t chroma_format_idc = GetChromaFormatIdc(profile_);
++  const auto [crop_unit_x, crop_unit_y] =
++      GetConformanceWindowUnitSizes(chroma_format_idc);
++  const int width_padding = coded_size_.width() - visible_size_.width();
++  const int height_padding = coded_size_.height() - visible_size_.height();
++  DCHECK_GT(crop_unit_x, 0);
++  DCHECK_GT(crop_unit_y, 0);
++
++  H265VPS vps;
++  vps.vps_video_parameter_set_id = 0;
++  vps.vps_base_layer_internal_flag = true;
++  vps.vps_base_layer_available_flag = true;
++  vps.vps_temporal_id_nesting_flag = true;
++  vps.profile_tier_level.general_profile_idc = *profile_idc;
++  vps.profile_tier_level.general_profile_compatibility_flags =
++      1u << (31 - *profile_idc);
++  vps.profile_tier_level.general_progressive_source_flag = true;
++  vps.profile_tier_level.general_non_packed_constraint_flag = true;
++  vps.profile_tier_level.general_frame_only_constraint_flag = true;
++  vps.profile_tier_level.general_level_idc = kDefaultHevcLevelIdc;
++  vps.vps_max_dec_pic_buffering_minus1[0] =
++      base::checked_cast<int>(GetMaxNumOfRefFrames());
++  vps.vps_max_latency_increase_plus1[0] = 1;
++
++  H265SPS sps;
++  sps.sps_video_parameter_set_id = vps.vps_video_parameter_set_id;
++  sps.sps_max_sub_layers_minus1 = vps.vps_max_sub_layers_minus1;
++  sps.sps_temporal_id_nesting_flag = vps.vps_temporal_id_nesting_flag;
++  sps.profile_tier_level = vps.profile_tier_level;
++  sps.sps_seq_parameter_set_id = 0;
++  sps.chroma_format_idc = chroma_format_idc;
++  sps.pic_width_in_luma_samples = coded_size_.width();
++  sps.pic_height_in_luma_samples = coded_size_.height();
++  DCHECK_EQ(width_padding % crop_unit_x, 0);
++  DCHECK_EQ(height_padding % crop_unit_y, 0);
++  sps.conf_win_right_offset = width_padding / crop_unit_x;
++  sps.conf_win_bottom_offset = height_padding / crop_unit_y;
++  sps.bit_depth_luma_minus8 = bit_depth_minus8;
++  sps.bit_depth_chroma_minus8 = bit_depth_minus8;
++  sps.log2_max_pic_order_cnt_lsb_minus4 =
++      base::bits::Log2Ceiling(kIDRPeriod * 2) - 4;
++  sps.sps_max_dec_pic_buffering_minus1 = vps.vps_max_dec_pic_buffering_minus1;
++  sps.sps_max_num_reorder_pics = vps.vps_max_num_reorder_pics;
++  std::ranges::copy(vps.vps_max_latency_increase_plus1,
++                    sps.sps_max_latency_increase_plus1.begin());
++  sps.log2_min_luma_coding_block_size_minus3 = 0;
++  sps.log2_diff_max_min_luma_coding_block_size = 3;
++  sps.log2_min_luma_transform_block_size_minus2 = 0;
++  sps.log2_diff_max_min_luma_transform_block_size = 3;
++  sps.max_transform_hierarchy_depth_inter = 0;
++  sps.max_transform_hierarchy_depth_intra = 0;
++  sps.sample_adaptive_offset_enabled_flag = true;
++  sps.strong_intra_smoothing_enabled_flag = true;
++
++  H265PPS pps;
++  pps.pps_pic_parameter_set_id = 0;
++  pps.pps_seq_parameter_set_id = sps.sps_seq_parameter_set_id;
++  pps.cabac_init_present_flag = true;
++  pps.num_ref_idx_l0_default_active_minus1 = 0;
++  pps.num_ref_idx_l1_default_active_minus1 = 0;
++  pps.init_qp_minus26 = base::checked_cast<int>(initial_qp_) - 26;
++  pps.cu_qp_delta_enabled_flag = true;
++  pps.pps_slice_chroma_qp_offsets_present_flag = true;
++  pps.pps_loop_filter_across_slices_enabled_flag = true;
++  pps.deblocking_filter_control_present_flag = true;
++
++  packed_vps_->Reset();
++  packed_sps_->Reset();
++  packed_pps_->Reset();
++  BuildPackedH265VPS(*packed_vps_, vps);
++  BuildPackedH265SPS(*packed_sps_, sps);
++  BuildPackedH265PPS(*packed_pps_, pps);
++  return true;
++}
++
++gfx::Size H265VaapiVideoEncoderDelegate::GetCodedSize() const {
++  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
++  return coded_size_;
++}
++
++size_t H265VaapiVideoEncoderDelegate::GetMaxNumOfRefFrames() const {
++  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
++  return 1;
++}
++
++std::vector<gfx::Size> H265VaapiVideoEncoderDelegate::GetSVCLayerResolutions() {
++  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
++  return {visible_size_};
++}
++
++BitstreamBufferMetadata H265VaapiVideoEncoderDelegate::GetMetadata(
++    const EncodeJob& encode_job,
++    size_t payload_size) {
++  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
++  CHECK(!encode_job.IsFrameDropped());
++  CHECK_NE(payload_size, 0u);
++  return BitstreamBufferMetadata(
++      payload_size, encode_job.IsKeyframeRequested(), encode_job.timestamp());
++}
++
++void H265VaapiVideoEncoderDelegate::BitrateControlUpdate(
++    const BitstreamBufferMetadata&) {
++  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
++}
++
++VaapiVideoEncoderDelegate::PrepareEncodeJobResult
++H265VaapiVideoEncoderDelegate::PrepareEncodeJob(EncodeJob& encode_job) {
++  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
++
++  const bool idr =
++      encode_job.IsKeyframeRequested() || frame_num_ == 0 ||
++      ((frame_num_ % kIDRPeriod) == 0);
++  if (idr) {
++    encode_job.ProduceKeyframe();
++  }
++
++  if (!SubmitFrameParameters(encode_job, idr)) {
++    DVLOGF(1) << "Failed submitting H265 frame parameters";
++    return PrepareEncodeJobResult::kFail;
++  }
++
++  ++frame_num_;
++  frame_num_ %= kIDRPeriod;
++  return PrepareEncodeJobResult::kSuccess;
++}
++
++bool H265VaapiVideoEncoderDelegate::SubmitFrameParameters(EncodeJob& encode_job,
++                                                          bool idr) {
++  DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
++
++  scoped_refptr<H265Picture> pic = GetH265Picture(encode_job);
++  if (!pic) {
++    DVLOGF(1) << "Invalid H265 picture";
++    return false;
++  }
++
++  const std::optional<uint8_t> profile_idc = ToGeneralProfileIdc(profile_);
++  if (!profile_idc.has_value()) {
++    DVLOGF(1) << "Invalid H265 profile";
++    return false;
++  }
++  const uint8_t bit_depth_minus8 = GetBitDepthMinus8(profile_);
++  const uint8_t chroma_format_idc = GetChromaFormatIdc(profile_);
++
++  pic->nal_unit_type_ = idr ? H265NALU::IDR_W_RADL : H265NALU::TRAIL_R;
++  pic->pic_order_cnt_val_ = base::checked_cast<int>(frame_num_);
++
++  VAEncSequenceParameterBufferHEVC seq_param = {};
++  seq_param.general_profile_idc = *profile_idc;
++  seq_param.general_level_idc = kDefaultHevcLevelIdc;
++  seq_param.general_tier_flag = 0;
++  seq_param.intra_period = kIDRPeriod;
++  seq_param.intra_idr_period = kIDRPeriod;
++  seq_param.ip_period = 1;
++  seq_param.bits_per_second = bitrate_allocation_.GetSumBps();
++  seq_param.pic_width_in_luma_samples = coded_size_.width();
++  seq_param.pic_height_in_luma_samples = coded_size_.height();
++  seq_param.seq_fields.bits.chroma_format_idc = chroma_format_idc;
++  seq_param.seq_fields.bits.bit_depth_luma_minus8 = bit_depth_minus8;
++  seq_param.seq_fields.bits.bit_depth_chroma_minus8 = bit_depth_minus8;
++  seq_param.seq_fields.bits.strong_intra_smoothing_enabled_flag = 1;
++  seq_param.seq_fields.bits.sample_adaptive_offset_enabled_flag = 1;
++  seq_param.seq_fields.bits.low_delay_seq = 1;
++  seq_param.log2_min_luma_coding_block_size_minus3 = 0;
++  seq_param.log2_diff_max_min_luma_coding_block_size = 3;
++  seq_param.log2_min_transform_block_size_minus2 = 0;
++  seq_param.log2_diff_max_min_transform_block_size = 3;
++  seq_param.max_transform_hierarchy_depth_inter = 0;
++  seq_param.max_transform_hierarchy_depth_intra = 0;
++  seq_param.pcm_sample_bit_depth_luma_minus1 = 8 + bit_depth_minus8 - 1;
++  seq_param.pcm_sample_bit_depth_chroma_minus1 = 8 + bit_depth_minus8 - 1;
++  seq_param.log2_min_pcm_luma_coding_block_size_minus3 = 0;
++  seq_param.log2_max_pcm_luma_coding_block_size_minus3 = 0;
++  seq_param.vui_parameters_present_flag = 1;
++  seq_param.vui_fields.bits.vui_timing_info_present_flag = 1;
++  seq_param.vui_num_units_in_tick = 1;
++  seq_param.vui_time_scale = framerate_;
++
++  VAEncPictureParameterBufferHEVC pic_param = {};
++  pic_param.decoded_curr_pic.picture_id =
++      pic->AsVaapiH265Picture()->va_surface_id();
++  pic_param.decoded_curr_pic.pic_order_cnt = pic->pic_order_cnt_val_;
++  pic_param.coded_buf = encode_job.coded_buffer_id();
++  pic_param.collocated_ref_pic_index = 0xFF;
++  pic_param.pic_init_qp = initial_qp_;
++  pic_param.log2_parallel_merge_level_minus2 = 0;
++  pic_param.num_ref_idx_l0_default_active_minus1 = 0;
++  pic_param.num_ref_idx_l1_default_active_minus1 = 0;
++  pic_param.slice_pic_parameter_set_id = 0;
++  pic_param.nal_unit_type = base::checked_cast<uint8_t>(pic->nal_unit_type_);
++  pic_param.pic_fields.bits.idr_pic_flag = idr ? 1 : 0;
++  pic_param.pic_fields.bits.coding_type = 1;
++  pic_param.pic_fields.bits.reference_pic_flag = 0;
++  pic_param.pic_fields.bits.pps_loop_filter_across_slices_enabled_flag = 1;
++  for (VAPictureHEVC& ref_pic : pic_param.reference_frames) {
++    InitVAPictureHEVC(&ref_pic);
++  }
++
++  VAEncSliceParameterBufferHEVC slice_param = {};
++  slice_param.slice_segment_address = 0;
++  const uint32_t ctu_cols =
++      base::bits::AlignUp(static_cast<uint32_t>(coded_size_.width()),
++                          static_cast<uint32_t>(kCTUSizeInPixels)) /
++      kCTUSizeInPixels;
++  const uint32_t ctu_rows =
++      base::bits::AlignUp(static_cast<uint32_t>(coded_size_.height()),
++                          static_cast<uint32_t>(kCTUSizeInPixels)) /
++      kCTUSizeInPixels;
++  slice_param.num_ctu_in_slice = std::max(1u, ctu_cols * ctu_rows);
++  slice_param.slice_type = 2;
++  slice_param.slice_pic_parameter_set_id = 0;
++  slice_param.num_ref_idx_l0_active_minus1 = 0;
++  slice_param.num_ref_idx_l1_active_minus1 = 0;
++  slice_param.max_num_merge_cand = 5;
++  slice_param.slice_qp_delta =
++      base::checked_cast<int8_t>(static_cast<int>(initial_qp_) - 26);
++  slice_param.slice_fields.bits.last_slice_of_pic_flag = 1;
++  slice_param.slice_fields.bits.slice_sao_luma_flag = 1;
++  slice_param.slice_fields.bits.slice_sao_chroma_flag = 1;
++  slice_param.slice_fields.bits.slice_loop_filter_across_slices_enabled_flag = 1;
++  for (VAPictureHEVC& ref_pic : slice_param.ref_pic_list0) {
++    InitVAPictureHEVC(&ref_pic);
++  }
++  for (VAPictureHEVC& ref_pic : slice_param.ref_pic_list1) {
++    InitVAPictureHEVC(&ref_pic);
++  }
++
++  std::vector<VaapiWrapper::VABufferDescriptor> va_buffers = {
++      {VAEncSequenceParameterBufferType, sizeof(seq_param), &seq_param},
++      {VAEncPictureParameterBufferType, sizeof(pic_param), &pic_param},
++      {VAEncSliceParameterBufferType, sizeof(slice_param), &slice_param},
++  };
++
++  std::array<VAEncPackedHeaderParameterBuffer, 3> packed_header_params = {};
++  size_t num_packed_headers = 0;
++  auto append_packed_header = [&](uint32_t type,
++                                  const H26xAnnexBBitstreamBuilder& builder) {
++    CHECK_LT(num_packed_headers, packed_header_params.size());
++    auto& packed_header_param = packed_header_params[num_packed_headers++];
++    packed_header_param.type = type;
++    packed_header_param.bit_length = builder.BytesInBuffer() * CHAR_BIT;
++    packed_header_param.has_emulation_bytes = 0;
++    va_buffers.push_back({VAEncPackedHeaderParameterBufferType,
++                          sizeof(packed_header_param), &packed_header_param});
++    va_buffers.push_back({VAEncPackedHeaderDataBufferType,
++                          builder.BytesInBuffer(), builder.data().data()});
++  };
++
++  if (idr && submit_packed_headers_) {
++    DCHECK(packed_vps_);
++    DCHECK(packed_sps_);
++    DCHECK(packed_pps_);
++    append_packed_header(VAEncPackedHeaderSequence, *packed_vps_);
++    append_packed_header(VAEncPackedHeaderSequence, *packed_sps_);
++    append_packed_header(VAEncPackedHeaderPicture, *packed_pps_);
++  }
++
++  std::vector<uint8_t> frame_rate_misc_buffer;
++  auto& frame_rate_param =
++      AllocateMiscParameterBuffer<VAEncMiscParameterFrameRate>(
++          frame_rate_misc_buffer, VAEncMiscParameterTypeFrameRate);
++  frame_rate_param.framerate = framerate_;
++  va_buffers.push_back({VAEncMiscParameterBufferType,
++                        frame_rate_misc_buffer.size(),
++                        frame_rate_misc_buffer.data()});
++
++  return vaapi_wrapper_->SubmitBuffers(va_buffers);
++}
++
++}  // namespace media
+diff --git a/media/gpu/vaapi/h265_vaapi_video_encoder_delegate.h b/media/gpu/vaapi/h265_vaapi_video_encoder_delegate.h
+new file mode 100644
+index 0000000000000..2f2a87fc8cc50
+--- /dev/null
++++ b/media/gpu/vaapi/h265_vaapi_video_encoder_delegate.h
+@@ -0,0 +1,59 @@
++// Copyright 2026 The Chromium Authors
++// Use of this source code is governed by a BSD-style license that can be
++// found in the LICENSE file.
++
++#ifndef MEDIA_GPU_VAAPI_H265_VAAPI_VIDEO_ENCODER_DELEGATE_H_
++#define MEDIA_GPU_VAAPI_H265_VAAPI_VIDEO_ENCODER_DELEGATE_H_
++
++#include <optional>
++
++#include "media/filters/h26x_annex_b_bitstream_builder.h"
++#include "media/parsers/h265_parser.h"
++#include "media/gpu/vaapi/vaapi_video_encoder_delegate.h"
++
++namespace media {
++
++class H265VaapiVideoEncoderDelegate : public VaapiVideoEncoderDelegate {
++ public:
++  H265VaapiVideoEncoderDelegate(scoped_refptr<VaapiWrapper> vaapi_wrapper,
++                                base::RepeatingClosure error_cb);
++  H265VaapiVideoEncoderDelegate(const H265VaapiVideoEncoderDelegate&) = delete;
++  H265VaapiVideoEncoderDelegate& operator=(
++      const H265VaapiVideoEncoderDelegate&) = delete;
++  ~H265VaapiVideoEncoderDelegate() override;
++
++  bool Initialize(const VideoEncodeAccelerator::Config& config,
++                  const VaapiVideoEncoderDelegate::Config& ave_config) override;
++  bool UpdateRates(const VideoBitrateAllocation& bitrate_allocation,
++                   uint32_t framerate) override;
++  gfx::Size GetCodedSize() const override;
++  size_t GetMaxNumOfRefFrames() const override;
++  std::vector<gfx::Size> GetSVCLayerResolutions() override;
++
++ private:
++  PrepareEncodeJobResult PrepareEncodeJob(EncodeJob& encode_job) override;
++  BitstreamBufferMetadata GetMetadata(const EncodeJob& encode_job,
++                                      size_t payload_size) override;
++  void BitrateControlUpdate(
++      const BitstreamBufferMetadata& metadata) override;
++
++  bool UpdatePackedHeaders();
++  bool SubmitFrameParameters(EncodeJob& encode_job, bool idr);
++
++  VideoCodecProfile profile_ = VIDEO_CODEC_PROFILE_UNKNOWN;
++  std::optional<H26xAnnexBBitstreamBuilder> packed_vps_;
++  std::optional<H26xAnnexBBitstreamBuilder> packed_sps_;
++  std::optional<H26xAnnexBBitstreamBuilder> packed_pps_;
++  bool submit_packed_headers_ = false;
++  gfx::Size visible_size_;
++  gfx::Size coded_size_;
++  VideoBitrateAllocation bitrate_allocation_{Bitrate::Mode::kConstant};
++  uint32_t framerate_ = 0;
++  uint32_t cpb_size_bits_ = 0;
++  uint8_t initial_qp_ = 26;
++  size_t frame_num_ = 0;
++};
++
++}  // namespace media
++
++#endif  // MEDIA_GPU_VAAPI_H265_VAAPI_VIDEO_ENCODER_DELEGATE_H_
+diff --git a/media/gpu/vaapi/vaapi_video_encode_accelerator.cc b/media/gpu/vaapi/vaapi_video_encode_accelerator.cc
+index f4c6be889d7c8..7cd269fcd8931 100644
+--- a/media/gpu/vaapi/vaapi_video_encode_accelerator.cc
++++ b/media/gpu/vaapi/vaapi_video_encode_accelerator.cc
+@@ -41,12 +41,14 @@
+ #include "media/base/media_switches.h"
+ #include "media/base/platform_features.h"
+ #include "media/base/video_bitrate_allocation.h"
++#include "media/base/video_types.h"
+ #include "media/gpu/chromeos/platform_video_frame_utils.h"
+ #include "media/gpu/gpu_video_encode_accelerator_helpers.h"
+ #include "media/gpu/h264_dpb.h"
+ #include "media/gpu/macros.h"
+ #include "media/gpu/vaapi/av1_vaapi_video_encoder_delegate.h"
+ #include "media/gpu/vaapi/h264_vaapi_video_encoder_delegate.h"
++#include "media/media_buildflags.h"
+ #include "media/gpu/vaapi/vaapi_common.h"
+ #include "media/gpu/vaapi/vaapi_utils.h"
+ #include "media/gpu/vaapi/vaapi_wrapper.h"
+@@ -55,24 +57,126 @@
+ #include "media/gpu/vp8_reference_frame_vector.h"
+ #include "media/gpu/vp9_reference_frame_vector.h"
+ #include "third_party/perfetto/include/perfetto/tracing/track.h"
++#include "ui/gfx/buffer_types.h"
++#include "ui/ozone/public/ozone_platform.h"
++
++#if BUILDFLAG(ENABLE_HEVC_PARSER_AND_HW_DECODER)
++#include "media/gpu/vaapi/h265_vaapi_video_encoder_delegate.h"
++#endif
++
++#ifndef VA_FOURCC_Q416
++#define VA_FOURCC_Q416 0x36313451
++#endif
+ 
+ namespace media {
+ 
+ namespace {
++
++// Keep the current HEVC Main10 SHMEM fallback path at visible size and let any
++// aligned coded size stay internal to the encoder state instead of
++// materializing as a larger client frame or input surface.
++//
++// Note that |native_input_mode| == false only means "non-native/SHMEM input".
++// That is broader than the workaround we want here. Widening this to every
++// SHMEM path would change the long-standing non-native input contract for other
++// codecs/profiles too, including how aligned coded size vs. visible size are
++// reflected in codec-specific crop/header signaling. Keep this narrowly scoped
++// to the reproduced HEVC Main10 fallback path: Main10 profile, SHMEM input,
++// and a P010-preferred encoder backend.
++bool UseVisibleSizeMain10ShmemPath(VideoCodecProfile output_profile,
++                                   uint32_t preferred_image_fourcc,
++                                   bool native_input_mode) {
++  return output_profile == HEVCPROFILE_MAIN10 && !native_input_mode &&
++         preferred_image_fourcc == VA_FOURCC_P010;
++}
++
++std::optional<VideoPixelFormat> GetNativeInputFormatForProfile(
++    VideoCodecProfile profile) {
++  switch (profile) {
++    case HEVCPROFILE_MAIN10:
++      return PIXEL_FORMAT_P010LE;
++    case HEVCPROFILE_REXT:
++      return PIXEL_FORMAT_I444;
++    case HEVCPROFILE_HIGH_THROUGHPUT:
++      return PIXEL_FORMAT_YUV444P10;
++    default:
++      return std::nullopt;
++  }
++}
++
++bool SupportsNativeSharedImageInput(VideoCodecProfile profile) {
++  if (!ui::OzonePlatform::IsInitialized()) {
++    return false;
++  }
++
++  const auto native_format = GetNativeInputFormatForProfile(profile);
++  if (!native_format) {
++    return false;
++  }
++
++  const auto shared_image_format =
++      VideoPixelFormatToSharedImageFormat(*native_format);
++  if (!shared_image_format) {
++    return false;
++  }
++
++  return ui::OzonePlatform::GetInstance()->IsNativePixmapConfigSupported(
++      *shared_image_format,
++      gfx::BufferUsage::VEA_READ_CAMERA_AND_CPU_READ_WRITE);
++}
++
++void PopulateGpuInputCapabilities(
++    VideoEncodeAccelerator::SupportedProfile& profile) {
++  const auto native_format = GetNativeInputFormatForProfile(profile.profile);
++  if (!native_format) {
++    return;
++  }
++
++  if (!SupportsNativeSharedImageInput(profile.profile)) {
++    return;
++  }
++
++  profile.gpu_supported_pixel_formats = {*native_format};
++  profile.supports_gpu_shared_images = true;
++}
+ // Minimum number of frames in flight for pipeline depth, adjust to this number
+ // if encoder requests less.
+ constexpr size_t kMinNumFramesInFlight = 4;
+ 
+-// VASurfaceIDs internal format.
+-constexpr unsigned int kVaSurfaceFormat = VA_RT_FORMAT_YUV420;
++unsigned int GetVaSurfaceFormatForProfile(VideoCodecProfile profile) {
++  switch (profile) {
++    case HEVCPROFILE_MAIN10:
++      return VA_RT_FORMAT_YUV420_10BPP;
++    case HEVCPROFILE_REXT:
++      return VA_RT_FORMAT_YUV444;
++    case HEVCPROFILE_HIGH_THROUGHPUT:
++      return VA_RT_FORMAT_YUV444_10;
++    default:
++      return VA_RT_FORMAT_YUV420;
++  }
++}
++
++uint32_t GetPreferredImageFourccForProfile(VideoCodecProfile profile) {
++  switch (profile) {
++    case HEVCPROFILE_MAIN10:
++      return VA_FOURCC_P010;
++    case HEVCPROFILE_REXT:
++      return VA_FOURCC_444P;
++    case HEVCPROFILE_HIGH_THROUGHPUT:
++      return VA_FOURCC_Q416;
++    default:
++      return VA_FOURCC_NV12;
++  }
++}
+ 
+ // Creates one |encode_size| ScopedVASurface using |vaapi_wrapper|.
+ std::unique_ptr<ScopedVASurface> CreateScopedSurface(
+     VaapiWrapper& vaapi_wrapper,
++    unsigned int va_surface_format,
+     const gfx::Size& encode_size,
+     const std::vector<VaapiWrapper::SurfaceUsageHint>& surface_usage_hints) {
+   auto surfaces = vaapi_wrapper.CreateScopedVASurfaces(
+-      kVaSurfaceFormat, encode_size, surface_usage_hints, 1u,
++      va_surface_format, encode_size, surface_usage_hints, 1u,
+       /*visible_size=*/std::nullopt,
+       /*va_fourcc=*/std::nullopt);
+   return surfaces.empty() ? nullptr : std::move(surfaces.front());
+@@ -136,7 +240,11 @@ VideoEncodeAccelerator::SupportedProfiles
+ VaapiVideoEncodeAccelerator::GetSupportedProfiles() {
+   if (IsConfiguredForTesting())
+     return supported_profiles_for_testing_;
+-  return VaapiWrapper::GetSupportedEncodeProfiles();
++  auto profiles = VaapiWrapper::GetSupportedEncodeProfiles();
++  for (auto& profile : profiles) {
++    PopulateGpuInputCapabilities(profile);
++  }
++  return profiles;
+ }
+ 
+ VaapiVideoEncodeAccelerator::VaapiVideoEncodeAccelerator()
+@@ -234,7 +342,8 @@ EncoderStatus VaapiVideoEncodeAccelerator::Initialize(
+ 
+   const VideoCodec codec = VideoCodecProfileToVideoCodec(config.output_profile);
+   if (codec != VideoCodec::kH264 && codec != VideoCodec::kVP8 &&
+-      codec != VideoCodec::kVP9 && codec != VideoCodec::kAV1) {
++      codec != VideoCodec::kVP9 && codec != VideoCodec::kAV1 &&
++      codec != VideoCodec::kHEVC) {
+     MEDIA_LOG(ERROR, media_log.get())
+         << "Unsupported profile: " << GetProfileName(config.output_profile);
+     return {EncoderStatus::Codes::kEncoderInitializationError};
+@@ -253,7 +362,10 @@ EncoderStatus VaapiVideoEncodeAccelerator::Initialize(
+   }
+ 
+   if (config.input_format != PIXEL_FORMAT_I420 &&
+-      config.input_format != PIXEL_FORMAT_NV12) {
++      config.input_format != PIXEL_FORMAT_NV12 &&
++      config.input_format != PIXEL_FORMAT_P010LE &&
++      config.input_format != PIXEL_FORMAT_I444 &&
++      config.input_format != PIXEL_FORMAT_YUV444P10) {
+     MEDIA_LOG(ERROR, media_log.get())
+         << "Unsupported input format: " << config.input_format;
+     return {EncoderStatus::Codes::kEncoderInitializationError};
+@@ -261,7 +373,27 @@ EncoderStatus VaapiVideoEncodeAccelerator::Initialize(
+ 
+   bool native_input_mode =
+       config.storage_type == Config::StorageType::kGpuMemoryBuffer;
+-  if (native_input_mode && config.input_format != PIXEL_FORMAT_NV12) {
++  if (config.output_profile == HEVCPROFILE_REXT &&
++      config.input_format != PIXEL_FORMAT_I444) {
++    MEDIA_LOG(ERROR, media_log.get()) << "HEVC Main444 requires I444 input.";
++    return {EncoderStatus::Codes::kEncoderInitializationError};
++  }
++  if (config.output_profile == HEVCPROFILE_HIGH_THROUGHPUT &&
++      config.input_format != PIXEL_FORMAT_YUV444P10) {
++    MEDIA_LOG(ERROR, media_log.get())
++        << "HEVC Main444_10 requires YUV444P10 input.";
++    return {EncoderStatus::Codes::kEncoderInitializationError};
++  }
++  if (config.output_profile == HEVCPROFILE_MAIN10 && native_input_mode &&
++      config.input_format != PIXEL_FORMAT_P010LE) {
++    MEDIA_LOG(ERROR, media_log.get())
++        << "HEVC Main10 native input mode requires P010 input.";
++    return {EncoderStatus::Codes::kEncoderInitializationError};
++  }
++  if (native_input_mode && config.input_format != PIXEL_FORMAT_NV12 &&
++      config.input_format != PIXEL_FORMAT_P010LE &&
++      config.input_format != PIXEL_FORMAT_I444 &&
++      config.input_format != PIXEL_FORMAT_YUV444P10) {
+     // TODO(crbug.com/894381): Support other formats.
+     MEDIA_LOG(ERROR, media_log.get())
+         << "Unsupported format for native input mode: "
+@@ -309,6 +441,19 @@ void VaapiVideoEncodeAccelerator::InitializeTask(const Config& config) {
+ 
+   native_input_mode_ =
+       config.storage_type == Config::StorageType::kGpuMemoryBuffer;
++  output_profile_ = config.output_profile;
++  va_surface_format_ = GetVaSurfaceFormatForProfile(config.output_profile);
++  preferred_image_fourcc_ =
++      GetPreferredImageFourccForProfile(config.output_profile);
++  if (const auto native_input_format =
++          GetNativeInputFormatForProfile(config.output_profile);
++      native_input_mode_ && native_input_format) {
++    encoder_info_.gpu_supported_pixel_formats = {*native_input_format};
++    encoder_info_.supports_gpu_shared_images = true;
++  } else {
++    encoder_info_.gpu_supported_pixel_formats.clear();
++    encoder_info_.supports_gpu_shared_images = false;
++  }
+ 
+   output_codec_ = VideoCodecProfileToVideoCodec(config.output_profile);
+   DCHECK_EQ(IsConfiguredForTesting(), !!vaapi_wrapper_);
+@@ -327,6 +472,7 @@ void VaapiVideoEncodeAccelerator::InitializeTask(const Config& config) {
+       case VideoCodec::kVP8:
+       case VideoCodec::kVP9:
+       case VideoCodec::kAV1:
++      case VideoCodec::kHEVC:
+         mode = VaapiWrapper::kEncodeConstantQuantizationParameter;
+         break;
+       default:
+@@ -398,6 +544,17 @@ void VaapiVideoEncodeAccelerator::InitializeTask(const Config& config) {
+             vaapi_wrapper_, error_cb);
+       }
+       break;
++    case VideoCodec::kHEVC:
++#if BUILDFLAG(ENABLE_HEVC_PARSER_AND_HW_DECODER)
++      if (!IsConfiguredForTesting()) {
++        encoder_ = std::make_unique<H265VaapiVideoEncoderDelegate>(
++            vaapi_wrapper_, error_cb);
++      }
++      break;
++#else
++      NOTREACHED() << "HEVC encoder support is not compiled";
++      return;
++#endif
+     default:
+       NOTREACHED() << "Unsupported codec type " << GetCodecName(output_codec_);
+   }
+@@ -420,8 +577,12 @@ void VaapiVideoEncodeAccelerator::InitializeTask(const Config& config) {
+   output_buffer_byte_size_ = encoder_->GetBitstreamBufferSize();
+ 
+   visible_rect_ = gfx::Rect(config.input_visible_size);
+-  expected_input_coded_size_ = VideoFrame::DetermineAlignedSize(
+-      config.input_format, config.input_visible_size);
++  expected_input_coded_size_ =
++      UseVisibleSizeMain10ShmemPath(output_profile_, preferred_image_fourcc_,
++                                    native_input_mode_)
++          ? config.input_visible_size
++          : VideoFrame::DetermineAlignedSize(config.input_format,
++                                             config.input_visible_size);
+   DCHECK(
+       expected_input_coded_size_.width() <= encoder_->GetCodedSize().width() &&
+       expected_input_coded_size_.height() <= encoder_->GetCodedSize().height());
+@@ -603,10 +764,19 @@ bool VaapiVideoEncodeAccelerator::CreateSurfacesForMappableSIEncoding(
+   DCHECK(frame.HasMappableSharedImage());
+   TRACE_EVENT0("media,gpu", "VAVEA::CreateSurfacesForMappableSIEncoding");
+ 
+-  if (frame.format() != PIXEL_FORMAT_NV12) {
++  const VideoPixelFormat expected_native_format =
++      preferred_image_fourcc_ == VA_FOURCC_P010
++          ? PIXEL_FORMAT_P010LE
++          : preferred_image_fourcc_ == VA_FOURCC_444P
++                ? PIXEL_FORMAT_I444
++                : preferred_image_fourcc_ == VA_FOURCC_Q416
++                      ? PIXEL_FORMAT_YUV444P10
++                      : PIXEL_FORMAT_NV12;
++  if (frame.format() != expected_native_format) {
+     NotifyError(
+         {EncoderStatus::Codes::kUnsupportedFrameFormat,
+-         "Expected NV12, got: " + VideoPixelFormatToString(frame.format())});
++         "Expected " + VideoPixelFormatToString(expected_native_format) +
++             ", got: " + VideoPixelFormatToString(frame.format())});
+     return false;
+   }
+ 
+@@ -714,9 +884,17 @@ bool VaapiVideoEncodeAccelerator::CreateSurfacesForShmemEncoding(
+     return false;
+   }
+ 
+-  *input_surface =
+-      GetOrCreateInputSurface(*vaapi_wrapper_, encode_size,
+-                              {VaapiWrapper::SurfaceUsageHint::kVideoEncoder});
++  // Keep Main10 SHMEM input surfaces at visible size so the aligned coded
++  // size stays internal to the encoder state instead of materializing as a
++  // larger render target. Reconstructed surfaces remain aligned.
++  const gfx::Size& input_surface_size =
++      UseVisibleSizeMain10ShmemPath(output_profile_, preferred_image_fourcc_,
++                                    native_input_mode_)
++          ? frame.coded_size()
++          : encode_size;
++  *input_surface = GetOrCreateInputSurface(
++      *vaapi_wrapper_, input_surface_size,
++      {VaapiWrapper::SurfaceUsageHint::kVideoEncoder});
+   if (!*input_surface) {
+     NotifyError({EncoderStatus::Codes::kEncoderIllegalState,
+                  "Failed to create input surface"});
+@@ -725,7 +903,7 @@ bool VaapiVideoEncodeAccelerator::CreateSurfacesForShmemEncoding(
+ 
+   if (!vaapi_wrapper_->UploadVideoFrameToSurface(
+           frame, (*input_surface)->surface().id(),
+-          (*input_surface)->surface().size())) {
++          (*input_surface)->surface().size(), preferred_image_fourcc_)) {
+     NotifyError({EncoderStatus::Codes::kEncoderHardwareDriverError,
+                  "Failed to upload frame"});
+     return false;
+@@ -742,7 +920,8 @@ VaapiVideoEncodeAccelerator::GetOrCreateInputSurface(
+   DCHECK_CALLED_ON_VALID_SEQUENCE(encoder_sequence_checker_);
+   if (!input_surfaces_.contains(encode_size)) {
+     auto surface =
+-        CreateScopedSurface(vaapi_wrapper, encode_size, surface_usage_hints);
++        CreateScopedSurface(vaapi_wrapper, va_surface_format_, encode_size,
++                            surface_usage_hints);
+     if (!surface) {
+       NotifyError({EncoderStatus::Codes::kEncoderHardwareDriverError,
+                    "Failed to create surface"});
+@@ -777,7 +956,7 @@ VaapiVideoEncodeAccelerator::GetOrCreateReconstructedSurface(
+ 
+   if (no_surfaces_available) {
+     auto surface =
+-        CreateScopedSurface(*vaapi_wrapper_, encode_size,
++        CreateScopedSurface(*vaapi_wrapper_, va_surface_format_, encode_size,
+                             {VaapiWrapper::SurfaceUsageHint::kVideoEncoder});
+     if (!surface) {
+       NotifyError({EncoderStatus::Codes::kEncoderHardwareDriverError,
+@@ -908,6 +1087,14 @@ VaapiVideoEncodeAccelerator::CreateEncodeJob(
+           /*display_va_surface=*/nullptr,
+           reconstructed_surface->ReleaseAsVASurfaceHandle());
+       break;
++    case VideoCodec::kHEVC:
++#if BUILDFLAG(ENABLE_HEVC_PARSER_AND_HW_DECODER)
++      picture = base::MakeRefCounted<VaapiH265Picture>(
++          reconstructed_surface->ReleaseAsVASurfaceHandle());
++      break;
++#else
++      return nullptr;
++#endif
+     default:
+       return nullptr;
+   }
+diff --git a/media/gpu/vaapi/vaapi_video_encode_accelerator.h b/media/gpu/vaapi/vaapi_video_encode_accelerator.h
+index c8bd416dc2d04..a339976adae65 100644
+--- a/media/gpu/vaapi/vaapi_video_encode_accelerator.h
++++ b/media/gpu/vaapi/vaapi_video_encode_accelerator.h
+@@ -254,9 +254,17 @@ class MEDIA_GPU_EXPORT VaapiVideoEncodeAccelerator
+       GUARDED_BY_CONTEXT(encoder_sequence_checker_);
+ 
+   // The codec of the stream to be produced. Set during initialization.
++  VideoCodecProfile output_profile_ GUARDED_BY_CONTEXT(
++      encoder_sequence_checker_) = VIDEO_CODEC_PROFILE_UNKNOWN;
+   VideoCodec output_codec_ GUARDED_BY_CONTEXT(encoder_sequence_checker_) =
+       VideoCodec::kUnknown;
+ 
++  // Internal VA surface format and preferred image fourcc for uploads.
++  unsigned int va_surface_format_ GUARDED_BY_CONTEXT(
++      encoder_sequence_checker_) = VA_RT_FORMAT_YUV420;
++  uint32_t preferred_image_fourcc_ GUARDED_BY_CONTEXT(
++      encoder_sequence_checker_) = VA_FOURCC_NV12;
++
+   // The visible rect to be encoded.
+   gfx::Rect visible_rect_ GUARDED_BY_CONTEXT(encoder_sequence_checker_);
+ 
+diff --git a/media/gpu/vaapi/vaapi_video_encode_accelerator_unittest.cc b/media/gpu/vaapi/vaapi_video_encode_accelerator_unittest.cc
+index 32ad8c9f0990f..b0efd6a0be2ab 100644
+--- a/media/gpu/vaapi/vaapi_video_encode_accelerator_unittest.cc
++++ b/media/gpu/vaapi/vaapi_video_encode_accelerator_unittest.cc
+@@ -186,8 +186,11 @@ class MockVaapiWrapper : public VaapiWrapper {
+   MOCK_METHOD5(
+       DownloadFromVABuffer,
+       bool(VABufferID, std::optional<VASurfaceID>, uint8_t*, size_t, size_t*));
+-  MOCK_METHOD3(UploadVideoFrameToSurface,
+-               bool(const VideoFrame&, VASurfaceID, const gfx::Size&));
++  MOCK_METHOD4(UploadVideoFrameToSurface,
++               bool(const VideoFrame&,
++                    VASurfaceID,
++                    const gfx::Size&,
++                    uint32_t));
+   MOCK_METHOD1(ExecuteAndDestroyPendingBuffers, bool(VASurfaceID));
+   MOCK_METHOD0(DestroyContext, void());
+   MOCK_METHOD1(DestroySurface, void(VASurfaceID));
+@@ -497,7 +500,7 @@ class VaapiVideoEncodeAcceleratorTest
+ 
+     EXPECT_CALL(
+         *mock_vaapi_wrapper_,
+-        UploadVideoFrameToSurface(_, kInputSurfaceId, kDefaultEncodeSize))
++        UploadVideoFrameToSurface(_, kInputSurfaceId, kDefaultEncodeSize, _))
+         .WillOnce(Return(true));
+ 
+     constexpr VABufferID kCodedBufferId = 123;
+@@ -924,10 +927,6 @@ TEST_F(VaapiVideoEncodeAcceleratorTest, AttemptedInitialization) {
+ TEST_F(VaapiVideoEncodeAcceleratorTest, InitializeWithUnsupportedConfig) {
+   const Bitrate kVariableBitrate = Bitrate::VariableBitrate(0u, 123456u);
+   const Config unsupported_configs[] = {
+-      // VaapiVEA does not support HEVC encoding.
+-      Config(PIXEL_FORMAT_NV12, kDefaultEncodeSize, HEVCPROFILE_MAIN,
+-             kDefaultBitrate, kDefaultFramerate, Config::StorageType::kShmem,
+-             Config::ContentType::kCamera),
+       // VaapiVEA only supports variable bitrate with H264 encoding.
+       Config(PIXEL_FORMAT_NV12, kDefaultEncodeSize, VP9PROFILE_PROFILE0,
+              kVariableBitrate, kDefaultFramerate, Config::StorageType::kShmem,
+diff --git a/media/gpu/vaapi/vaapi_wrapper.cc b/media/gpu/vaapi/vaapi_wrapper.cc
+index b0e16d511f36a..8f85f9a5a41a4 100644
+--- a/media/gpu/vaapi/vaapi_wrapper.cc
++++ b/media/gpu/vaapi/vaapi_wrapper.cc
+@@ -26,6 +26,7 @@
+ 
+ #include "base/command_line.h"
+ #include "base/compiler_specific.h"
++#include "base/containers/span.h"
+ #include "base/containers/fixed_flat_set.h"
+ #include "base/cpu.h"
+ #include "base/environment.h"
+@@ -83,6 +84,10 @@ using media_gpu_vaapi::kModuleVa_prot;
+ #include "base/strings/string_split.h"
+ #endif
+ 
++#ifndef VA_FOURCC_Q416
++#define VA_FOURCC_Q416 0x36313451
++#endif
++
+ using media_gpu_vaapi::InitializeStubs;
+ using media_gpu_vaapi::IsVa_drmInitialized;
+ using media_gpu_vaapi::IsVaInitialized;
+@@ -348,6 +353,22 @@ class VADisplayStateSingleton {
+ 
+ namespace {
+ 
++bool IsSharedImageFormatI444(viz::SharedImageFormat format) {
++  return format ==
++         viz::SharedImageFormat::MultiPlane(
++             viz::SharedImageFormat::PlaneConfig::kY_U_V,
++             viz::SharedImageFormat::Subsampling::k444,
++             viz::SharedImageFormat::ChannelFormat::k8);
++}
++
++bool IsSharedImageFormatYuv444P10(viz::SharedImageFormat format) {
++  return format ==
++         viz::SharedImageFormat::MultiPlane(
++             viz::SharedImageFormat::PlaneConfig::kY_U_V,
++             viz::SharedImageFormat::Subsampling::k444,
++             viz::SharedImageFormat::ChannelFormat::k10);
++}
++
+ uint32_t SharedImageFormatToVAFourCC(viz::SharedImageFormat format) {
+   if (format == viz::SinglePlaneFormat::kBGRX_8888) {
+     return VA_FOURCC_BGRX;
+@@ -370,6 +391,12 @@ uint32_t SharedImageFormatToVAFourCC(viz::SharedImageFormat format) {
+   if (format == viz::MultiPlaneFormat::kP010) {
+     return VA_FOURCC_P010;
+   }
++  if (IsSharedImageFormatI444(format)) {
++    return VA_FOURCC_444P;
++  }
++  if (IsSharedImageFormatYuv444P10(format)) {
++    return VA_FOURCC_Q416;
++  }
+ 
+   NOTREACHED() << "Unsupported format: " << format.ToString();
+ }
+@@ -704,13 +731,72 @@ bool IsModeEncoding(VaapiWrapper::CodecMode mode) {
+          mode == VaapiWrapper::CodecMode::kEncodeVariableBitrate;
+ }
+ 
+-// Fill VAImage's non-visible area with 0s.
+-void FillNV12Padding(const VAImage& image,
+-                     const gfx::Size& visible_size,
+-                     uint8_t* data) {
++int GetBiplanarSampleBytes(VideoPixelFormat format, uint32_t plane) {
++  CHECK(format == PIXEL_FORMAT_NV12 || format == PIXEL_FORMAT_P010LE);
++  if (format == PIXEL_FORMAT_P010LE) {
++    return plane == 0 ? base::checked_cast<int>(sizeof(uint16_t))
++                      : base::checked_cast<int>(sizeof(uint16_t) * 2);
++  }
++  return plane == 0 ? 1 : 2;
++}
++
++int GetPlanar444SampleBytes(VideoPixelFormat format) {
++  CHECK(format == PIXEL_FORMAT_I444 || format == PIXEL_FORMAT_YUV444P10);
++  return format == PIXEL_FORMAT_YUV444P10
++             ? base::checked_cast<int>(sizeof(uint16_t))
++             : 1;
++}
++
++void WriteWhiteBiplanarSample(VideoPixelFormat format,
++                              uint32_t plane,
++                              uint8_t* dst) {
++  CHECK(dst);
++  CHECK(format == PIXEL_FORMAT_NV12 || format == PIXEL_FORMAT_P010LE);
++  if (format == PIXEL_FORMAT_P010LE) {
++    constexpr uint16_t kP010LimitedRangeWhiteLuma = 940u << 6;
++    constexpr uint16_t kP010NeutralChroma = 512u << 6;
++    auto* sample = reinterpret_cast<uint16_t*>(dst);
++    if (plane == 0) {
++      sample[0] = kP010LimitedRangeWhiteLuma;
++    } else {
++      sample[0] = kP010NeutralChroma;
++      UNSAFE_TODO(sample[1]) = kP010NeutralChroma;
++    }
++    return;
++  }
++
++  if (plane == 0) {
++    dst[0] = 235;
++  } else {
++    dst[0] = 128;
++    UNSAFE_TODO(dst[1]) = 128;
++  }
++}
++
++void WriteWhitePlanar444Sample(VideoPixelFormat format,
++                               uint32_t plane,
++                               uint8_t* dst) {
++  CHECK(dst);
++  CHECK(format == PIXEL_FORMAT_I444 || format == PIXEL_FORMAT_YUV444P10);
++  if (format == PIXEL_FORMAT_YUV444P10) {
++    auto* sample = reinterpret_cast<uint16_t*>(dst);
++    sample[0] = plane == 0 ? 940u : 512u;
++    return;
++  }
++
++  dst[0] = plane == 0 ? 235 : 128;
++}
++
++// Fill VAImage's non-visible area with a stable white border so that if a
++// decoder ignores the coded-vs-visible crop window, the padded border is less
++// distracting than arbitrary garbage or tinted chroma.
++void FillBiplanarPadding(const VAImage& image,
++                         VideoPixelFormat format,
++                         const gfx::Size& visible_size,
++                         uint8_t* data) {
+   CHECK_NE(data, nullptr);
+   CHECK_EQ(2u, image.num_planes);
+-  CHECK_EQ(image.format.fourcc, base::checked_cast<uint32_t>(VA_FOURCC_NV12));
++  CHECK(format == PIXEL_FORMAT_NV12 || format == PIXEL_FORMAT_P010LE);
+   CHECK_LE(base::strict_cast<int>(image.width), media::limits::kMaxDimension);
+   CHECK_GE(base::strict_cast<int>(image.width), visible_size.width());
+   CHECK_LE(base::strict_cast<int>(image.height), media::limits::kMaxDimension);
+@@ -720,35 +806,168 @@ void FillNV12Padding(const VAImage& image,
+     uint8_t* plane_data = UNSAFE_TODO(data + image.offsets[plane]);
+     const int stride =
+         base::checked_cast<int>(UNSAFE_TODO(image.pitches[plane]));
+-    const int visible_width_in_bytes =
+-        plane == 0 ? visible_size.width()
+-                   : 2 * ((visible_size.width() + 1) / 2);
++    const int visible_width_in_bytes = base::checked_cast<int>(
++        VideoFrame::RowBytes(plane, format, visible_size.width()));
++    const size_t visible_height =
++        VideoFrame::Rows(plane, format, visible_size.height());
++    const size_t image_height = VideoFrame::Rows(plane, format, image.height);
++    const int sample_bytes = GetBiplanarSampleBytes(format, plane);
++
++    if (visible_width_in_bytes == 0 || visible_height == 0) {
++      continue;
++    }
++
++    // Fill the right non-visible area with a constant white sample.
++    CHECK_GE(stride, visible_width_in_bytes);
++    CHECK_GE(visible_width_in_bytes, sample_bytes);
++    if (stride > visible_width_in_bytes) {
++      for (size_t row = 0; row < visible_height; ++row) {
++        uint8_t* row_data =
++            UNSAFE_TODO(plane_data + base::checked_cast<int>(row) * stride);
++        for (int x = visible_width_in_bytes; x < stride; x += sample_bytes) {
++          CHECK_LE(x + sample_bytes, stride);
++          uint8_t* sample_dst = UNSAFE_TODO(row_data + x);
++          WriteWhiteBiplanarSample(format, plane, sample_dst);
++        }
++      }
++    }
++
++    // Fill the bottom non-visible rows with the same constant white border.
++    CHECK_GE(image_height, visible_height);
++    if (image_height > visible_height) {
++      for (size_t row = visible_height; row < image_height; ++row) {
++        uint8_t* row_data = UNSAFE_TODO(
++            plane_data + row * base::checked_cast<size_t>(stride));
++        for (int x = 0; x < stride; x += sample_bytes) {
++          CHECK_LE(x + sample_bytes, stride);
++          uint8_t* sample_dst = UNSAFE_TODO(row_data + x);
++          WriteWhiteBiplanarSample(format, plane, sample_dst);
++        }
++      }
++    }
++  }
++}
++
++void FillPlanar444Padding(const VAImage& image,
++                          VideoPixelFormat format,
++                          const gfx::Size& visible_size,
++                          uint8_t* data) {
++  CHECK_NE(data, nullptr);
++  CHECK_EQ(3u, image.num_planes);
++  CHECK(format == PIXEL_FORMAT_I444 || format == PIXEL_FORMAT_YUV444P10);
++  CHECK_LE(base::strict_cast<int>(image.width), media::limits::kMaxDimension);
++  CHECK_GE(base::strict_cast<int>(image.width), visible_size.width());
++  CHECK_LE(base::strict_cast<int>(image.height), media::limits::kMaxDimension);
++  CHECK_GE(base::strict_cast<int>(image.height), visible_size.height());
++
++  const int sample_bytes = GetPlanar444SampleBytes(format);
++  for (uint32_t plane = 0; plane < image.num_planes; ++plane) {
++    uint8_t* plane_data = UNSAFE_TODO(data + image.offsets[plane]);
++    const int stride =
++        base::checked_cast<int>(UNSAFE_TODO(image.pitches[plane]));
++    const int visible_width_in_bytes = base::checked_cast<int>(
++        VideoFrame::RowBytes(plane, format, visible_size.width()));
+     const size_t visible_height =
+-        VideoFrame::Rows(plane, PIXEL_FORMAT_NV12, visible_size.height());
+-    const size_t image_height =
+-        VideoFrame::Rows(plane, PIXEL_FORMAT_NV12, image.height);
++        VideoFrame::Rows(plane, format, visible_size.height());
++    const size_t image_height = VideoFrame::Rows(plane, format, image.height);
++
++    if (visible_width_in_bytes == 0 || visible_height == 0) {
++      continue;
++    }
+ 
+-    // Fill 0 to the right non-visible area.
+     CHECK_GE(stride, visible_width_in_bytes);
+-    libyuv::SetPlane(/*dst_y=*/UNSAFE_TODO(plane_data + visible_width_in_bytes),
+-                     /*dst_stride_y=*/stride,
+-                     /*width=*/stride - visible_width_in_bytes,
+-                     /*height=*/base::checked_cast<int>(visible_height),
+-                     /*value=*/0u);
++    CHECK_GE(visible_width_in_bytes, sample_bytes);
++    if (stride > visible_width_in_bytes) {
++      for (size_t row = 0; row < visible_height; ++row) {
++        uint8_t* row_data =
++            UNSAFE_TODO(plane_data + base::checked_cast<int>(row) * stride);
++        for (int x = visible_width_in_bytes; x < stride; x += sample_bytes) {
++          CHECK_LE(x + sample_bytes, stride);
++          WriteWhitePlanar444Sample(format, plane,
++                                    UNSAFE_TODO(row_data + x));
++        }
++      }
++    }
+ 
+-    // Fill 0 to the bottom non-visible area.
+     CHECK_GE(image_height, visible_height);
+-    base::CheckedNumeric<size_t> num_bytes_above(visible_height);
+-    num_bytes_above *= base::checked_cast<size_t>(stride);
+-    libyuv::SetPlane(
+-        /*dst_y=*/plane_data + num_bytes_above.ValueOrDie(),
+-        /*dst_stride_y=*/stride,
+-        /*width=*/stride,
+-        /*height=*/base::checked_cast<int>(image_height - visible_height),
+-        /*value=*/0u);
++    if (image_height > visible_height) {
++      for (size_t row = visible_height; row < image_height; ++row) {
++        uint8_t* row_data = UNSAFE_TODO(
++            plane_data + row * base::checked_cast<size_t>(stride));
++        for (int x = 0; x < stride; x += sample_bytes) {
++          CHECK_LE(x + sample_bytes, stride);
++          WriteWhitePlanar444Sample(format, plane,
++                                    UNSAFE_TODO(row_data + x));
++        }
++      }
++    }
+   }
+ }
+ 
++scoped_refptr<VideoFrame> WrapP010UploadImageAsVideoFrame(
++    const VAImage& image,
++    const gfx::Size& visible_size,
++    uint8_t* image_ptr,
++    base::TimeDelta timestamp) {
++  CHECK_EQ(image.format.fourcc, base::checked_cast<uint32_t>(VA_FOURCC_P010));
++
++  // Treat the mapped VAImage memory as an unowned P010 frame so the upload
++  // path can reuse VideoFrameConverter's scratch/pool logic instead of keeping
++  // a separate ad-hoc conversion cache in VaapiWrapper.
++  const gfx::Size coded_size(image.width, image.height);
++  const size_t y_plane_bytes =
++      base::checked_cast<size_t>(image.pitches[0]) *
++      VideoFrame::Rows(VideoFrame::Plane::kY, PIXEL_FORMAT_P010LE,
++                       coded_size.height());
++  const size_t uv_plane_bytes =
++      base::checked_cast<size_t>(image.pitches[1]) *
++      VideoFrame::Rows(VideoFrame::Plane::kUV, PIXEL_FORMAT_P010LE,
++                       coded_size.height());
++  auto image_data =
++      UNSAFE_BUFFERS(base::span(image_ptr, image.data_size));
++
++  return VideoFrame::WrapExternalYuvData(
++      PIXEL_FORMAT_P010LE, coded_size, gfx::Rect(visible_size), visible_size,
++      base::checked_cast<size_t>(image.pitches[0]),
++      base::checked_cast<size_t>(image.pitches[1]),
++      image_data.subspan(image.offsets[0], y_plane_bytes),
++      image_data.subspan(image.offsets[1], uv_plane_bytes),
++      timestamp);
++}
++
++scoped_refptr<VideoFrame> WrapPlanar444UploadImageAsVideoFrame(
++    const VAImage& image,
++    VideoPixelFormat format,
++    const gfx::Size& visible_size,
++    uint8_t* image_ptr,
++    base::TimeDelta timestamp) {
++  CHECK((format == PIXEL_FORMAT_I444 &&
++         image.format.fourcc == base::checked_cast<uint32_t>(VA_FOURCC_444P)) ||
++        (format == PIXEL_FORMAT_YUV444P10 &&
++         image.format.fourcc == base::checked_cast<uint32_t>(VA_FOURCC_Q416)));
++
++  const gfx::Size coded_size(image.width, image.height);
++  const size_t y_plane_bytes =
++      base::checked_cast<size_t>(image.pitches[0]) *
++      VideoFrame::Rows(VideoFrame::Plane::kY, format, coded_size.height());
++  const size_t u_plane_bytes =
++      base::checked_cast<size_t>(image.pitches[1]) *
++      VideoFrame::Rows(VideoFrame::Plane::kU, format, coded_size.height());
++  const size_t v_plane_bytes =
++      base::checked_cast<size_t>(image.pitches[2]) *
++      VideoFrame::Rows(VideoFrame::Plane::kV, format, coded_size.height());
++  auto image_data = UNSAFE_BUFFERS(base::span(image_ptr, image.data_size));
++
++  return VideoFrame::WrapExternalYuvData(
++      format, coded_size, gfx::Rect(visible_size), visible_size,
++      base::checked_cast<size_t>(image.pitches[0]),
++      base::checked_cast<size_t>(image.pitches[1]),
++      base::checked_cast<size_t>(image.pitches[2]),
++      image_data.subspan(image.offsets[0], y_plane_bytes),
++      image_data.subspan(image.offsets[1], u_plane_bytes),
++      image_data.subspan(image.offsets[2], v_plane_bytes), timestamp);
++}
++
+ // Creates an AutoLock iff |va_lock_| is not null and the libva backend is
+ // thread-safe.
+ std::optional<base::AutoLock> AutoLockOnlyIfNeeded(base::Lock* lock) {
+@@ -783,6 +1002,8 @@ const ProfileCodecMap& GetProfileCodecMap() {
+           {HEVCPROFILE_MAIN, VAProfileHEVCMain},
+           {HEVCPROFILE_MAIN_STILL_PICTURE, VAProfileHEVCMain},
+           {HEVCPROFILE_MAIN10, VAProfileHEVCMain10},
++          {HEVCPROFILE_REXT, VAProfileHEVCMain444},
++          {HEVCPROFILE_HIGH_THROUGHPUT, VAProfileHEVCMain444_10},
+ #endif  // BUILDFLAG(ENABLE_HEVC_PARSER_AND_HW_DECODER)
+   });
+   return *kMediaToVAProfileMap;
+@@ -816,6 +1037,12 @@ bool IsVAProfileSupported(VAProfile va_profile, bool is_encoding) {
+         VAProfileVP8Version0_3,
+         VAProfileVP9Profile0,
+         VAProfileAV1Profile0,
++#if BUILDFLAG(ENABLE_HEVC_PARSER_AND_HW_DECODER)
++        VAProfileHEVCMain,
++        VAProfileHEVCMain10,
++        VAProfileHEVCMain444,
++        VAProfileHEVCMain444_10,
++#endif
+     };
+     return std::ranges::contains(kSupportableEncoderProfiles, va_profile);
+   }
+@@ -936,9 +1163,15 @@ bool GetRequiredAttribs(const base::Lock* va_lock,
+   // Choose a suitable VAConfigAttribRTFormat for every |mode|. For video
+   // processing, the supported surface attribs may vary according to which RT
+   // format is set.
+-  if (profile == VAProfileVP9Profile2 || profile == VAProfileVP9Profile3) {
++  if (profile == VAProfileVP9Profile2 || profile == VAProfileVP9Profile3 ||
++      profile == VAProfileHEVCMain10) {
+     required_attribs->push_back(
+         {VAConfigAttribRTFormat, VA_RT_FORMAT_YUV420_10BPP});
++  } else if (profile == VAProfileHEVCMain444) {
++    required_attribs->push_back({VAConfigAttribRTFormat, VA_RT_FORMAT_YUV444});
++  } else if (profile == VAProfileHEVCMain444_10) {
++    required_attribs->push_back(
++        {VAConfigAttribRTFormat, VA_RT_FORMAT_YUV444_10});
+ #if BUILDFLAG(IS_CHROMEOS)
+   } else if (profile == VAProfileProtected) {
+     DCHECK_EQ(mode, VaapiWrapper::kDecodeProtected);
+@@ -1356,6 +1589,8 @@ bool VASupportedProfiles::FillProfileInfo_Locked(
+     // that driver.
+     if ((attrib.value & VA_RT_FORMAT_YUV444) && !is_mesa_gallium)
+       profile_info->supported_internal_formats.yuv444 = true;
++    if ((attrib.value & VA_RT_FORMAT_YUV444_10) && !is_mesa_gallium)
++      profile_info->supported_internal_formats.yuv444_10 = true;
+     break;
+   }
+ 
+@@ -1363,7 +1598,8 @@ bool VASupportedProfiles::FillProfileInfo_Locked(
+       profile_info->supported_internal_formats.yuv420 ||
+       profile_info->supported_internal_formats.yuv420_10 ||
+       profile_info->supported_internal_formats.yuv422 ||
+-      profile_info->supported_internal_formats.yuv444;
++      profile_info->supported_internal_formats.yuv444 ||
++      profile_info->supported_internal_formats.yuv444_10;
+   DLOG_IF(ERROR, !is_any_profile_supported)
+       << "No cool internal formats supported";
+   return is_any_profile_supported;
+@@ -1860,6 +2096,14 @@ VaapiWrapper::GetSupportedEncodeProfiles() {
+     const VASupportedProfiles::ProfileInfo* profile_info =
+         VASupportedProfiles::Get().IsProfileSupported(kEncodeConstantBitrate,
+                                                       va_profile);
++    const bool supports_cbr = !!profile_info;
++#if BUILDFLAG(ENABLE_HEVC_PARSER_AND_HW_DECODER)
++    if (!profile_info &&
++        VideoCodecProfileToVideoCodec(media_profile) == VideoCodec::kHEVC) {
++      profile_info = VASupportedProfiles::Get().IsProfileSupported(
++          kEncodeConstantQuantizationParameter, va_profile);
++    }
++#endif
+     if (!profile_info)
+       continue;
+ 
+@@ -1875,7 +2119,7 @@ VaapiWrapper::GetSupportedEncodeProfiles() {
+     profile.rate_control_modes = media::VideoEncodeAccelerator::kConstantMode;
+     // This code assumes that the resolutions are the same between CBR and VBR.
+     // This is checked in a test in vaapi_unittest.cc: VbrAndCbrResolutionsMatch
+-    if (IsVBREncodingSupported(va_profile)) {
++    if (supports_cbr && IsVBREncodingSupported(va_profile)) {
+       profile.rate_control_modes |=
+           media::VideoEncodeAccelerator::kVariableMode;
+     }
+@@ -1938,6 +2182,8 @@ bool VaapiWrapper::IsDecodingSupportedForInternalFormat(
+       return supported_internal_formats.yuv422;
+     case VA_RT_FORMAT_YUV444:
+       return supported_internal_formats.yuv444;
++    case VA_RT_FORMAT_YUV444_10:
++      return supported_internal_formats.yuv444_10;
+   }
+   return false;
+ }
+@@ -2154,6 +2400,12 @@ uint32_t VaapiWrapper::SharedImageFormatToVARTFormat(
+   if (format == viz::MultiPlaneFormat::kP010) {
+     return VA_RT_FORMAT_YUV420_10BPP;
+   }
++  if (IsSharedImageFormatI444(format)) {
++    return VA_RT_FORMAT_YUV444;
++  }
++  if (IsSharedImageFormatYuv444P10(format)) {
++    return VA_RT_FORMAT_YUV444_10;
++  }
+   NOTREACHED() << "Unsupported format: " << format.ToString();
+ }
+ 
+@@ -2624,6 +2876,18 @@ VaapiWrapper::ExportVASurfaceAsNativePixmapDmaBufUnwrapped(
+     case VA_FOURCC_P010:
+       si_format = viz::MultiPlaneFormat::kP010;
+       break;
++    case VA_FOURCC_444P:
++      si_format = viz::SharedImageFormat::MultiPlane(
++          viz::SharedImageFormat::PlaneConfig::kY_U_V,
++          viz::SharedImageFormat::Subsampling::k444,
++          viz::SharedImageFormat::ChannelFormat::k8);
++      break;
++    case VA_FOURCC_Q416:
++      si_format = viz::SharedImageFormat::MultiPlane(
++          viz::SharedImageFormat::PlaneConfig::kY_U_V,
++          viz::SharedImageFormat::Subsampling::k444,
++          viz::SharedImageFormat::ChannelFormat::k10);
++      break;
+     case VA_FOURCC_ARGB:
+       si_format = viz::SinglePlaneFormat::kBGRA_8888;
+       break;
+@@ -2818,7 +3082,8 @@ std::unique_ptr<ScopedVAImage> VaapiWrapper::CreateVaImage(
+ 
+ bool VaapiWrapper::UploadVideoFrameToSurface(const VideoFrame& frame,
+                                              VASurfaceID va_surface_id,
+-                                             const gfx::Size& va_surface_size)
++                                             const gfx::Size& va_surface_size,
++                                             uint32_t upload_image_fourcc)
+     NO_THREAD_SAFETY_ANALYSIS {
+   VAAPI_CHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
+   TRACE_EVENT0("media,gpu", "VaapiWrapper::UploadVideoFrameToSurface");
+@@ -2834,19 +3099,66 @@ bool VaapiWrapper::UploadVideoFrameToSurface(const VideoFrame& frame,
+   }
+ 
+   const gfx::Size visible_size = frame.visible_rect().size();
++  // Keep the CPU-side upload image at visible size only for the Main10 SHMEM
++  // upload path, where 8-bit source frames are converted into a larger aligned
++  // P010 encode surface. This avoids materializing aligned padding pixels in
++  // the temporary upload image while keeping other P010 upload paths
++  // unchanged.
++  const bool force_visible_size_put_image =
++      upload_image_fourcc == VA_FOURCC_P010 &&
++      (frame.format() == PIXEL_FORMAT_I420 || frame.format() == PIXEL_FORMAT_NV12) &&
++      va_surface_size != visible_size;
+   bool needs_va_put_image = false;
+   VAImage image;
+-  VAStatus va_res = vaDeriveImage(va_display_, va_surface_id, &image);
++  VAStatus va_res = force_visible_size_put_image
++                        ? VA_STATUS_ERROR_OPERATION_FAILED
++                        : vaDeriveImage(va_display_, va_surface_id, &image);
+   if (va_res == VA_STATUS_ERROR_OPERATION_FAILED) {
+     DVLOG(4) << "vaDeriveImage failed and fallback to Create_PutImage";
+-    constexpr VAImageFormat kImageFormatNV12{.fourcc = VA_FOURCC_NV12,
+-                                             .byte_order = VA_LSB_FIRST,
+-                                             .bits_per_pixel = 12};
+-    VAImageFormat image_format = kImageFormatNV12;
+-
+-    va_res = vaCreateImage(va_display_, &image_format, va_surface_size.width(),
+-                           va_surface_size.height(), &image);
+-    VA_SUCCESS_OR_RETURN(va_res, VaapiFunctions::kVACreateImage, false);
++    const gfx::Size image_size =
++        force_visible_size_put_image ? visible_size : va_surface_size;
++    auto make_image_format = [](uint32_t fourcc) {
++      VAImageFormat format = {
++          .fourcc = fourcc, .byte_order = VA_LSB_FIRST, .bits_per_pixel = 0};
++      switch (fourcc) {
++        case VA_FOURCC_NV12:
++          format.bits_per_pixel = 12;
++          break;
++        case VA_FOURCC_P010:
++        case VA_FOURCC_444P:
++          format.bits_per_pixel = 24;
++          break;
++        case VA_FOURCC_Q416:
++          format.bits_per_pixel = 48;
++          break;
++        default:
++          NOTREACHED() << "Unsupported upload image fourcc: " << fourcc;
++      }
++      return format;
++    };
++
++    std::vector<VAImageFormat> image_formats = {
++        make_image_format(upload_image_fourcc)};
++    if (upload_image_fourcc == VA_FOURCC_P010) {
++      image_formats.push_back(make_image_format(VA_FOURCC_NV12));
++    }
++
++    bool created_image = false;
++    VAStatus create_image_status = va_res;
++    for (const auto& image_format : image_formats) {
++      VAImageFormat mutable_image_format = image_format;
++      if (!created_image &&
++          (create_image_status =
++               vaCreateImage(va_display_, &mutable_image_format,
++                             image_size.width(), image_size.height(),
++                             &image)) == VA_STATUS_SUCCESS) {
++        created_image = true;
++      }
++    }
++    if (!created_image) {
++      VA_LOG_ON_ERROR(create_image_status, VaapiFunctions::kVACreateImage);
++      return false;
++    }
+     needs_va_put_image = true;
+   }
+   absl::Cleanup vaimage_deleter =
+@@ -2855,12 +3167,18 @@ bool VaapiWrapper::UploadVideoFrameToSurface(const VideoFrame& frame,
+         DestroyVAImage(va_display_, image);
+       };
+ 
+-  if (image.format.fourcc != VA_FOURCC_NV12) {
++  if (image.format.fourcc != VA_FOURCC_NV12 &&
++      image.format.fourcc != VA_FOURCC_P010 &&
++      image.format.fourcc != VA_FOURCC_444P &&
++      image.format.fourcc != VA_FOURCC_Q416) {
+     LOG(ERROR) << "Unsupported image format: " << image.format.fourcc;
+     return false;
+   }
+ 
+-  if (image.width % 2 != 0 || image.height % 2 != 0) {
++  const bool requires_even_dimensions = image.format.fourcc == VA_FOURCC_NV12 ||
++                                        image.format.fourcc == VA_FOURCC_P010;
++  if (requires_even_dimensions &&
++      (image.width % 2 != 0 || image.height % 2 != 0)) {
+     LOG(ERROR) << "Buffer's width and height are not even, "
+                << "width=" << image.width << ", height=" << image.height;
+     return false;
+@@ -2888,29 +3206,187 @@ bool VaapiWrapper::UploadVideoFrameToSurface(const VideoFrame& frame,
+       auto_unlock.emplace(*va_lock_);
+     }
+ 
+-    if (frame.format() == PIXEL_FORMAT_I420) {
+-      ret = libyuv::I420ToNV12(
+-          frame.data(VideoFrame::Plane::kY),
+-          frame.stride(VideoFrame::Plane::kY),
+-          frame.data(VideoFrame::Plane::kU),
+-          frame.stride(VideoFrame::Plane::kU),
+-          frame.data(VideoFrame::Plane::kV),
+-          frame.stride(VideoFrame::Plane::kV),
+-          UNSAFE_TODO(image_ptr + image.offsets[0]), image.pitches[0],
+-          UNSAFE_TODO(image_ptr + image.offsets[1]), image.pitches[1],
+-          visible_size.width(), visible_size.height());
++    if (image.format.fourcc == VA_FOURCC_NV12) {
++      if (frame.format() == PIXEL_FORMAT_I420) {
++        ret = libyuv::I420ToNV12(
++            frame.data(VideoFrame::Plane::kY),
++            frame.stride(VideoFrame::Plane::kY),
++            frame.data(VideoFrame::Plane::kU),
++            frame.stride(VideoFrame::Plane::kU),
++            frame.data(VideoFrame::Plane::kV),
++            frame.stride(VideoFrame::Plane::kV),
++            UNSAFE_TODO(image_ptr + image.offsets[0]), image.pitches[0],
++            UNSAFE_TODO(image_ptr + image.offsets[1]), image.pitches[1],
++            visible_size.width(), visible_size.height());
++      } else {
++        LOG(ERROR) << "Unsupported pixel format: "
++                   << VideoPixelFormatToString(frame.format());
++        return false;
++      }
++
++      FillBiplanarPadding(image, PIXEL_FORMAT_NV12, visible_size, image_ptr);
++    } else if (image.format.fourcc == VA_FOURCC_P010) {
++      if (frame.format() == PIXEL_FORMAT_P010LE) {
++        libyuv::CopyPlane_16(
++            reinterpret_cast<const uint16_t*>(
++                frame.visible_data(VideoFrame::Plane::kY)),
++            frame.stride(VideoFrame::Plane::kY) /
++                base::checked_cast<int>(sizeof(uint16_t)),
++            reinterpret_cast<uint16_t*>(UNSAFE_TODO(image_ptr + image.offsets[0])),
++            image.pitches[0] / base::checked_cast<int>(sizeof(uint16_t)),
++            base::checked_cast<int>(VideoFrame::RowBytes(
++                VideoFrame::Plane::kY, PIXEL_FORMAT_P010LE,
++                visible_size.width()) / sizeof(uint16_t)),
++            base::checked_cast<int>(VideoFrame::Rows(
++                VideoFrame::Plane::kY, PIXEL_FORMAT_P010LE,
++                visible_size.height())));
++        libyuv::CopyPlane_16(
++            reinterpret_cast<const uint16_t*>(
++                frame.visible_data(VideoFrame::Plane::kUV)),
++            frame.stride(VideoFrame::Plane::kUV) /
++                base::checked_cast<int>(sizeof(uint16_t)),
++            reinterpret_cast<uint16_t*>(UNSAFE_TODO(image_ptr + image.offsets[1])),
++            image.pitches[1] / base::checked_cast<int>(sizeof(uint16_t)),
++            base::checked_cast<int>(VideoFrame::RowBytes(
++                VideoFrame::Plane::kUV, PIXEL_FORMAT_P010LE,
++                visible_size.width()) / sizeof(uint16_t)),
++            base::checked_cast<int>(VideoFrame::Rows(
++                VideoFrame::Plane::kUV, PIXEL_FORMAT_P010LE,
++                visible_size.height())));
++      } else {
++        auto upload_frame = WrapP010UploadImageAsVideoFrame(
++            image, visible_size, image_ptr, frame.timestamp());
++        if (!upload_frame) {
++          return false;
++        }
++        const auto status =
++            upload_frame_converter_.ConvertAndScale(frame, *upload_frame);
++        if (!status.is_ok()) {
++          LOG(ERROR) << "Failed converting upload frame to P010";
++          return false;
++        }
++      }
++
++      FillBiplanarPadding(image, PIXEL_FORMAT_P010LE, visible_size, image_ptr);
++    } else if (image.format.fourcc == VA_FOURCC_444P) {
++      if (frame.format() == PIXEL_FORMAT_I444) {
++        libyuv::CopyPlane(
++            frame.visible_data(VideoFrame::Plane::kY),
++            frame.stride(VideoFrame::Plane::kY),
++            UNSAFE_TODO(image_ptr + image.offsets[0]), image.pitches[0],
++            base::checked_cast<int>(VideoFrame::RowBytes(
++                VideoFrame::Plane::kY, PIXEL_FORMAT_I444,
++                visible_size.width())),
++            base::checked_cast<int>(VideoFrame::Rows(
++                VideoFrame::Plane::kY, PIXEL_FORMAT_I444,
++                visible_size.height())));
++        libyuv::CopyPlane(
++            frame.visible_data(VideoFrame::Plane::kU),
++            frame.stride(VideoFrame::Plane::kU),
++            UNSAFE_TODO(image_ptr + image.offsets[1]), image.pitches[1],
++            base::checked_cast<int>(VideoFrame::RowBytes(
++                VideoFrame::Plane::kU, PIXEL_FORMAT_I444,
++                visible_size.width())),
++            base::checked_cast<int>(VideoFrame::Rows(
++                VideoFrame::Plane::kU, PIXEL_FORMAT_I444,
++                visible_size.height())));
++        libyuv::CopyPlane(
++            frame.visible_data(VideoFrame::Plane::kV),
++            frame.stride(VideoFrame::Plane::kV),
++            UNSAFE_TODO(image_ptr + image.offsets[2]), image.pitches[2],
++            base::checked_cast<int>(VideoFrame::RowBytes(
++                VideoFrame::Plane::kV, PIXEL_FORMAT_I444,
++                visible_size.width())),
++            base::checked_cast<int>(VideoFrame::Rows(
++                VideoFrame::Plane::kV, PIXEL_FORMAT_I444,
++                visible_size.height())));
++      } else {
++        auto upload_frame = WrapPlanar444UploadImageAsVideoFrame(
++            image, PIXEL_FORMAT_I444, visible_size, image_ptr,
++            frame.timestamp());
++        if (!upload_frame) {
++          return false;
++        }
++        const auto status =
++            upload_frame_converter_.ConvertAndScale(frame, *upload_frame);
++        if (!status.is_ok()) {
++          LOG(ERROR) << "Failed converting upload frame to I444";
++          return false;
++        }
++      }
++
++      FillPlanar444Padding(image, PIXEL_FORMAT_I444, visible_size, image_ptr);
++    } else if (image.format.fourcc == VA_FOURCC_Q416) {
++      if (frame.format() == PIXEL_FORMAT_YUV444P10) {
++        libyuv::CopyPlane_16(
++            reinterpret_cast<const uint16_t*>(
++                frame.visible_data(VideoFrame::Plane::kY)),
++            frame.stride(VideoFrame::Plane::kY) /
++                base::checked_cast<int>(sizeof(uint16_t)),
++            reinterpret_cast<uint16_t*>(UNSAFE_TODO(image_ptr + image.offsets[0])),
++            image.pitches[0] / base::checked_cast<int>(sizeof(uint16_t)),
++            base::checked_cast<int>(VideoFrame::RowBytes(
++                VideoFrame::Plane::kY, PIXEL_FORMAT_YUV444P10,
++                visible_size.width()) / sizeof(uint16_t)),
++            base::checked_cast<int>(VideoFrame::Rows(
++                VideoFrame::Plane::kY, PIXEL_FORMAT_YUV444P10,
++                visible_size.height())));
++        libyuv::CopyPlane_16(
++            reinterpret_cast<const uint16_t*>(
++                frame.visible_data(VideoFrame::Plane::kU)),
++            frame.stride(VideoFrame::Plane::kU) /
++                base::checked_cast<int>(sizeof(uint16_t)),
++            reinterpret_cast<uint16_t*>(UNSAFE_TODO(image_ptr + image.offsets[1])),
++            image.pitches[1] / base::checked_cast<int>(sizeof(uint16_t)),
++            base::checked_cast<int>(VideoFrame::RowBytes(
++                VideoFrame::Plane::kU, PIXEL_FORMAT_YUV444P10,
++                visible_size.width()) / sizeof(uint16_t)),
++            base::checked_cast<int>(VideoFrame::Rows(
++                VideoFrame::Plane::kU, PIXEL_FORMAT_YUV444P10,
++                visible_size.height())));
++        libyuv::CopyPlane_16(
++            reinterpret_cast<const uint16_t*>(
++                frame.visible_data(VideoFrame::Plane::kV)),
++            frame.stride(VideoFrame::Plane::kV) /
++                base::checked_cast<int>(sizeof(uint16_t)),
++            reinterpret_cast<uint16_t*>(UNSAFE_TODO(image_ptr + image.offsets[2])),
++            image.pitches[2] / base::checked_cast<int>(sizeof(uint16_t)),
++            base::checked_cast<int>(VideoFrame::RowBytes(
++                VideoFrame::Plane::kV, PIXEL_FORMAT_YUV444P10,
++                visible_size.width()) / sizeof(uint16_t)),
++            base::checked_cast<int>(VideoFrame::Rows(
++                VideoFrame::Plane::kV, PIXEL_FORMAT_YUV444P10,
++                visible_size.height())));
++      } else {
++        auto upload_frame = WrapPlanar444UploadImageAsVideoFrame(
++            image, PIXEL_FORMAT_YUV444P10, visible_size, image_ptr,
++            frame.timestamp());
++        if (!upload_frame) {
++          return false;
++        }
++        const auto status =
++            upload_frame_converter_.ConvertAndScale(frame, *upload_frame);
++        if (!status.is_ok()) {
++          LOG(ERROR) << "Failed converting upload frame to YUV444P10";
++          return false;
++        }
++      }
++
++      FillPlanar444Padding(image, PIXEL_FORMAT_YUV444P10, visible_size,
++                           image_ptr);
+     } else {
+       LOG(ERROR) << "Unsupported pixel format: "
+                  << VideoPixelFormatToString(frame.format());
+       return false;
+     }
+-
+-    FillNV12Padding(image, visible_size, image_ptr);
+   }
+   if (needs_va_put_image) {
++    // Main10 SHMEM uploads keep the CPU-side image at visible size and let the
++    // aligned encode surface stay implicit. Other formats still upload the
++    // whole image so their explicit fallback padding reaches the VA surface.
+     va_res = vaPutImage(va_display_, va_surface_id, image.image_id, 0, 0,
+-                        visible_size.width(), visible_size.height(), 0, 0,
+-                        visible_size.width(), visible_size.height());
++                        image.width, image.height, 0, 0, image.width,
++                        image.height);
+     VA_SUCCESS_OR_RETURN(va_res, VaapiFunctions::kVAPutImage, false);
+   }
+   return ret == 0;
+diff --git a/media/gpu/vaapi/vaapi_wrapper.h b/media/gpu/vaapi/vaapi_wrapper.h
+index a2be205da4f97..96f031f80d3ff 100644
+--- a/media/gpu/vaapi/vaapi_wrapper.h
++++ b/media/gpu/vaapi/vaapi_wrapper.h
+@@ -31,6 +31,7 @@
+ #include "base/types/expected.h"
+ #include "base/types/pass_key.h"
+ #include "build/build_config.h"
++#include "media/base/video_frame_converter.h"
+ #include "media/gpu/chromeos/fourcc.h"
+ #include "media/gpu/media_gpu_export.h"
+ #include "media/gpu/vaapi/vaapi_utils.h"
+@@ -204,6 +205,7 @@ class MEDIA_GPU_EXPORT VaapiWrapper
+     bool yuv420_10 : 1;
+     bool yuv422 : 1;
+     bool yuv444 : 1;
++    bool yuv444_10 : 1;
+   };
+ 
+   // Returns the type of the underlying VA-API implementation.
+@@ -515,10 +517,14 @@ class MEDIA_GPU_EXPORT VaapiWrapper
+                                                const gfx::Size& size);
+ 
+   // Uploads contents of |frame| into |va_surface_id| for encode.
++  // |upload_image_fourcc| is the preferred VAImage format to use when the
++  // upload path must create a temporary VAImage instead of deriving one from
++  // the destination surface.
+   [[nodiscard]] virtual bool UploadVideoFrameToSurface(
+       const VideoFrame& frame,
+       VASurfaceID va_surface_id,
+-      const gfx::Size& va_surface_size);
++      const gfx::Size& va_surface_size,
++      uint32_t upload_image_fourcc = VA_FOURCC_NV12);
+ 
+   // Creates a buffer of |size| bytes to be used as encode output.
+   virtual std::unique_ptr<ScopedVABuffer> CreateVABuffer(VABufferType type,
+@@ -641,7 +647,8 @@ class MEDIA_GPU_EXPORT VaapiWrapper
+ 
+   // Syncs and exports |va_surface_id| as a gfx::NativePixmapDmaBuf. Currently,
+   // the only VAAPI surface pixel formats supported are VA_FOURCC_IMC3,
+-  // VA_FOURCC_NV12, VA_FOURCC_P010 and VA_FOURCC_ARGB.
++  // VA_FOURCC_NV12, VA_FOURCC_P010, VA_FOURCC_444P, VA_FOURCC_Q416 and
++  // VA_FOURCC_ARGB.
+   //
+   // Notes:
+   //
+@@ -743,6 +750,11 @@ class MEDIA_GPU_EXPORT VaapiWrapper
+   // return values from public methods.
+   ReportErrorToUMACB report_error_to_uma_cb_
+       GUARDED_BY_CONTEXT(sequence_checker_);
++
++  // Reused converter for CPU-side upload paths. Its scratch allocations live in
++  // VideoFrameConverter rather than ad-hoc caches in VaapiWrapper.
++  VideoFrameConverter upload_frame_converter_
++      GUARDED_BY_CONTEXT(sequence_checker_);
+ };
+ 
+ }  // namespace media
+diff --git a/media/video/video_encode_accelerator_adapter.cc b/media/video/video_encode_accelerator_adapter.cc
+index 11a0bf3d3565f..5bec11f43ed68 100644
+--- a/media/video/video_encode_accelerator_adapter.cc
++++ b/media/video/video_encode_accelerator_adapter.cc
+@@ -22,10 +22,12 @@
+ #include "components/viz/common/resources/shared_image_format.h"
+ #include "media/base/bitstream_buffer.h"
+ #include "media/base/encoder_status.h"
++#include "media/base/format_utils.h"
+ #include "media/base/media_log.h"
+ #include "media/base/media_switches.h"
+ #include "media/base/svc_scalability_mode.h"
+ #include "media/base/video_frame.h"
++#include "media/base/video_types.h"
+ #include "media/base/video_util.h"
+ #if BUILDFLAG(USE_PROPRIETARY_CODECS)
+ #include "media/formats/mp4/h264_annex_b_to_avc_bitstream_converter.h"
+@@ -85,6 +87,86 @@ Bitrate CreateBitrate(
+       requested_bitrate ? requested_bitrate->target_bps() : default_bitrate);
+ }
+ 
++VideoPixelFormat GetCpuInputPixelFormatForProfile(VideoCodecProfile profile) {
++#if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)
++  // This returns the CPU-upload fallback format for the current platform path,
++  // not the ideal hardware-native format in the abstract.
++  switch (profile) {
++    case HEVCPROFILE_MAIN10:
++      return PIXEL_FORMAT_I420;
++    case HEVCPROFILE_REXT:
++      return PIXEL_FORMAT_I444;
++    case HEVCPROFILE_HIGH_THROUGHPUT:
++      return PIXEL_FORMAT_YUV444P10;
++    default:
++      break;
++  }
++#endif
++#if BUILDFLAG(IS_FUCHSIA)
++  return PIXEL_FORMAT_I420;
++#else
++  return PIXEL_FORMAT_NV12;
++#endif
++}
++
++std::optional<VideoPixelFormat> GetGpuInputPixelFormatForProfile(
++    VideoCodecProfile profile) {
++#if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)
++  switch (profile) {
++    case HEVCPROFILE_MAIN10:
++      return PIXEL_FORMAT_P010LE;
++    case HEVCPROFILE_REXT:
++      return PIXEL_FORMAT_I444;
++    case HEVCPROFILE_HIGH_THROUGHPUT:
++      return PIXEL_FORMAT_YUV444P10;
++    default:
++      return std::nullopt;
++  }
++#else
++  return std::nullopt;
++#endif
++}
++
++VideoPixelFormat GetInputPixelFormatForProfile(
++    VideoCodecProfile profile,
++    const std::vector<VideoPixelFormat>& gpu_supported_pixel_formats,
++    bool supports_gpu_shared_images) {
++#if BUILDFLAG(IS_LINUX) || BUILDFLAG(IS_CHROMEOS)
++  if (supports_gpu_shared_images) {
++    const auto gpu_input_format = GetGpuInputPixelFormatForProfile(profile);
++    if (gpu_input_format &&
++        std::ranges::find(gpu_supported_pixel_formats, *gpu_input_format) !=
++            gpu_supported_pixel_formats.end()) {
++      return *gpu_input_format;
++    }
++  }
++#endif
++  return GetCpuInputPixelFormatForProfile(profile);
++}
++
++bool UsesGpuInputBuffers(
++    VideoCodecProfile profile,
++    const std::vector<VideoPixelFormat>& gpu_supported_pixel_formats,
++    bool supports_gpu_shared_images) {
++  if (!supports_gpu_shared_images) {
++    return false;
++  }
++
++  const auto gpu_input_format = GetGpuInputPixelFormatForProfile(profile);
++  return gpu_input_format &&
++         std::ranges::find(gpu_supported_pixel_formats, *gpu_input_format) !=
++             gpu_supported_pixel_formats.end();
++}
++
++// Keep the Main10 SHMEM fallback path at visible size so codec-specific aligned
++// coded size stays implicit inside the encoder/upload path instead of
++// materializing as input-frame padding. Other CPU-uploaded HEVC profiles keep
++// the aligned coded size contract until they demonstrate the same artifact.
++bool UsesVisibleSizeCpuFrames(VideoCodecProfile profile,
++                              bool uses_cpu_input_buffers) {
++  return profile == HEVCPROFILE_MAIN10 && uses_cpu_input_buffers;
++}
++
+ VideoEncodeAccelerator::Config SetUpVeaConfig(
+     VideoCodecProfile profile,
+     const VideoEncoder::Options& opts,
+@@ -163,8 +245,11 @@ class VideoEncodeAcceleratorAdapter::MappableSharedImageVideoFramePool
+   REQUIRE_ADOPTION_FOR_REFCOUNTED_TYPE();
+ 
+   MappableSharedImageVideoFramePool(GpuVideoAcceleratorFactories* gpu_factories,
+-                                    const gfx::Size& coded_size)
+-      : gpu_factories_(gpu_factories), coded_size_(coded_size) {}
++                                    const gfx::Size& coded_size,
++                                    VideoPixelFormat input_format)
++      : gpu_factories_(gpu_factories),
++        coded_size_(coded_size),
++        input_format_(input_format) {}
+   MappableSharedImageVideoFramePool(const MappableSharedImageVideoFramePool&) =
+       delete;
+   MappableSharedImageVideoFramePool& operator=(
+@@ -175,7 +260,12 @@ class VideoEncodeAcceleratorAdapter::MappableSharedImageVideoFramePool
+     DCHECK_CALLED_ON_VALID_SEQUENCE(sequence_checker_);
+     DCHECK(gfx::Rect(coded_size_).Contains(gfx::Rect(visible_size)));
+ 
+-    const auto si_format = viz::MultiPlaneFormat::kNV12;
++    const auto si_format = VideoPixelFormatToSharedImageFormat(input_format_);
++    if (!si_format) {
++      LOG(ERROR) << "Unsupported shared image input format: "
++                 << VideoPixelFormatToString(input_format_);
++      return nullptr;
++    }
+     const auto buffer_usage =
+         gfx::BufferUsage::VEA_READ_CAMERA_AND_CPU_READ_WRITE;
+ 
+@@ -193,7 +283,7 @@ class VideoEncodeAcceleratorAdapter::MappableSharedImageVideoFramePool
+       }
+ 
+       auto shared_image = sii->CreateSharedImage(
+-          {si_format, coded_size_, gfx::ColorSpace(),
++          {*si_format, coded_size_, gfx::ColorSpace(),
+            gpu::SharedImageUsageSet(si_usage), "VideoEncodeAcceleratorAdapter"},
+           gpu::kNullSurfaceHandle, buffer_usage);
+       if (!shared_image) {
+@@ -233,6 +323,7 @@ class VideoEncodeAcceleratorAdapter::MappableSharedImageVideoFramePool
+ 
+   const raw_ptr<GpuVideoAcceleratorFactories> gpu_factories_;
+   const gfx::Size coded_size_;
++  const VideoPixelFormat input_format_;
+ 
+   // Available mappable shared images.
+   std::vector<scoped_refptr<gpu::ClientSharedImage>> available_shared_images_;
+@@ -445,8 +536,13 @@ void VideoEncodeAcceleratorAdapter::InitializeOnAcceleratorThread(
+   }
+ 
+   profile_ = profile;
+-  supported_rc_modes_ = supported_rc_modes;
+   gpu_supported_pixel_formats_ = std::move(gpu_supported_pixel_formats);
++  uses_cpu_input_buffers_ =
++      !UsesGpuInputBuffers(profile_, gpu_supported_pixel_formats_,
++                           supports_gpu_shared_images_);
++  input_format_ = GetInputPixelFormatForProfile(
++      profile_, gpu_supported_pixel_formats_, supports_gpu_shared_images_);
++  supported_rc_modes_ = supported_rc_modes;
+   options_ = options;
+   info_cb_ = std::move(info_cb);
+   output_cb_ = std::move(output_cb);
+@@ -459,7 +555,8 @@ void VideoEncodeAcceleratorAdapter::InitializeOnAcceleratorThread(
+   }
+ #if BUILDFLAG(ENABLE_PLATFORM_HEVC) && \
+     BUILDFLAG(ENABLE_HEVC_PARSER_AND_HW_DECODER)
+-  if (profile_ == HEVCPROFILE_MAIN && !options_.hevc.produce_annexb) {
++  if (VideoCodecProfileToVideoCodec(profile_) == VideoCodec::kHEVC &&
++      !options_.hevc.produce_annexb) {
+     h265_converter_ = std::make_unique<H265AnnexBToHevcBitstreamConverter>(
+         /*add_parameter_sets_in_bitstream=*/false);
+   }
+@@ -474,13 +571,17 @@ void VideoEncodeAcceleratorAdapter::InitializeOnAcceleratorThread(
+   // Other platforms will happily mix GpuMemoryBuffer storage with shared-mem
+   // storage, so we don't care about mismatches on other platforms.
+   if (input_buffer_preference_ == InputBufferKind::Any) {
+-    input_buffer_preference_ = InputBufferKind::GpuMemBuf;
++    input_buffer_preference_ = uses_cpu_input_buffers_
++                                   ? InputBufferKind::CpuMemBuf
++                                   : InputBufferKind::GpuMemBuf;
++  }
++  if (!uses_cpu_input_buffers_) {
++    storage_type = VideoEncodeAccelerator::Config::StorageType::kGpuMemoryBuffer;
+   }
+-  storage_type = VideoEncodeAccelerator::Config::StorageType::kGpuMemoryBuffer;
+ #endif
+ 
+   auto vea_config =
+-      SetUpVeaConfig(profile_, options_, kDefaultPixelFormat, storage_type,
++      SetUpVeaConfig(profile_, options_, input_format_, storage_type,
+                      supported_rc_modes_, required_encoder_type_);
+ 
+   if (auto status =
+@@ -654,7 +755,7 @@ void VideoEncodeAcceleratorAdapter::ChangeOptionsOnAcceleratorThread(
+   }
+ #if BUILDFLAG(ENABLE_PLATFORM_HEVC) && \
+     BUILDFLAG(ENABLE_HEVC_PARSER_AND_HW_DECODER)
+-  if (profile_ == HEVCPROFILE_MAIN) {
++  if (VideoCodecProfileToVideoCodec(profile_) == VideoCodec::kHEVC) {
+     if (options.hevc.produce_annexb) {
+       h265_converter_.reset();
+     } else if (!h265_converter_) {
+@@ -722,7 +823,10 @@ void VideoEncodeAcceleratorAdapter::RequireBitstreamBuffers(
+   DCHECK_CALLED_ON_VALID_SEQUENCE(accelerator_sequence_checker_);
+   CHECK(state_ == State::kInitializing || state_ == State::kReconfiguring);
+ 
+-  input_coded_size_ = input_coded_size;
++  input_coded_size_ =
++      UsesVisibleSizeCpuFrames(profile_, uses_cpu_input_buffers_)
++          ? options_.frame_size
++          : input_coded_size;
+ 
+   constexpr int kOutputBufferNumber = 2;
+   output_buffer_handles_.clear();
+@@ -1014,15 +1118,18 @@ T VideoEncodeAcceleratorAdapter::WrapCallback(T cb) {
+   return base::BindPostTask(callback_task_runner_, std::move(cb));
+ }
+ 
+-// Copy a frame into a shared mem buffer and resize it as the same time. Input
+-// frames can I420, NV12, or RGB.
+-// They'll be converted to kDefaultPixelFormat if needed.
++// Copy a frame into a shared mem buffer and resize it at the same time. Input
++// frames can be I420, I444, YUV444P10, NV12, or RGB.
++// They'll be converted to |input_format_| if needed.
+ EncoderStatus::Or<scoped_refptr<VideoFrame>>
+ VideoEncodeAcceleratorAdapter::PrepareCpuFrame(
+     scoped_refptr<VideoFrame> src_frame) {
+   TRACE_EVENT0("media", "VideoEncodeAcceleratorAdapter::PrepareCpuFrame");
+ 
+-  const auto dest_coded_size = input_coded_size_;
++  const auto dest_coded_size =
++      UsesVisibleSizeCpuFrames(profile_, uses_cpu_input_buffers_)
++          ? options_.frame_size
++          : input_coded_size_;
+   const auto dest_visible_rect = gfx::Rect(options_.frame_size);
+ 
+   // The frame whose storage type is STORAGE_OWNED_MEMORY and
+@@ -1030,7 +1137,7 @@ VideoEncodeAcceleratorAdapter::PrepareCpuFrame(
+   // It is because VEAAdapter recycles the SharedMemoryRegion, but
+   // mojo_video_frame_traits doesn't.
+   if (src_frame->storage_type() == VideoFrame::STORAGE_SHMEM &&
+-      (src_frame->format() == kDefaultPixelFormat ||
++      (src_frame->format() == input_format_ ||
+        src_frame->format() == PIXEL_FORMAT_I420) &&
+       src_frame->visible_rect() == dest_visible_rect &&
+       src_frame->coded_size() == dest_coded_size) {
+@@ -1040,7 +1147,7 @@ VideoEncodeAcceleratorAdapter::PrepareCpuFrame(
+ 
+   if (!input_pool_) {
+     const size_t input_buffer_size =
+-        VideoFrame::AllocationSize(kDefaultPixelFormat, dest_coded_size);
++        VideoFrame::AllocationSize(input_format_, dest_coded_size);
+     input_pool_ = base::MakeRefCounted<ReadOnlyRegionPool>(input_buffer_size);
+   }
+ 
+@@ -1054,7 +1161,7 @@ VideoEncodeAcceleratorAdapter::PrepareCpuFrame(
+                               ? ConvertToMemoryMappedFrame(src_frame)
+                               : src_frame;
+   auto shared_frame = VideoFrame::WrapExternalData(
+-      kDefaultPixelFormat, dest_coded_size, dest_visible_rect,
++      input_format_, dest_coded_size, dest_visible_rect,
+       dest_visible_rect.size(), *mapping, src_frame->timestamp());
+ 
+   if (!shared_frame || !mapped_src_frame)
+@@ -1072,8 +1179,9 @@ VideoEncodeAcceleratorAdapter::PrepareCpuFrame(
+   return shared_frame;
+ }
+ 
+-// Copy a frame into a GPU buffer and resize it as the same time. Input frames
+-// can I420, NV12, or RGB -- they'll be converted to NV12 if needed.
++// Copy a frame into a GPU buffer and resize it at the same time. Input frames
++// can be I420, I444, YUV444P10, NV12, or RGB and they'll be converted to
++// |input_format_| if needed.
+ EncoderStatus::Or<scoped_refptr<VideoFrame>>
+ VideoEncodeAcceleratorAdapter::PrepareGpuFrame(
+     scoped_refptr<VideoFrame> src_frame) {
+@@ -1096,7 +1204,7 @@ VideoEncodeAcceleratorAdapter::PrepareGpuFrame(
+ 
+   if (!gmb_frame_pool_) {
+     gmb_frame_pool_ = base::MakeRefCounted<MappableSharedImageVideoFramePool>(
+-        gpu_factories_, dest_coded_size);
++        gpu_factories_, dest_coded_size, input_format_);
+   }
+ 
+   auto gpu_frame =
+diff --git a/media/video/video_encode_accelerator_adapter.h b/media/video/video_encode_accelerator_adapter.h
+index 142b0c3c35ad9..9747b40ea317b 100644
+--- a/media/video/video_encode_accelerator_adapter.h
++++ b/media/video/video_encode_accelerator_adapter.h
+@@ -187,6 +187,15 @@ class MEDIA_EXPORT VideoEncodeAcceleratorAdapter
+   VideoFrameConverter frame_converter_;
+ 
+   VideoCodecProfile profile_ = VIDEO_CODEC_PROFILE_UNKNOWN;
++  // The adapter historically behaved as if there were a single platform
++  // default input format (typically NV12). Keep the actual per-session input
++  // format here now that some profiles, such as Linux/ChromeOS HEVC Main10 and
++  // HEVC 4:4:4 profiles, intentionally stay on different CPU-uploaded SHMEM
++  // paths. This value is the adapter's concrete input contract for the
++  // initialized session and is reused for VEA config plus later frame
++  // reuse/conversion decisions.
++  VideoPixelFormat input_format_ = PIXEL_FORMAT_UNKNOWN;
++  bool uses_cpu_input_buffers_ = true;
+   VideoEncodeAccelerator::SupportedRateControlMode supported_rc_modes_ =
+       VideoEncodeAccelerator::kNoMode;
+   std::vector<VideoPixelFormat> gpu_supported_pixel_formats_;
+diff --git a/media/video/video_encode_accelerator_adapter_test.cc b/media/video/video_encode_accelerator_adapter_test.cc
+index b2a6f1b61d93f..f9c618806decf 100644
+--- a/media/video/video_encode_accelerator_adapter_test.cc
++++ b/media/video/video_encode_accelerator_adapter_test.cc
+@@ -230,6 +230,20 @@ class VideoEncodeAcceleratorAdapterTest
+   scoped_refptr<base::SequencedTaskRunner> callback_runner_;
+ };
+ 
++class HevcMain444VideoEncodeAcceleratorAdapterTest
++    : public VideoEncodeAcceleratorAdapterTest {
++ public:
++  HevcMain444VideoEncodeAcceleratorAdapterTest() { profile_ = HEVCPROFILE_REXT; }
++};
++
++class HevcMain44410VideoEncodeAcceleratorAdapterTest
++    : public VideoEncodeAcceleratorAdapterTest {
++ public:
++  HevcMain44410VideoEncodeAcceleratorAdapterTest() {
++    profile_ = HEVCPROFILE_HIGH_THROUGHPUT;
++  }
++};
++
+ TEST_F(VideoEncodeAcceleratorAdapterTest, PreInitialize) {
+   VideoEncoder::Options options;
+   options.frame_size = gfx::Size(640, 480);
+@@ -239,6 +253,72 @@ TEST_F(VideoEncodeAcceleratorAdapterTest, PreInitialize) {
+   RunUntilIdle();
+ }
+ 
++TEST_F(HevcMain444VideoEncodeAcceleratorAdapterTest,
++       RoutesThroughCpuI444Input) {
++  VideoEncoder::Options options;
++  options.frame_size = gfx::Size(640, 480);
++  int outputs_count = 0;
++  const VideoPixelFormat expected_input_format = PIXEL_FORMAT_I444;
++  const gfx::ColorSpace expected_color_space =
++      ExpectedColorSpace(PIXEL_FORMAT_I420, expected_input_format);
++
++  VideoEncoder::OutputCB output_cb = base::BindLambdaForTesting(
++      [&](VideoEncoderOutput output,
++          std::optional<VideoEncoder::CodecDescription>) {
++        EXPECT_EQ(output.color_space, expected_color_space);
++        outputs_count++;
++      });
++
++  vea()->SetEncodingCallback(base::BindLambdaForTesting(
++      [&](BitstreamBuffer&, bool keyframe, scoped_refptr<VideoFrame> frame) {
++        EXPECT_EQ(frame->format(), expected_input_format);
++        EXPECT_EQ(frame->coded_size(), options.frame_size);
++        return BitstreamBufferMetadata(1, keyframe, frame->timestamp());
++      }));
++
++  adapter()->Initialize(profile_, options, /*info_cb=*/base::DoNothing(),
++                        std::move(output_cb), ValidatingStatusCB());
++
++  auto frame = CreateGreenCpuFrame(options.frame_size, base::Milliseconds(1));
++  adapter()->Encode(frame, VideoEncoder::EncodeOptions(true),
++                    ValidatingStatusCB());
++  RunUntilIdle();
++  EXPECT_EQ(outputs_count, 1);
++}
++
++TEST_F(HevcMain44410VideoEncodeAcceleratorAdapterTest,
++       RoutesThroughCpuYuv444P10Input) {
++  VideoEncoder::Options options;
++  options.frame_size = gfx::Size(640, 480);
++  int outputs_count = 0;
++  const VideoPixelFormat expected_input_format = PIXEL_FORMAT_YUV444P10;
++  const gfx::ColorSpace expected_color_space =
++      ExpectedColorSpace(PIXEL_FORMAT_I420, expected_input_format);
++
++  VideoEncoder::OutputCB output_cb = base::BindLambdaForTesting(
++      [&](VideoEncoderOutput output,
++          std::optional<VideoEncoder::CodecDescription>) {
++        EXPECT_EQ(output.color_space, expected_color_space);
++        outputs_count++;
++      });
++
++  vea()->SetEncodingCallback(base::BindLambdaForTesting(
++      [&](BitstreamBuffer&, bool keyframe, scoped_refptr<VideoFrame> frame) {
++        EXPECT_EQ(frame->format(), expected_input_format);
++        EXPECT_EQ(frame->coded_size(), options.frame_size);
++        return BitstreamBufferMetadata(1, keyframe, frame->timestamp());
++      }));
++
++  adapter()->Initialize(profile_, options, /*info_cb=*/base::DoNothing(),
++                        std::move(output_cb), ValidatingStatusCB());
++
++  auto frame = CreateGreenCpuFrame(options.frame_size, base::Milliseconds(1));
++  adapter()->Encode(frame, VideoEncoder::EncodeOptions(true),
++                    ValidatingStatusCB());
++  RunUntilIdle();
++  EXPECT_EQ(outputs_count, 1);
++}
++
+ TEST_F(VideoEncodeAcceleratorAdapterTest, InitializeAfterFirstFrame) {
+   VideoEncoder::Options options;
+   options.frame_size = gfx::Size(640, 480);

@@ -1,0 +1,231 @@
+From 4cd9618096cdbe2dbedfe5d4fe09bab7e0debf75 Mon Sep 17 00:00:00 2001
+From: Jung-Kwang Lee <ntoskrnl7@gmail.com>
+Date: Wed, 6 May 2026 04:08:03 +0900
+Subject: fix: disable sandbox by default for subframe node integration
+
+---
+ docs/api/structures/web-preferences.md    |   6 +-
+ docs/breaking-changes.md                  |   6 +-
+ docs/tutorial/sandbox.md                  |   6 +-
+ shell/browser/web_contents_preferences.cc |   3 +-
+ spec/api-subframe-spec.ts                 | 128 +++++++++++++++++++++-
+ 5 files changed, 140 insertions(+), 9 deletions(-)
+
+diff --git a/docs/api/structures/web-preferences.md b/docs/api/structures/web-preferences.md
+index e8393585fe..f0c0b9241a 100644
+--- a/docs/api/structures/web-preferences.md
++++ b/docs/api/structures/web-preferences.md
+@@ -21,8 +21,10 @@
+   associated with the window, making it compatible with the Chromium
+   OS-level sandbox and disabling the Node.js engine. This is not the same as
+   the `nodeIntegration` option and the APIs available to the preload script
+-  are more limited. Default is `true` since Electron 20. The sandbox will
+-  automatically be disabled when `nodeIntegration` is set to `true`.
++  are more limited. Default is `true` since Electron 20. When `sandbox` is not
++  specified, Electron will automatically disable it when `nodeIntegration`,
++  `nodeIntegrationInWorker`, or `nodeIntegrationInSubFrames` is set to `true`.
++  Explicitly setting `sandbox: true` keeps the sandbox enabled.
+   Read more about the option [here](../../tutorial/sandbox.md).
+ * `session` [Session](../session.md#class-session) (optional) - Sets the session used by the
+   page. Instead of passing the Session object directly, you can also choose to
+diff --git a/docs/breaking-changes.md b/docs/breaking-changes.md
+index 28eb787aac..e0358292e4 100644
+--- a/docs/breaking-changes.md
++++ b/docs/breaking-changes.md
+@@ -1382,8 +1382,10 @@ or later will be required to run Electron v20.0.0 and higher.
+ Previously, renderers that specified a preload script defaulted to being
+ unsandboxed. This meant that by default, preload scripts had access to Node.js.
+ In Electron 20, this default has changed. Beginning in Electron 20, renderers
+-will be sandboxed by default, unless `nodeIntegration: true` or `sandbox: false`
+-is specified.
++will be sandboxed by default, unless `nodeIntegration: true`,
++`nodeIntegrationInWorker: true`, `nodeIntegrationInSubFrames: true`, or
++`sandbox: false` is specified. Explicitly setting `sandbox: true` keeps the
++sandbox enabled.
+
+ If your preload scripts do not depend on Node, no action is needed. If your
+ preload scripts _do_ depend on Node, either refactor them to remove Node usage
+diff --git a/docs/tutorial/sandbox.md b/docs/tutorial/sandbox.md
+index cbc0d13ae3..2d4aec5d30 100644
+--- a/docs/tutorial/sandbox.md
++++ b/docs/tutorial/sandbox.md
+@@ -16,8 +16,10 @@ Starting from Electron 20, the sandbox is enabled for renderer processes without
+ further configuration.
+
+ Sandboxing is tied to Node.js integration. _Enabling Node.js integration_ for a
+-renderer process by setting `nodeIntegration: true` _disables the sandbox_ for the
+-process.
++renderer process by setting `nodeIntegration: true`,
++`nodeIntegrationInWorker: true`, or `nodeIntegrationInSubFrames: true`
++_disables the sandbox by default_ for the process. Explicitly setting
++`sandbox: true` keeps the sandbox enabled.
+
+ If you want to disable the sandbox for a process, see the
+ [Disabling the sandbox for a single process](#disabling-the-sandbox-for-a-single-process)
+diff --git a/shell/browser/web_contents_preferences.cc b/shell/browser/web_contents_preferences.cc
+index bb0d4e76ac..c85890f30c 100644
+--- a/shell/browser/web_contents_preferences.cc
++++ b/shell/browser/web_contents_preferences.cc
+@@ -281,7 +281,8 @@ bool WebContentsPreferences::IsSandboxed() const {
+   if (sandbox_)
+     return *sandbox_;
+   bool sandbox_disabled_by_default =
+-      node_integration_ || node_integration_in_worker_;
++      node_integration_ || node_integration_in_worker_ ||
++      node_integration_in_sub_frames_;
+   return !sandbox_disabled_by_default;
+ }
+
+diff --git a/spec/api-subframe-spec.ts b/spec/api-subframe-spec.ts
+index 92dcfba98e..996ce64859 100644
+--- a/spec/api-subframe-spec.ts
++++ b/spec/api-subframe-spec.ts
+@@ -233,6 +233,112 @@ describe('subframe Node.js global exposure policy', () => {
+     return frame!;
+   };
+
++  const getNodeGlobals = async (target: Electron.WebFrameMain | Electron.WebContents) => {
++    return target.executeJavaScript(`({
++      process: typeof globalThis.process,
++      require: typeof globalThis.require,
++      fs: (() => {
++        try {
++          return typeof globalThis.require('fs').readFileSync;
++        } catch {
++          return 'unavailable';
++        }
++      })()
++    })`);
++  };
++
++  const expectNodeGlobals = (
++    actual: { process: string, require: string, fs: string },
++    enabled: boolean
++  ) => {
++    expect(actual).to.deep.equal(enabled
++      ? { process: 'object', require: 'function', fs: 'function' }
++      : { process: 'undefined', require: 'undefined', fs: 'unavailable' });
++  };
++
++  for (const { description, webPreferences, mainFrameNode, subFrameNode } of [
++    {
++      description: 'keeps Node.js globals out of all frames by default',
++      webPreferences: {
++        nodeIntegration: false,
++        nodeIntegrationInSubFrames: false,
++        contextIsolation: false
++      },
++      mainFrameNode: false,
++      subFrameNode: false
++    },
++    {
++      description: 'exposes Node.js globals only in the main frame when only nodeIntegration is enabled',
++      webPreferences: {
++        nodeIntegration: true,
++        nodeIntegrationInSubFrames: false,
++        contextIsolation: false
++      },
++      mainFrameNode: true,
++      subFrameNode: false
++    },
++    {
++      description: 'exposes Node.js globals only in subframes when only nodeIntegrationInSubFrames is enabled',
++      webPreferences: {
++        nodeIntegration: false,
++        nodeIntegrationInSubFrames: true,
++        contextIsolation: false
++      },
++      mainFrameNode: false,
++      subFrameNode: true
++    },
++    {
++      description: 'exposes Node.js globals in all frames when nodeIntegration and nodeIntegrationInSubFrames are enabled',
++      webPreferences: {
++        nodeIntegration: true,
++        nodeIntegrationInSubFrames: true,
++        contextIsolation: false
++      },
++      mainFrameNode: true,
++      subFrameNode: true
++    },
++    {
++      description: 'keeps explicit sandbox enabled when nodeIntegration and nodeIntegrationInSubFrames are enabled',
++      webPreferences: {
++        nodeIntegration: true,
++        nodeIntegrationInSubFrames: true,
++        contextIsolation: false,
++        sandbox: true
++      },
++      mainFrameNode: false,
++      subFrameNode: false
++    },
++    {
++      description: 'keeps explicit sandbox enabled when only nodeIntegrationInSubFrames is enabled',
++      webPreferences: {
++        nodeIntegration: false,
++        nodeIntegrationInSubFrames: true,
++        contextIsolation: false,
++        sandbox: true
++      },
++      mainFrameNode: false,
++      subFrameNode: false
++    },
++    {
++      description: 'uses explicit sandbox false for subframe Node.js globals',
++      webPreferences: {
++        nodeIntegration: false,
++        nodeIntegrationInSubFrames: true,
++        contextIsolation: false,
++        sandbox: false
++      },
++      mainFrameNode: false,
++      subFrameNode: true
++    }
++  ]) {
++    it(description, async () => {
++      const frame = await loadSameOriginFrame(webPreferences);
++
++      expectNodeGlobals(await getNodeGlobals(w.webContents), mainFrameNode);
++      expectNodeGlobals(await getNodeGlobals(frame), subFrameNode);
++    });
++  }
++
+   it('does not expose Node.js globals in same-origin subframes when only main frame nodeIntegration is enabled', async () => {
+     const frame = await loadSameOriginFrame({
+       nodeIntegration: true,
+@@ -255,8 +361,7 @@ describe('subframe Node.js global exposure policy', () => {
+     const frame = await loadSameOriginFrame({
+       nodeIntegration: false,
+       nodeIntegrationInSubFrames: true,
+-      contextIsolation: false,
+-      sandbox: false
++      contextIsolation: false
+     });
+
+     const globals = await frame.executeJavaScript(`({
+@@ -270,6 +375,25 @@ describe('subframe Node.js global exposure policy', () => {
+     });
+   });
+
++  it('does not expose Node.js globals in same-origin subframes when sandbox is explicitly enabled', async () => {
++    const frame = await loadSameOriginFrame({
++      nodeIntegration: false,
++      nodeIntegrationInSubFrames: true,
++      contextIsolation: false,
++      sandbox: true
++    });
++
++    const globals = await frame.executeJavaScript(`({
++      process: typeof globalThis.process,
++      require: typeof globalThis.require
++    })`);
++
++    expect(globals).to.deep.equal({
++      process: 'undefined',
++      require: 'undefined'
++    });
++  });
++
+   it('does not expose Node.js globals in initial empty same-origin subframes when only main frame nodeIntegration is enabled', async () => {
+     w = new BrowserWindow({
+       show: false,

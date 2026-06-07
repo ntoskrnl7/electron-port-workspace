@@ -1,0 +1,627 @@
+From 58b612a872f04c6a68fce0bfa26b9bb92cb4787a Mon Sep 17 00:00:00 2001
+From: Jung-Kwang Lee <ntoskrnl7@gmail.com>
+Date: Sat, 16 May 2026 06:04:57 +0900
+Subject: Expose Picture-in-Picture window state
+
+---
+ .../picture_in_picture_window.h               |  20 ++++
+ .../picture_in_picture_window_manager.cc      |  87 ++++++++++++++-
+ .../picture_in_picture_window_manager.h       |  26 +++++
+ ...ture_in_picture_window_manager_unittest.cc |  28 +++++
+ .../picture_in_picture_browser_frame_view.cc  | 101 +++++++++++++++++
+ .../picture_in_picture_browser_frame_view.h   |   5 +
+ .../overlay/video_overlay_window_views.cc     | 104 ++++++++++++++++++
+ .../overlay/video_overlay_window_views.h      |   5 +
+ 8 files changed, 375 insertions(+), 1 deletion(-)
+
+diff --git a/chrome/browser/picture_in_picture/picture_in_picture_window.h b/chrome/browser/picture_in_picture/picture_in_picture_window.h
+index 93a9a00c272b9..1cf2f8db88d05 100644
+--- a/chrome/browser/picture_in_picture/picture_in_picture_window.h
++++ b/chrome/browser/picture_in_picture/picture_in_picture_window.h
+@@ -5,7 +5,12 @@
+ #ifndef CHROME_BROWSER_PICTURE_IN_PICTURE_PICTURE_IN_PICTURE_WINDOW_H_
+ #define CHROME_BROWSER_PICTURE_IN_PICTURE_PICTURE_IN_PICTURE_WINDOW_H_
+
++#include <optional>
++
+ #include "build/build_config.h"
++#include "content/public/browser/desktop_media_id.h"
++#include "ui/gfx/geometry/rect.h"
++#include "ui/gfx/geometry/size.h"
+
+ // A PictureInPictureWindow is an always-on-top window that displays content to
+ // the user. There are two types of PictureInPictureWindows: video
+@@ -20,6 +25,21 @@ class PictureInPictureWindow {
+   // its original position.
+   virtual void SetForcedTucking(bool tuck) = 0;
+
++  // Returns a desktop capture id for this window when the platform exposes one.
++  virtual std::optional<content::DesktopMediaID> GetDesktopMediaID() const = 0;
++
++  // Returns the current window bounds in screen coordinates.
++  virtual std::optional<gfx::Rect> GetPictureInPictureWindowBounds() const = 0;
++
++  // Sets the window bounds in screen coordinates, returning the actual bounds
++  // after platform and Picture-in-Picture constraints are applied.
++  virtual std::optional<gfx::Rect> SetPictureInPictureWindowBounds(
++      const gfx::Rect& bounds) = 0;
++
++  // Returns the intrinsic video frame size for video Picture-in-Picture.
++  // Document Picture-in-Picture windows return std::nullopt.
++  virtual std::optional<gfx::Size> GetVideoSize() const = 0;
++
+ #if BUILDFLAG(IS_MAC)
+   // Called when any browser window has entered fullscreen. This gives the
+   // picture-in-picture window a chance to ensure that it is displayed on top of
+diff --git a/chrome/browser/picture_in_picture/picture_in_picture_window_manager.cc b/chrome/browser/picture_in_picture/picture_in_picture_window_manager.cc
+index 295a16cd4f1e3..6d9c9e5702994 100644
+--- a/chrome/browser/picture_in_picture/picture_in_picture_window_manager.cc
++++ b/chrome/browser/picture_in_picture/picture_in_picture_window_manager.cc
+@@ -225,6 +225,8 @@ bool PictureInPictureWindowManager::ExitPictureInPictureViaWindowUi(
+     return false;
+   }
+
++  NotifyObserversOnExitPictureInPicture();
++
+ #if !BUILDFLAG(IS_ANDROID) && BUILDFLAG(GOOGLE_CHROME_BRANDING)
+   // The user manually closed the pip window, so let the tab helper know in case
+   // the auto-pip permission dialog was visible.
+@@ -309,6 +311,69 @@ bool PictureInPictureWindowManager::IsChildWebContents(
+   return instance->GetChildWebContents() == wc;
+ }
+
++std::optional<std::string>
++PictureInPictureWindowManager::GetPictureInPictureWindowSourceId() const {
++#if !BUILDFLAG(IS_ANDROID)
++  if (!picture_in_picture_window_) {
++    return std::nullopt;
++  }
++
++  std::optional<content::DesktopMediaID> media_id =
++      picture_in_picture_window_->GetDesktopMediaID();
++  if (!media_id || media_id->is_null()) {
++    return std::nullopt;
++  }
++
++  return media_id->ToString();
++#else
++  return std::nullopt;
++#endif
++}
++
++std::optional<gfx::Rect>
++PictureInPictureWindowManager::SetPictureInPictureWindowBoundsInScreen(
++    int picture_in_picture_id,
++    const gfx::Rect& bounds) {
++#if !BUILDFLAG(IS_ANDROID)
++  if (!IsPictureInPictureWindowIdCurrent(picture_in_picture_id) ||
++      !picture_in_picture_window_) {
++    return std::nullopt;
++  }
++
++  return picture_in_picture_window_->SetPictureInPictureWindowBounds(bounds);
++#else
++  return std::nullopt;
++#endif
++}
++
++std::optional<gfx::Size>
++PictureInPictureWindowManager::GetVideoPictureInPictureSize() const {
++#if !BUILDFLAG(IS_ANDROID)
++  if (!picture_in_picture_window_) {
++    return std::nullopt;
++  }
++
++  return picture_in_picture_window_->GetVideoSize();
++#else
++  return std::nullopt;
++#endif
++}
++
++bool PictureInPictureWindowManager::IsPictureInPictureWindowIdCurrent(
++    int picture_in_picture_id) const {
++  return picture_in_picture_id != 0 && has_notified_picture_in_picture_enter_ &&
++         picture_in_picture_id == picture_in_picture_id_;
++}
++
++bool PictureInPictureWindowManager::ClosePictureInPictureWindow(
++    int picture_in_picture_id) {
++  if (!IsPictureInPictureWindowIdCurrent(picture_in_picture_id)) {
++    return false;
++  }
++
++  return ExitPictureInPicture();
++}
++
+ // static
+ gfx::Size PictureInPictureWindowManager::AdjustRequestedSizeIfNecessary(
+     const gfx::Size& requested_size,
+@@ -640,6 +705,7 @@ void PictureInPictureWindowManager::CloseWindowInternal() {
+
+   // Close and reset the picture-in-picture window controller, if it exists.
+   if (pip_window_controller_) {
++    NotifyObserversOnExitPictureInPicture();
+     pip_window_controller_->Close(false /* should_pause_video */);
+     pip_window_controller_ = nullptr;
+   }
+@@ -672,8 +738,10 @@ void PictureInPictureWindowManager::DocumentWebContentsDestroyed() {
+   // contents, so we only need to forget the controller here when user closes
+   // the parent web contents with the PiP window open.
+   document_web_contents_observer_.reset();
+-  if (pip_window_controller_)
++  if (pip_window_controller_) {
++    NotifyObserversOnExitPictureInPicture();
+     pip_window_controller_ = nullptr;
++  }
+ }
+
+ #if !BUILDFLAG(IS_ANDROID)
+@@ -789,6 +857,7 @@ void PictureInPictureWindowManager::OnPictureInPictureWindowShown(
+ void PictureInPictureWindowManager::OnPictureInPictureWindowHidden(
+     PictureInPictureWindow* window) {
+   if (picture_in_picture_window_ == window) {
++    NotifyObserversOnExitPictureInPicture();
+     picture_in_picture_window_ = nullptr;
+   }
+ }
+@@ -902,11 +971,27 @@ void PictureInPictureWindowManager::MaybeRecordPictureInPictureChanged(
+ #endif  // !BUILDFLAG(IS_ANDROID)
+
+ void PictureInPictureWindowManager::NotifyObserversOnEnterPictureInPicture() {
++  if (!has_notified_picture_in_picture_enter_) {
++    picture_in_picture_id_ = next_picture_in_picture_id_++;
++  }
++  has_notified_picture_in_picture_enter_ = true;
+   for (Observer& observer : observers_) {
+     observer.OnEnterPictureInPicture();
+   }
+ }
+
++void PictureInPictureWindowManager::NotifyObserversOnExitPictureInPicture() {
++  if (!has_notified_picture_in_picture_enter_) {
++    return;
++  }
++
++  has_notified_picture_in_picture_enter_ = false;
++  for (Observer& observer : observers_) {
++    observer.OnExitPictureInPicture();
++  }
++  picture_in_picture_id_ = 0;
++}
++
+ PictureInPictureWindowManager::PictureInPictureWindowManager() = default;
+
+ PictureInPictureWindowManager::~PictureInPictureWindowManager() = default;
+diff --git a/chrome/browser/picture_in_picture/picture_in_picture_window_manager.h b/chrome/browser/picture_in_picture/picture_in_picture_window_manager.h
+index 583ffabbbb341..84c55c064444b 100644
+--- a/chrome/browser/picture_in_picture/picture_in_picture_window_manager.h
++++ b/chrome/browser/picture_in_picture/picture_in_picture_window_manager.h
+@@ -7,6 +7,7 @@
+
+ #include <functional>
+ #include <optional>
++#include <string>
+
+ #include "base/memory/raw_ptr.h"
+ #include "base/memory/singleton.h"
+@@ -58,6 +59,7 @@ class PictureInPictureWindowManager {
+   class Observer : public base::CheckedObserver {
+    public:
+     virtual void OnEnterPictureInPicture() {}
++    virtual void OnExitPictureInPicture() {}
+   };
+
+   // Returns the singleton instance.
+@@ -146,6 +148,23 @@ class PictureInPictureWindowManager {
+   // picture-in-picture if either of them is present.
+   std::optional<gfx::Rect> GetPictureInPictureWindowBoundsInScreen() const;
+
++  // Sets the window bounds of the active Picture-in-Picture window. Returns the
++  // actual bounds after platform and Picture-in-Picture constraints are applied.
++  std::optional<gfx::Rect> SetPictureInPictureWindowBoundsInScreen(
++      int picture_in_picture_id,
++      const gfx::Rect& bounds);
++
++  // Returns a chromeMediaSourceId for the current Picture-in-Picture window
++  // when the platform exposes one for desktop capture.
++  std::optional<std::string> GetPictureInPictureWindowSourceId() const;
++
++  // Returns the intrinsic video frame size for video Picture-in-Picture.
++  std::optional<gfx::Size> GetVideoPictureInPictureSize() const;
++
++  int GetPictureInPictureWindowId() const { return picture_in_picture_id_; }
++  bool IsPictureInPictureWindowIdCurrent(int picture_in_picture_id) const;
++  bool ClosePictureInPictureWindow(int picture_in_picture_id);
++
+   // Used for Document picture-in-picture windows only. The returned dimensions
+   // represent the outer window bounds.
+   // This method is called from the |BrowserNavigator|. Note that the window
+@@ -197,6 +216,9 @@ class PictureInPictureWindowManager {
+   // Notify observers that picture-in-picture window is created.
+   void NotifyObserversOnEnterPictureInPicture();
+
++  // Notify observers that picture-in-picture window is closing.
++  void NotifyObserversOnExitPictureInPicture();
++
+ #if !BUILDFLAG(IS_ANDROID)
+   std::unique_ptr<AutoPipSettingOverlayView> GetOverlayView(
+       views::View* anchor_view,
+@@ -372,6 +394,10 @@ class PictureInPictureWindowManager {
+   // Observers that listen to updates of this instance.
+   base::ObserverList<Observer> observers_;
+
++  int picture_in_picture_id_ = 0;
++  int next_picture_in_picture_id_ = 1;
++  bool has_notified_picture_in_picture_enter_ = false;
++
+   std::unique_ptr<VideoWebContentsObserver> video_web_contents_observer_;
+
+   std::unique_ptr<DocumentWebContentsObserver> document_web_contents_observer_;
+diff --git a/chrome/browser/picture_in_picture/picture_in_picture_window_manager_unittest.cc b/chrome/browser/picture_in_picture/picture_in_picture_window_manager_unittest.cc
+index 494278bd4e1e1..a3085a4dd7643 100644
+--- a/chrome/browser/picture_in_picture/picture_in_picture_window_manager_unittest.cc
++++ b/chrome/browser/picture_in_picture/picture_in_picture_window_manager_unittest.cc
+@@ -45,6 +45,7 @@ class MockPictureInPictureWindowManagerObserver
+     : public PictureInPictureWindowManager::Observer {
+  public:
+   MOCK_METHOD(void, OnEnterPictureInPicture, (), (override));
++  MOCK_METHOD(void, OnExitPictureInPicture, (), (override));
+ };
+
+ class MockPictureInPictureWindowController
+@@ -84,6 +85,19 @@ class MockPictureInPictureWindow : public PictureInPictureWindow {
+
+   // PictureInPictureWindow:
+   void SetForcedTucking(bool tuck) override { is_tucking_ = tuck; }
++  std::optional<content::DesktopMediaID> GetDesktopMediaID() const override {
++    return std::nullopt;
++  }
++  std::optional<gfx::Rect> GetPictureInPictureWindowBounds() const override {
++    return gfx::Rect();
++  }
++  std::optional<gfx::Rect> SetPictureInPictureWindowBounds(
++      const gfx::Rect& bounds) override {
++    return bounds;
++  }
++  std::optional<gfx::Size> GetVideoSize() const override {
++    return std::nullopt;
++  }
+ #if BUILDFLAG(IS_MAC)
+   void OnAnyBrowserEnteredFullscreen() override {}
+ #endif  // BUILDFLAG(IS_MAC)
+@@ -266,6 +280,20 @@ TEST_F(PictureInPictureWindowManagerTest, OnEnterDocumentPictureInPicture) {
+       web_contents(), child_web_contents());
+ }
+
++TEST_F(PictureInPictureWindowManagerTest, OnExitDocumentPictureInPicture) {
++  PictureInPictureWindowManager* picture_in_picture_window_manager =
++      PictureInPictureWindowManager::GetInstance();
++  MockPictureInPictureWindowManagerObserver observer;
++  PictureInPictureWindowManagerdObservation observation{&observer};
++  observation.Observe(picture_in_picture_window_manager);
++  EXPECT_CALL(observer, OnEnterPictureInPicture).Times(1);
++  EXPECT_CALL(observer, OnExitPictureInPicture).Times(1);
++
++  picture_in_picture_window_manager->EnterDocumentPictureInPicture(
++      web_contents(), child_web_contents());
++  picture_in_picture_window_manager->ExitPictureInPicture();
++}
++
+ TEST_F(PictureInPictureWindowManagerTest, DontShowAutoPipSettingUiWithoutPip) {
+   PictureInPictureWindowManager* picture_in_picture_window_manager =
+       PictureInPictureWindowManager::GetInstance();
+diff --git a/chrome/browser/ui/views/frame/picture_in_picture_browser_frame_view.cc b/chrome/browser/ui/views/frame/picture_in_picture_browser_frame_view.cc
+index 54d8f7bf254b9..d5e456906e8ca 100644
+--- a/chrome/browser/ui/views/frame/picture_in_picture_browser_frame_view.cc
++++ b/chrome/browser/ui/views/frame/picture_in_picture_browser_frame_view.cc
+@@ -5,6 +5,7 @@
+ #include "chrome/browser/ui/views/frame/picture_in_picture_browser_frame_view.h"
+
+ #include <algorithm>
++#include <cstdint>
+ #include <memory>
+
+ #include "base/metrics/histogram_functions.h"
+@@ -33,6 +34,7 @@
+ #include "components/vector_icons/vector_icons.h"
+ #include "components/web_modal/web_contents_modal_dialog_host.h"
+ #include "components/webapps/isolated_web_apps/scheme.h"
++#include "content/public/browser/desktop_media_id.h"
+ #include "content/public/browser/document_picture_in_picture_window_controller.h"
+ #include "content/public/browser/web_contents.h"
+ #include "content/public/common/content_constants.h"
+@@ -71,6 +73,7 @@
+ #if !BUILDFLAG(IS_MAC)
+ // Mac does not use Aura
+ #include "ui/aura/window.h"
++#include "ui/aura/window_tree_host.h"
+ #endif
+
+ #if BUILDFLAG(ENABLE_EXTENSIONS)
+@@ -87,6 +90,48 @@ constexpr int kTopControlsHeight = 34;
+ // The vertical margin for IconLabelBubbleView to have 24px height.
+ constexpr int KIconViewVerticalMargin = 5;
+
++#if defined(USE_AURA)
++content::DesktopMediaID::Id AcceleratedWidgetToDesktopMediaId(
++    gfx::AcceleratedWidget accelerated_widget) {
++#if BUILDFLAG(IS_WIN)
++  return reinterpret_cast<content::DesktopMediaID::Id>(accelerated_widget);
++#elif BUILDFLAG(IS_LINUX)
++  return static_cast<uint32_t>(accelerated_widget);
++#else
++  return static_cast<content::DesktopMediaID::Id>(accelerated_widget);
++#endif
++}
++
++std::optional<content::DesktopMediaID> DesktopMediaIDFromNativeWindow(
++    gfx::NativeWindow native_window) {
++  if (!native_window) {
++    return std::nullopt;
++  }
++
++  content::DesktopMediaID media_id =
++      content::DesktopMediaID::RegisterNativeWindow(
++          content::DesktopMediaID::TYPE_WINDOW, native_window);
++  if (aura::WindowTreeHost* host = native_window->GetHost()) {
++    gfx::AcceleratedWidget accelerated_widget = host->GetAcceleratedWidget();
++    if (accelerated_widget != gfx::kNullAcceleratedWidget) {
++      media_id.id = AcceleratedWidgetToDesktopMediaId(accelerated_widget);
++    }
++  }
++
++  return media_id;
++}
++#elif BUILDFLAG(IS_MAC)
++std::optional<content::DesktopMediaID> DesktopMediaIDFromNativeWindow(
++    gfx::NativeWindow native_window) {
++  if (!native_window) {
++    return std::nullopt;
++  }
++
++  return content::DesktopMediaID::RegisterNativeWindow(
++      content::DesktopMediaID::TYPE_WINDOW, native_window);
++}
++#endif
++
+ constexpr int kResizeBorder = 10;
+ constexpr int kResizeAreaCornerSize = 16;
+
+@@ -1252,6 +1297,62 @@ void PictureInPictureBrowserFrameView::SetForcedTucking(bool tuck) {
+   }
+ }
+
++std::optional<content::DesktopMediaID>
++PictureInPictureBrowserFrameView::GetDesktopMediaID() const {
++#if defined(USE_AURA) || BUILDFLAG(IS_MAC)
++  if (!GetWidget()) {
++    return std::nullopt;
++  }
++
++  return DesktopMediaIDFromNativeWindow(GetWidget()->GetNativeWindow());
++#else
++  return std::nullopt;
++#endif
++}
++
++std::optional<gfx::Rect>
++PictureInPictureBrowserFrameView::GetPictureInPictureWindowBounds() const {
++  if (!GetWidget()) {
++    return std::nullopt;
++  }
++
++  return GetWidget()->GetWindowBoundsInScreen();
++}
++
++std::optional<gfx::Rect>
++PictureInPictureBrowserFrameView::SetPictureInPictureWindowBounds(
++    const gfx::Rect& bounds) {
++  if (!GetWidget()) {
++    return std::nullopt;
++  }
++
++  gfx::Rect adjusted_bounds(bounds);
++  display::Display display =
++      display::Screen::Get()->GetDisplayMatching(adjusted_bounds);
++  if (!display.is_valid()) {
++    display = display::Screen::Get()->GetDisplayNearestWindow(
++        GetWidget()->GetNativeWindow());
++  }
++
++  gfx::Size adjusted_size = adjusted_bounds.size();
++  adjusted_size.SetToMax(GetMinimumSize());
++  adjusted_size.SetToMin(
++      PictureInPictureWindowManager::GetMaximumWindowSize(display));
++  adjusted_bounds.set_size(adjusted_size);
++  adjusted_bounds.AdjustToFit(display.work_area());
++
++  GetWidget()->SetBounds(adjusted_bounds);
++  if (is_tucking_forced_) {
++    EnforceTucking();
++  }
++  return GetWidget()->GetWindowBoundsInScreen();
++}
++
++std::optional<gfx::Size> PictureInPictureBrowserFrameView::GetVideoSize()
++    const {
++  return std::nullopt;
++}
++
+ #if BUILDFLAG(IS_MAC)
+ void PictureInPictureBrowserFrameView::OnAnyBrowserEnteredFullscreen() {
+   GetWidget()->MoveToActiveFullscreenSpace();
+diff --git a/chrome/browser/ui/views/frame/picture_in_picture_browser_frame_view.h b/chrome/browser/ui/views/frame/picture_in_picture_browser_frame_view.h
+index 785bd22434668..e10f29dc819f4 100644
+--- a/chrome/browser/ui/views/frame/picture_in_picture_browser_frame_view.h
++++ b/chrome/browser/ui/views/frame/picture_in_picture_browser_frame_view.h
+@@ -123,6 +123,11 @@ class PictureInPictureBrowserFrameView : public BrowserFrameView,
+
+   // PictureInPictureWindow:
+   void SetForcedTucking(bool tuck) override;
++  std::optional<content::DesktopMediaID> GetDesktopMediaID() const override;
++  std::optional<gfx::Rect> GetPictureInPictureWindowBounds() const override;
++  std::optional<gfx::Rect> SetPictureInPictureWindowBounds(
++      const gfx::Rect& bounds) override;
++  std::optional<gfx::Size> GetVideoSize() const override;
+ #if BUILDFLAG(IS_MAC)
+   void OnAnyBrowserEnteredFullscreen() override;
+ #endif  // BUILDFLAG(IS_MAC)
+diff --git a/chrome/browser/ui/views/overlay/video_overlay_window_views.cc b/chrome/browser/ui/views/overlay/video_overlay_window_views.cc
+index ff0acc5b26b0d..0fa53cf2b6c1e 100644
+--- a/chrome/browser/ui/views/overlay/video_overlay_window_views.cc
++++ b/chrome/browser/ui/views/overlay/video_overlay_window_views.cc
+@@ -4,6 +4,7 @@
+
+ #include "chrome/browser/ui/views/overlay/video_overlay_window_views.h"
+
++#include <cstdint>
+ #include <memory>
+ #include <string>
+
+@@ -50,6 +51,7 @@
+ #include "chrome/grit/generated_resources.h"
+ #include "components/global_media_controls/public/format_duration.h"
+ #include "components/vector_icons/vector_icons.h"
++#include "content/public/browser/desktop_media_id.h"
+ #include "content/public/browser/media_session.h"
+ #include "content/public/browser/picture_in_picture_window_controller.h"
+ #include "content/public/browser/render_frame_host.h"
+@@ -77,6 +79,11 @@
+ #include "ui/views/window/frame_view.h"
+ #include "url/origin.h"
+
++#if defined(USE_AURA)
++#include "ui/aura/window.h"
++#include "ui/aura/window_tree_host.h"
++#endif
++
+ #if BUILDFLAG(IS_CHROMEOS)
+ #include "ash/public/cpp/window_properties.h"  // nogncheck
+ #include "chromeos/ui/base/app_types.h"
+@@ -114,6 +121,48 @@ constexpr gfx::Size kOverlayViewPadding(64, 46);
+ // Size for action buttons.
+ constexpr gfx::Size kActionButtonSize(28, 28);
+
++#if defined(USE_AURA)
++content::DesktopMediaID::Id AcceleratedWidgetToDesktopMediaId(
++    gfx::AcceleratedWidget accelerated_widget) {
++#if BUILDFLAG(IS_WIN)
++  return reinterpret_cast<content::DesktopMediaID::Id>(accelerated_widget);
++#elif BUILDFLAG(IS_LINUX)
++  return static_cast<uint32_t>(accelerated_widget);
++#else
++  return static_cast<content::DesktopMediaID::Id>(accelerated_widget);
++#endif
++}
++
++std::optional<content::DesktopMediaID> DesktopMediaIDFromNativeWindow(
++    gfx::NativeWindow native_window) {
++  if (!native_window) {
++    return std::nullopt;
++  }
++
++  content::DesktopMediaID media_id =
++      content::DesktopMediaID::RegisterNativeWindow(
++          content::DesktopMediaID::TYPE_WINDOW, native_window);
++  if (aura::WindowTreeHost* host = native_window->GetHost()) {
++    gfx::AcceleratedWidget accelerated_widget = host->GetAcceleratedWidget();
++    if (accelerated_widget != gfx::kNullAcceleratedWidget) {
++      media_id.id = AcceleratedWidgetToDesktopMediaId(accelerated_widget);
++    }
++  }
++
++  return media_id;
++}
++#elif BUILDFLAG(IS_MAC)
++std::optional<content::DesktopMediaID> DesktopMediaIDFromNativeWindow(
++    gfx::NativeWindow native_window) {
++  if (!native_window) {
++    return std::nullopt;
++  }
++
++  return content::DesktopMediaID::RegisterNativeWindow(
++      content::DesktopMediaID::TYPE_WINDOW, native_window);
++}
++#endif
++
+ // The amount of time the seek buttons next to the play button seek.
+ constexpr base::TimeDelta kSeekTime = base::Seconds(10);
+
+@@ -976,6 +1025,61 @@ void VideoOverlayWindowViews::SetForcedTucking(bool tuck) {
+   }
+ }
+
++std::optional<content::DesktopMediaID>
++VideoOverlayWindowViews::GetDesktopMediaID() const {
++#if defined(USE_AURA) || BUILDFLAG(IS_MAC)
++  return DesktopMediaIDFromNativeWindow(GetNativeWindow());
++#else
++  return std::nullopt;
++#endif
++}
++
++std::optional<gfx::Rect>
++VideoOverlayWindowViews::GetPictureInPictureWindowBounds() const {
++  if (!native_widget()) {
++    return std::nullopt;
++  }
++
++  return GetWindowBoundsInScreen();
++}
++
++std::optional<gfx::Rect>
++VideoOverlayWindowViews::SetPictureInPictureWindowBounds(
++    const gfx::Rect& bounds) {
++  if (!native_widget()) {
++    return std::nullopt;
++  }
++
++  gfx::Rect adjusted_bounds(bounds);
++  display::Display display =
++      display::Screen::Get()->GetDisplayMatching(adjusted_bounds);
++  if (!display.is_valid()) {
++    display = display::Screen::Get()->GetDisplayNearestWindow(
++        GetNativeWindow());
++  }
++
++  UpdateMaxSize(display.work_area());
++  gfx::Size adjusted_size = adjusted_bounds.size();
++  adjusted_size.SetToMax(GetMinimumSize());
++  adjusted_size.SetToMin(max_size_);
++  adjusted_bounds.set_size(adjusted_size);
++  adjusted_bounds.AdjustToFit(display.work_area());
++
++  SetBounds(adjusted_bounds);
++  if (is_tucking_forced_) {
++    tucker_->Tuck();
++  }
++  return GetWindowBoundsInScreen();
++}
++
++std::optional<gfx::Size> VideoOverlayWindowViews::GetVideoSize() const {
++  if (natural_size_.IsEmpty()) {
++    return std::nullopt;
++  }
++
++  return natural_size_;
++}
++
+ #if BUILDFLAG(IS_MAC)
+ void VideoOverlayWindowViews::OnAnyBrowserEnteredFullscreen() {
+   MoveToActiveFullscreenSpace();
+diff --git a/chrome/browser/ui/views/overlay/video_overlay_window_views.h b/chrome/browser/ui/views/overlay/video_overlay_window_views.h
+index 4dfa182ff2759..c8ac7df8096ed 100644
+--- a/chrome/browser/ui/views/overlay/video_overlay_window_views.h
++++ b/chrome/browser/ui/views/overlay/video_overlay_window_views.h
+@@ -136,6 +136,11 @@ class VideoOverlayWindowViews : public content::VideoOverlayWindow,
+
+   // PictureInPictureWindow:
+   void SetForcedTucking(bool tuck) override;
++  std::optional<content::DesktopMediaID> GetDesktopMediaID() const override;
++  std::optional<gfx::Rect> GetPictureInPictureWindowBounds() const override;
++  std::optional<gfx::Rect> SetPictureInPictureWindowBounds(
++      const gfx::Rect& bounds) override;
++  std::optional<gfx::Size> GetVideoSize() const override;
+ #if BUILDFLAG(IS_MAC)
+   void OnAnyBrowserEnteredFullscreen() override;
+ #endif  // BUILDFLAG(IS_MAC)

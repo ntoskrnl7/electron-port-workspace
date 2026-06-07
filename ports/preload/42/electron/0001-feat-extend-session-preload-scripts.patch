@@ -1,0 +1,1390 @@
+From 439f61565fcb2b6a25237cb8795b4aa7e954efaf Mon Sep 17 00:00:00 2001
+From: Jung-Kwang Lee <ntoskrnl7@gmail.com>
+Date: Wed, 6 May 2026 13:09:19 +0900
+Subject: feat: extend session preload scripts
+
+---
+ docs/api/session.md                           |  11 +-
+ .../structures/preload-script-registration.md |   8 +-
+ docs/api/structures/preload-script.md         |   6 +-
+ lib/browser/rpc-server.ts                     |  24 ++-
+ lib/renderer/init.ts                          |   4 +-
+ package.json                                  |   2 +-
+ script/fix-preload-typescript-definitions.mjs | 106 ++++++++++
+ shell/browser/api/electron_api_session.cc     |   6 +
+ shell/browser/electron_browser_client.cc      | 101 +++++++++-
+ shell/browser/preload_script.cc               |  57 ++++++
+ shell/browser/preload_script.h                |  30 ++-
+ shell/browser/session_preferences.cc          |  11 +
+ shell/browser/session_preferences.h           |   1 +
+ shell/browser/web_contents_preferences.cc     |   1 -
+ shell/common/api/api.mojom                    |  11 +
+ shell/common/options_switches.h               |   4 +
+ shell/renderer/api/electron_api_web_frame.cc  |   2 +
+ .../electron_render_frame_observer.cc         |  13 +-
+ shell/renderer/electron_renderer_client.cc    |  11 +-
+ shell/renderer/renderer_client_base.cc        |  75 ++++++-
+ shell/renderer/renderer_client_base.h         |   2 +
+ spec/api-session-spec.ts                      | 189 ++++++++++++++++++
+ spec/api-subframe-spec.ts                     | 122 ++++++++++-
+ spec/fixtures/preload-frame-scope.js          |   6 +
+ .../workers/plain-preload-shared-worker.js    |   3 +
+ spec/fixtures/workers/plain-preload-worker.js |   1 +
+ spec/fixtures/workers/plain-worker-preload.js |   5 +
+ spec/ts-smoke/electron/main.ts                |  19 ++
+ typings/internal-ambient.d.ts                 |   1 +
+ typings/internal-electron.d.ts                |   4 +-
+ 30 files changed, 816 insertions(+), 20 deletions(-)
+ create mode 100644 script/fix-preload-typescript-definitions.mjs
+ create mode 100644 spec/fixtures/preload-frame-scope.js
+ create mode 100644 spec/fixtures/workers/plain-preload-shared-worker.js
+ create mode 100644 spec/fixtures/workers/plain-preload-worker.js
+ create mode 100644 spec/fixtures/workers/plain-worker-preload.js
+
+diff --git a/docs/api/session.md b/docs/api/session.md
+index c81cb24dfa..f4189bbcbb 100644
+--- a/docs/api/session.md
++++ b/docs/api/session.md
+@@ -1416,7 +1416,16 @@ for `frame` context types.
+
+ Registers preload script that will be executed in its associated context type in this session. For
+ `frame` contexts, this will run prior to any preload defined in the web preferences of a
+-WebContents.
++WebContents. When `scope` is omitted, Electron preserves the existing frame
++preload behavior: scripts run in the main frame, and also in subframes when
++`nodeIntegrationInSubFrames` enables subframe preloads. Use `scope` to make
++frame injection explicit: `main`, `sub-frames` or `all`. This controls script
++injection only and does not enable Node.js integration in page scripts.
++
++For `dedicated-worker` and `shared-worker` contexts, scripts run as plain
++JavaScript in the worker global scope before the worker's main script is
++evaluated. Dedicated workers have Node.js globals only when
++`nodeIntegrationInWorker` is enabled.
+
+ Returns `string` - The ID of the registered preload script.
+
+diff --git a/docs/api/structures/preload-script-registration.md b/docs/api/structures/preload-script-registration.md
+index efb5be49ee..ced53203a4 100644
+--- a/docs/api/structures/preload-script-registration.md
++++ b/docs/api/structures/preload-script-registration.md
+@@ -1,6 +1,12 @@
+ # PreloadScriptRegistration Object
+
+ * `type` string - Context type where the preload script will be executed.
+-  Possible values include `frame` or `service-worker`.
++  Possible values include `frame`, `dedicated-worker`, `shared-worker` or
++  `service-worker`.
++* `scope` string (optional) - Frame scope where the preload script will be
++  executed. Can be `main`, `sub-frames` or `all`. This is only supported when
++  `type` is `frame`. When omitted, Electron preserves the existing frame preload
++  behavior: main frame injection, plus subframe injection when
++  `nodeIntegrationInSubFrames` enables subframe preloads.
+ * `id` string (optional) - Unique ID of preload script. Defaults to a random UUID.
+ * `filePath` string - Path of the script file. Must be an absolute path.
+diff --git a/docs/api/structures/preload-script.md b/docs/api/structures/preload-script.md
+index e29812e046..a7f2d63b9b 100644
+--- a/docs/api/structures/preload-script.md
++++ b/docs/api/structures/preload-script.md
+@@ -1,6 +1,10 @@
+ # PreloadScript Object
+
+ * `type` string - Context type where the preload script will be executed.
+-  Possible values include `frame` or `service-worker`.
++  Possible values include `frame`, `dedicated-worker`, `shared-worker` or
++  `service-worker`.
++* `scope` string (optional) - Frame scope where the preload script will be
++  executed. Can be `main`, `sub-frames` or `all`. This is only set when `type`
++  is `frame`.
+ * `id` string - Unique ID of preload script.
+ * `filePath` string - Path of the script file. Must be an absolute path.
+diff --git a/lib/browser/rpc-server.ts b/lib/browser/rpc-server.ts
+index b840757941..73276cf453 100644
+--- a/lib/browser/rpc-server.ts
++++ b/lib/browser/rpc-server.ts
+@@ -54,10 +54,30 @@ const getPreloadScriptsFromEvent = (event: ElectronInternal.IpcMainInternalEvent
+   let preloadScripts = session.getPreloadScripts();
+
+   if (event.type === 'frame') {
+-    preloadScripts = preloadScripts.filter((script) => script.type === 'frame');
++    const senderFrame = event.senderFrame;
++    const isMainFrame = senderFrame ? senderFrame.parent === null : true;
++    const lastWebPreferences = event.sender.getLastWebPreferences();
++    const allowLegacySubFramePreload = Boolean(lastWebPreferences?.nodeIntegrationInSubFrames);
++    const matchesFrameScope = (script: Extract<Electron.PreloadScript, { type: 'frame' }>) => {
++      if (script.scope === undefined) {
++        return isMainFrame || allowLegacySubFramePreload;
++      }
++
++      const scope = script.scope;
++      return scope === 'all' ||
++        (scope === 'main' && isMainFrame) ||
++        (scope === 'sub-frames' && !isMainFrame);
++    };
++
++    preloadScripts = preloadScripts.filter(
++      (script): script is Extract<Electron.PreloadScript, { type: 'frame' }> =>
++        script.type === 'frame' && matchesFrameScope(script)
++    );
+
+     const webPrefPreload = event.sender._getPreloadScript();
+-    if (webPrefPreload) preloadScripts.push(webPrefPreload);
++    if (webPrefPreload && webPrefPreload.type === 'frame' && matchesFrameScope(webPrefPreload)) {
++      preloadScripts.push(webPrefPreload);
++    }
+   } else if (event.type === 'service-worker') {
+     preloadScripts = preloadScripts.filter((script) => script.type === 'service-worker');
+   } else {
+diff --git a/lib/renderer/init.ts b/lib/renderer/init.ts
+index ae0ba7a1e1..6e9a2bb03c 100644
+--- a/lib/renderer/init.ts
++++ b/lib/renderer/init.ts
+@@ -62,12 +62,14 @@ const { hasSwitch, getSwitchValue } = process._linkedBinding('electron_common_co
+ const { mainFrame } = process._linkedBinding('electron_renderer_web_frame');
+
+ const nodeIntegration = mainFrame.getWebPreference('nodeIntegration');
++const nodeIntegrationInSubFrames = mainFrame.getWebPreference('nodeIntegrationInSubFrames');
++const shouldExposeNodeGlobals = process.isMainFrame ? nodeIntegration : nodeIntegrationInSubFrames;
+ const appPath = hasSwitch('app-path') ? getSwitchValue('app-path') : null;
+
+ // Common renderer initialization
+ require('@electron/internal/renderer/common-init');
+
+-if (nodeIntegration) {
++if (shouldExposeNodeGlobals) {
+   // Export node bindings to global.
+   const { makeRequireFunction } = __non_webpack_require__(
+     'internal/modules/helpers'
+diff --git a/package.json b/package.json
+index 1f1cacc91b..2b2ce5b994 100644
+--- a/package.json
++++ b/package.json
+@@ -74,7 +74,7 @@
+     "lint:api-history": "lint-roller-markdown-api-history --root \"./docs/api/\" --schema \"./docs/api-history.schema.json\" --breaking-changes-file \"./docs/breaking-changes.md\" --check-placement --check-strings \"*.md\"",
+     "lint:chromium-roller": "node ./script/lint-roller-chromium-changes.mjs",
+     "create-api-json": "node script/create-api-json.mjs",
+-    "create-typescript-definitions": "npm run create-api-json && electron-typescript-definitions --api=electron-api.json && node spec/ts-smoke/runner.js",
++    "create-typescript-definitions": "npm run create-api-json && electron-typescript-definitions --api=electron-api.json && node script/fix-preload-typescript-definitions.mjs && node spec/ts-smoke/runner.js",
+     "gn-typescript-definitions": "npm run create-typescript-definitions && node script/cp.mjs electron.d.ts",
+     "pre-flight": "pre-flight",
+     "gn-check": "node ./script/gn-check.js",
+diff --git a/script/fix-preload-typescript-definitions.mjs b/script/fix-preload-typescript-definitions.mjs
+new file mode 100644
+index 0000000000..c231da7cca
+--- /dev/null
++++ b/script/fix-preload-typescript-definitions.mjs
+@@ -0,0 +1,106 @@
++import fs from 'node:fs';
++import path from 'node:path';
++
++const definitionsPath = path.resolve('electron.d.ts');
++let definitions = fs.readFileSync(definitionsPath, 'utf8');
++
++const frameScope = "('main' | 'sub-frames' | 'all')";
++const workerType = "('dedicated-worker' | 'shared-worker' | 'service-worker')";
++
++const preloadScript = `  type PreloadScript = ({
++
++    // Docs: https://electronjs.org/docs/api/structures/preload-script
++
++    /**
++     * Path of the script file. Must be an absolute path.
++     */
++    filePath: string;
++    /**
++     * Unique ID of preload script.
++     */
++    id: string;
++    /**
++     * Frame scope where the preload script will be executed. This is only set when
++     * \`type\` is \`frame\`.
++     */
++    scope?: ${frameScope};
++    /**
++     * Context type where the preload script will be executed.
++     */
++    type: 'frame';
++  } | {
++
++    // Docs: https://electronjs.org/docs/api/structures/preload-script
++
++    /**
++     * Path of the script file. Must be an absolute path.
++     */
++    filePath: string;
++    /**
++     * Unique ID of preload script.
++     */
++    id: string;
++    /**
++     * Context type where the preload script will be executed.
++     */
++    type: ${workerType};
++  });`;
++
++const preloadScriptRegistration = `  type PreloadScriptRegistration = ({
++
++    // Docs: https://electronjs.org/docs/api/structures/preload-script-registration
++
++    /**
++     * Path of the script file. Must be an absolute path.
++     */
++    filePath: string;
++    /**
++     * Unique ID of preload script. Defaults to a random UUID.
++     */
++    id?: string;
++    /**
++     * Frame scope where the preload script will be executed. This is only supported
++     * when \`type\` is \`frame\`. When omitted, Electron preserves the existing frame
++     * preload behavior: main frame injection, plus subframe injection when
++     * \`nodeIntegrationInSubFrames\` enables subframe preloads.
++     */
++    scope?: ${frameScope};
++    /**
++     * Context type where the preload script will be executed.
++     */
++    type: 'frame';
++  } | {
++
++    // Docs: https://electronjs.org/docs/api/structures/preload-script-registration
++
++    /**
++     * Path of the script file. Must be an absolute path.
++     */
++    filePath: string;
++    /**
++     * Unique ID of preload script. Defaults to a random UUID.
++     */
++    id?: string;
++    /**
++     * Context type where the preload script will be executed.
++     */
++    type: ${workerType};
++  });`;
++
++function replaceGeneratedInterface(source, name, replacement) {
++  const pattern = new RegExp(String.raw`^  interface ${name} \{[\s\S]*?^  \}`, 'm');
++  if (pattern.test(source)) {
++    return source.replace(pattern, replacement);
++  }
++
++  if (source.includes(`  type ${name} = (`)) {
++    return source;
++  }
++
++  throw new Error(`Could not find generated ${name} interface in ${definitionsPath}`);
++}
++
++definitions = replaceGeneratedInterface(definitions, 'PreloadScript', preloadScript);
++definitions = replaceGeneratedInterface(definitions, 'PreloadScriptRegistration', preloadScriptRegistration);
++
++fs.writeFileSync(definitionsPath, definitions);
+diff --git a/shell/browser/api/electron_api_session.cc b/shell/browser/api/electron_api_session.cc
+index f17f9ebb31..7d30d4934b 100644
+--- a/shell/browser/api/electron_api_session.cc
++++ b/shell/browser/api/electron_api_session.cc
+@@ -1129,6 +1129,12 @@ std::string Session::RegisterPreloadScript(
+     }
+   }
+
++  if (new_preload_script.has_frame_scope &&
++      new_preload_script.script_type != PreloadScript::ScriptType::kWebFrame) {
++    thrower.ThrowError("Preload script scope is only supported for frame type");
++    return "";
++  }
++
+   preload_scripts.push_back(new_preload_script);
+   return new_preload_script.id;
+ }
+diff --git a/shell/browser/electron_browser_client.cc b/shell/browser/electron_browser_client.cc
+index c49c10ebe1..1df769422c 100644
+--- a/shell/browser/electron_browser_client.cc
++++ b/shell/browser/electron_browser_client.cc
+@@ -9,8 +9,10 @@
+ #endif
+
+ #include <memory>
++#include <optional>
+ #include <string_view>
+ #include <utility>
++#include <vector>
+
+ #include "base/base_switches.h"
+ #include "base/command_line.h"
+@@ -60,7 +62,9 @@
+ #include "extensions/common/extension_id.h"
+ #include "ipc/constants.mojom.h"
+ #include "mojo/public/cpp/bindings/binder_map.h"
++#include "mojo/public/cpp/bindings/receiver.h"
+ #include "mojo/public/cpp/bindings/self_owned_associated_receiver.h"
++#include "mojo/public/cpp/bindings/self_owned_receiver.h"
+ #include "net/ssl/ssl_cert_request_info.h"
+ #include "net/ssl/ssl_private_key.h"
+ #include "printing/buildflags/buildflags.h"
+@@ -258,6 +262,72 @@ void BindNetworkHintsHandler(
+   NetworkHintsHandlerImpl::Create(frame_host, std::move(receiver));
+ }
+
++std::optional<PreloadScript::ScriptType> ParsePreloadScriptType(
++    const std::string& type) {
++  if (type == "frame")
++    return PreloadScript::ScriptType::kWebFrame;
++  if (type == "dedicated-worker")
++    return PreloadScript::ScriptType::kDedicatedWorker;
++  if (type == "shared-worker")
++    return PreloadScript::ScriptType::kSharedWorker;
++  if (type == "service-worker")
++    return PreloadScript::ScriptType::kServiceWorker;
++  return std::nullopt;
++}
++
++class ElectronPreloadScriptLoader : public mojom::ElectronPreloadScriptLoader {
++ public:
++  explicit ElectronPreloadScriptLoader(content::BrowserContext* browser_context)
++      : browser_context_(browser_context) {}
++
++  ElectronPreloadScriptLoader(const ElectronPreloadScriptLoader&) = delete;
++  ElectronPreloadScriptLoader& operator=(const ElectronPreloadScriptLoader&) =
++      delete;
++
++  void LoadPreloadScripts(const std::string& type,
++                          LoadPreloadScriptsCallback callback) override {
++    std::vector<mojom::PreloadScriptSourcePtr> sources;
++    std::optional<PreloadScript::ScriptType> script_type =
++        ParsePreloadScriptType(type);
++    auto* prefs = SessionPreferences::FromBrowserContext(browser_context_);
++    if (!script_type || !prefs) {
++      std::move(callback).Run(std::move(sources));
++      return;
++    }
++
++    for (const auto& script : prefs->preload_scripts()) {
++      if (script.script_type != *script_type)
++        continue;
++
++      auto source = mojom::PreloadScriptSource::New();
++      source->file_path = script.file_path.AsUTF8Unsafe();
++
++      if (!script.file_path.IsAbsolute()) {
++        source->error = "Preload script must have absolute path";
++      } else {
++        ScopedAllowBlockingForElectron allow_blocking;
++        if (!base::ReadFileToString(script.file_path, &source->contents))
++          source->error = "Unable to read preload script";
++      }
++
++      sources.push_back(std::move(source));
++    }
++
++    std::move(callback).Run(std::move(sources));
++  }
++
++ private:
++  raw_ptr<content::BrowserContext> browser_context_;
++};
++
++void BindPreloadScriptLoader(
++    content::BrowserContext* browser_context,
++    mojo::PendingReceiver<mojom::ElectronPreloadScriptLoader> receiver) {
++  mojo::MakeSelfOwnedReceiver(
++      std::make_unique<ElectronPreloadScriptLoader>(browser_context),
++      std::move(receiver));
++}
++
+ #if BUILDFLAG(ENABLE_ELECTRON_EXTENSIONS)
+ // Used by the GetPrivilegeRequiredByUrl() and GetProcessPrivilege() functions
+ // below.  Extension, and isolated apps require different privileges to be
+@@ -626,6 +696,9 @@ void ElectronBrowserClient::AppendExtraCommandLineSwitches(
+       if (session_prefs->HasServiceWorkerPreloadScript()) {
+         command_line->AppendSwitch(switches::kServiceWorkerPreload);
+       }
++      if (session_prefs->HasFramePreloadScriptInSubFrames()) {
++        command_line->AppendSwitch(switches::kFramePreloadInSubFrames);
++      }
+     }
+   }
+ }
+@@ -1523,9 +1596,16 @@ void ElectronBrowserClient::
+       content::WebContents::FromRenderFrameHost(&render_frame_host);
+   if (contents) {
+     auto* prefs = WebContentsPreferences::From(contents);
++    bool allow_frame_preload_in_sub_frames = false;
++    if (auto* session_preferences = SessionPreferences::FromBrowserContext(
++            contents->GetBrowserContext())) {
++      allow_frame_preload_in_sub_frames =
++          session_preferences->HasFramePreloadScriptInSubFrames();
++    }
+     if (render_frame_host.GetFrameTreeNodeId() ==
+             contents->GetPrimaryMainFrame()->GetFrameTreeNodeId() ||
+-        (prefs && prefs->AllowsNodeIntegrationInSubFrames())) {
++        (prefs && prefs->AllowsNodeIntegrationInSubFrames()) ||
++        allow_frame_preload_in_sub_frames) {
+       associated_registry.AddInterface<mojom::ElectronApiIPC>(
+           base::BindRepeating(
+               [](content::RenderFrameHost* render_frame_host,
+@@ -1671,6 +1751,12 @@ bool ElectronBrowserClient::DoesSiteRequireDedicatedProcess(
+ void ElectronBrowserClient::BindHostReceiverForRenderer(
+     content::RenderProcessHost* render_process_host,
+     mojo::GenericPendingReceiver receiver) {
++  if (auto host_receiver = receiver.As<mojom::ElectronPreloadScriptLoader>()) {
++    BindPreloadScriptLoader(render_process_host->GetBrowserContext(),
++                            std::move(host_receiver));
++    return;
++  }
++
+ #if BUILDFLAG(ENABLE_BUILTIN_SPELLCHECKER)
+   if (auto host_receiver =
+           receiver.As<spellcheck::mojom::SpellCheckInitializationHost>()) {
+@@ -1728,6 +1814,12 @@ void ElectronBrowserClient::ExposeInterfacesToRenderer(
+ void ElectronBrowserClient::RegisterBrowserInterfaceBindersForFrame(
+     content::RenderFrameHost* render_frame_host,
+     mojo::BinderMapWithContext<content::RenderFrameHost*>* map) {
++  map->Add<mojom::ElectronPreloadScriptLoader>(base::BindRepeating(
++      [](content::RenderFrameHost* frame_host,
++         mojo::PendingReceiver<mojom::ElectronPreloadScriptLoader> receiver) {
++        BindPreloadScriptLoader(frame_host->GetProcess()->GetBrowserContext(),
++                                std::move(receiver));
++      }));
+   map->Add<network_hints::mojom::NetworkHintsHandler>(
+       base::BindRepeating(&BindNetworkHintsHandler));
+   map->Add<blink::mojom::BadgeService>(
+@@ -1888,6 +1980,13 @@ void ElectronBrowserClient::RegisterBrowserInterfaceBindersForServiceWorker(
+     const content::ServiceWorkerVersionBaseInfo& service_worker_version_info,
+     mojo::BinderMapWithContext<const content::ServiceWorkerVersionBaseInfo&>*
+         map) {
++  map->Add<mojom::ElectronPreloadScriptLoader>(base::BindRepeating(
++      [](content::BrowserContext* browser_context,
++         const content::ServiceWorkerVersionBaseInfo&,
++         mojo::PendingReceiver<mojom::ElectronPreloadScriptLoader> receiver) {
++        BindPreloadScriptLoader(browser_context, std::move(receiver));
++      },
++      browser_context));
+   map->Add<blink::mojom::BadgeService>(
+       base::BindRepeating(&BindBadgeServiceForServiceWorker));
+ }
+diff --git a/shell/browser/preload_script.cc b/shell/browser/preload_script.cc
+index 0f60687eba..52234d8f76 100644
+--- a/shell/browser/preload_script.cc
++++ b/shell/browser/preload_script.cc
+@@ -4,12 +4,31 @@
+
+ #include "shell/browser/preload_script.h"
+
++#include <utility>
++
+ #include "base/containers/fixed_flat_map.h"
+ #include "base/files/file_path.h"
+ #include "base/uuid.h"
+ #include "shell/common/gin_converters/file_path_converter.h"
+ #include "shell/common/gin_helper/dictionary.h"
+
++namespace electron {
++
++PreloadScript::PreloadScript() = default;
++
++PreloadScript::PreloadScript(std::string id,
++                             ScriptType script_type,
++                             base::FilePath file_path)
++    : id(std::move(id)),
++      script_type(script_type),
++      file_path(std::move(file_path)) {}
++
++PreloadScript::PreloadScript(const PreloadScript&) = default;
++PreloadScript& PreloadScript::operator=(const PreloadScript&) = default;
++PreloadScript::~PreloadScript() = default;
++
++}  // namespace electron
++
+ namespace gin {
+
+ using electron::PreloadScript;
+@@ -21,6 +40,8 @@ v8::Local<v8::Value> Converter<PreloadScript::ScriptType>::ToV8(
+   using Val = PreloadScript::ScriptType;
+   static constexpr auto Lookup = base::MakeFixedFlatMap<Val, std::string_view>({
+       {Val::kWebFrame, "frame"},
++      {Val::kDedicatedWorker, "dedicated-worker"},
++      {Val::kSharedWorker, "shared-worker"},
+       {Val::kServiceWorker, "service-worker"},
+   });
+   return StringToV8(isolate, Lookup.at(in));
+@@ -34,11 +55,40 @@ bool Converter<PreloadScript::ScriptType>::FromV8(
+   using Val = PreloadScript::ScriptType;
+   static constexpr auto Lookup = base::MakeFixedFlatMap<std::string_view, Val>({
+       {"frame", Val::kWebFrame},
++      {"dedicated-worker", Val::kDedicatedWorker},
++      {"shared-worker", Val::kSharedWorker},
+       {"service-worker", Val::kServiceWorker},
+   });
+   return FromV8WithLookup(isolate, val, Lookup, out);
+ }
+
++// static
++v8::Local<v8::Value> Converter<PreloadScript::FrameScope>::ToV8(
++    v8::Isolate* isolate,
++    const PreloadScript::FrameScope& in) {
++  using Val = PreloadScript::FrameScope;
++  static constexpr auto Lookup = base::MakeFixedFlatMap<Val, std::string_view>({
++      {Val::kMain, "main"},
++      {Val::kSubFrames, "sub-frames"},
++      {Val::kAll, "all"},
++  });
++  return StringToV8(isolate, Lookup.at(in));
++}
++
++// static
++bool Converter<PreloadScript::FrameScope>::FromV8(
++    v8::Isolate* isolate,
++    v8::Local<v8::Value> val,
++    PreloadScript::FrameScope* out) {
++  using Val = PreloadScript::FrameScope;
++  static constexpr auto Lookup = base::MakeFixedFlatMap<std::string_view, Val>({
++      {"main", Val::kMain},
++      {"sub-frames", Val::kSubFrames},
++      {"all", Val::kAll},
++  });
++  return FromV8WithLookup(isolate, val, Lookup, out);
++}
++
+ // static
+ v8::Local<v8::Value> Converter<PreloadScript>::ToV8(
+     v8::Isolate* isolate,
+@@ -47,6 +97,9 @@ v8::Local<v8::Value> Converter<PreloadScript>::ToV8(
+   dict.Set("filePath", script.file_path.AsUTF8Unsafe());
+   dict.Set("id", script.id);
+   dict.Set("type", script.script_type);
++  if (script.script_type == PreloadScript::ScriptType::kWebFrame &&
++      script.has_frame_scope)
++    dict.Set("scope", script.frame_scope);
+   return ConvertToV8(isolate, dict).As<v8::Object>();
+ }
+
+@@ -68,6 +121,10 @@ bool Converter<PreloadScript>::FromV8(v8::Isolate* isolate,
+   } else {
+     return false;
+   }
++  out->has_frame_scope = options.Has("scope");
++  if (out->has_frame_scope && !options.Get("scope", &out->frame_scope)) {
++    return false;
++  }
+   if (std::string id; options.Get("id", &id)) {
+     out->id = id;
+   } else {
+diff --git a/shell/browser/preload_script.h b/shell/browser/preload_script.h
+index 62e945a569..56f616a852 100644
+--- a/shell/browser/preload_script.h
++++ b/shell/browser/preload_script.h
+@@ -14,11 +14,28 @@
+ namespace electron {
+
+ struct PreloadScript {
+-  enum class ScriptType { kWebFrame, kServiceWorker };
++  enum class ScriptType {
++    kWebFrame,
++    kDedicatedWorker,
++    kSharedWorker,
++    kServiceWorker
++  };
++
++  enum class FrameScope { kMain, kSubFrames, kAll };
++
++  PreloadScript();
++  PreloadScript(std::string id,
++                ScriptType script_type,
++                base::FilePath file_path);
++  PreloadScript(const PreloadScript&);
++  PreloadScript& operator=(const PreloadScript&);
++  ~PreloadScript();
+
+   std::string id;
+-  ScriptType script_type;
++  ScriptType script_type = ScriptType::kWebFrame;
+   base::FilePath file_path;
++  FrameScope frame_scope = FrameScope::kMain;
++  bool has_frame_scope = false;
+
+   // If set, use the deprecated validation behavior of Session.setPreloads
+   bool deprecated = false;
+@@ -39,6 +56,15 @@ struct Converter<PreloadScript::ScriptType> {
+                      PreloadScript::ScriptType* out);
+ };
+
++template <>
++struct Converter<PreloadScript::FrameScope> {
++  static v8::Local<v8::Value> ToV8(v8::Isolate* isolate,
++                                   const PreloadScript::FrameScope& in);
++  static bool FromV8(v8::Isolate* isolate,
++                     v8::Local<v8::Value> val,
++                     PreloadScript::FrameScope* out);
++};
++
+ template <>
+ struct Converter<PreloadScript> {
+   static v8::Local<v8::Value> ToV8(v8::Isolate* isolate,
+diff --git a/shell/browser/session_preferences.cc b/shell/browser/session_preferences.cc
+index 5ef235010e..a52d79ae0c 100644
+--- a/shell/browser/session_preferences.cc
++++ b/shell/browser/session_preferences.cc
+@@ -39,4 +39,15 @@ bool SessionPreferences::HasServiceWorkerPreloadScript() {
+   return it != preloads.end();
+ }
+
++bool SessionPreferences::HasFramePreloadScriptInSubFrames() {
++  const auto& preloads = preload_scripts();
++  auto it = std::find_if(
++      preloads.begin(), preloads.end(), [](const PreloadScript& script) {
++        return script.script_type == PreloadScript::ScriptType::kWebFrame &&
++               script.has_frame_scope &&
++               script.frame_scope != PreloadScript::FrameScope::kMain;
++      });
++  return it != preloads.end();
++}
++
+ }  // namespace electron
+diff --git a/shell/browser/session_preferences.h b/shell/browser/session_preferences.h
+index 3c03e701da..65d378db7f 100644
+--- a/shell/browser/session_preferences.h
++++ b/shell/browser/session_preferences.h
+@@ -29,6 +29,7 @@ class SessionPreferences : public base::SupportsUserData::Data {
+   std::vector<PreloadScript>& preload_scripts() { return preload_scripts_; }
+
+   bool HasServiceWorkerPreloadScript();
++  bool HasFramePreloadScriptInSubFrames();
+
+  private:
+   SessionPreferences();
+diff --git a/shell/browser/web_contents_preferences.cc b/shell/browser/web_contents_preferences.cc
+index da2fe80b8a..bb0d4e76ac 100644
+--- a/shell/browser/web_contents_preferences.cc
++++ b/shell/browser/web_contents_preferences.cc
+@@ -21,7 +21,6 @@
+ #include "sandbox/policy/switches.h"
+ #include "shell/browser/api/electron_api_web_contents.h"
+ #include "shell/browser/native_window.h"
+-#include "shell/browser/session_preferences.h"
+ #include "shell/common/color_util.h"
+ #include "shell/common/gin_converters/value_converter.h"
+ #include "shell/common/gin_helper/dictionary.h"
+diff --git a/shell/common/api/api.mojom b/shell/common/api/api.mojom
+index b9859ba7f2..7df121993d 100644
+--- a/shell/common/api/api.mojom
++++ b/shell/common/api/api.mojom
+@@ -5,6 +5,17 @@ import "ui/gfx/geometry/mojom/geometry.mojom";
+ import "third_party/blink/public/mojom/messaging/cloneable_message.mojom";
+ import "third_party/blink/public/mojom/messaging/transferable_message.mojom";
+
++struct PreloadScriptSource {
++  string file_path;
++  string contents;
++  string error;
++};
++
++interface ElectronPreloadScriptLoader {
++  [Sync]
++  LoadPreloadScripts(string type) => (array<PreloadScriptSource> scripts);
++};
++
+ interface ElectronRenderer {
+   Message(
+       bool internal,
+diff --git a/shell/common/options_switches.h b/shell/common/options_switches.h
+index d362b26c4f..fa219441ad 100644
+--- a/shell/common/options_switches.h
++++ b/shell/common/options_switches.h
+@@ -315,6 +315,10 @@ inline constexpr base::cstring_view kDisableNTLMv2 = "disable-ntlm-v2";
+ inline constexpr base::cstring_view kServiceWorkerPreload =
+     "service-worker-preload";
+
++// Indicates that frame preloads should also be requested in subframes.
++inline constexpr base::cstring_view kFramePreloadInSubFrames =
++    "frame-preload-in-sub-frames";
++
+ // If set, flag node::ProcessInitializationFlags::kNoStdioInitialization would
+ // be set for node initialization.
+ inline constexpr base::cstring_view kNoStdioInit = "no-stdio-init";
+diff --git a/shell/renderer/api/electron_api_web_frame.cc b/shell/renderer/api/electron_api_web_frame.cc
+index b50342c5a2..37e2e92780 100644
+--- a/shell/renderer/api/electron_api_web_frame.cc
++++ b/shell/renderer/api/electron_api_web_frame.cc
+@@ -529,6 +529,8 @@ class WebFrameRenderer final
+       return gin::ConvertToV8(isolate, prefs.hidden_page);
+     } else if (pref_name == options::kNodeIntegration) {
+       return gin::ConvertToV8(isolate, prefs.node_integration);
++    } else if (pref_name == options::kNodeIntegrationInSubFrames) {
++      return gin::ConvertToV8(isolate, prefs.node_integration_in_sub_frames);
+     } else if (pref_name == options::kWebviewTag) {
+       return gin::ConvertToV8(isolate, prefs.webview_tag);
+     }
+diff --git a/shell/renderer/electron_render_frame_observer.cc b/shell/renderer/electron_render_frame_observer.cc
+index a9d08b836f..e9f9cfd397 100644
+--- a/shell/renderer/electron_render_frame_observer.cc
++++ b/shell/renderer/electron_render_frame_observer.cc
+@@ -4,6 +4,7 @@
+
+ #include "shell/renderer/electron_render_frame_observer.h"
+
++#include "base/command_line.h"
+ #include "base/memory/ref_counted_memory.h"
+ #include "base/trace_event/trace_event.h"
+ #include "content/public/renderer/render_frame.h"
+@@ -128,10 +129,14 @@ void ElectronRenderFrameObserver::DidInstallConditionalFeatures(
+   bool is_main_world = electron::is_main_world(world_id);
+   bool is_main_frame = render_frame_->IsMainFrame();
+   bool allow_node_in_sub_frames = prefs.node_integration_in_sub_frames;
++  bool allow_preload_in_sub_frames =
++      base::CommandLine::ForCurrentProcess()->HasSwitch(
++          switches::kFramePreloadInSubFrames);
+
+   bool should_create_isolated_context =
+       use_context_isolation && is_main_world &&
+-      (is_main_frame || allow_node_in_sub_frames);
++      (is_main_frame || allow_node_in_sub_frames ||
++       allow_preload_in_sub_frames);
+
+   if (should_create_isolated_context) {
+     CreateIsolatedWorldContext();
+@@ -192,13 +197,17 @@ bool ElectronRenderFrameObserver::ShouldNotifyClient(int world_id) const {
+   // when the initial about:blank Node.js environment is cleaned up. See:
+   // https://source.chromium.org/chromium/chromium/src/+/main:content/renderer/render_frame_impl.h;l=870-892;drc=4b6001440a18740b76a1c63fa2a002cc941db394
+   const bool allow_node_in_sub_frames = prefs.node_integration_in_sub_frames;
++  const bool allow_preload_in_sub_frames =
++      base::CommandLine::ForCurrentProcess()->HasSwitch(
++          switches::kFramePreloadInSubFrames);
+   if (allow_node_in_sub_frames && !render_frame_->IsMainFrame()) {
+     if (GURL{render_frame_->GetWebFrame()->GetDocument().Url()}.IsAboutBlank())
+       return false;
+   }
+
+   if (prefs.context_isolation &&
+-      (render_frame_->IsMainFrame() || allow_node_in_sub_frames))
++      (render_frame_->IsMainFrame() || allow_node_in_sub_frames ||
++       allow_preload_in_sub_frames))
+     return is_isolated_world(world_id);
+
+   return is_main_world(world_id);
+diff --git a/shell/renderer/electron_renderer_client.cc b/shell/renderer/electron_renderer_client.cc
+index a50ecf6ce4..f52dadf9a1 100644
+--- a/shell/renderer/electron_renderer_client.cc
++++ b/shell/renderer/electron_renderer_client.cc
+@@ -5,11 +5,14 @@
+ #include "shell/renderer/electron_renderer_client.h"
+
+ #include <algorithm>
++#include <string>
++#include <vector>
+
+ #include "base/command_line.h"
+ #include "components/cdm/renderer/key_system_support_update.h"
+ #include "content/public/renderer/render_frame.h"
+ #include "electron/fuses.h"
++#include "gin/converter.h"
+ #include "net/http/http_request_headers.h"
+ #include "shell/common/api/electron_bindings.h"
+ #include "shell/common/gin_helper/dictionary.h"
+@@ -252,16 +255,18 @@ bool WorkerHasNodeIntegration(blink::ExecutionContext* ec) {
+
+ void ElectronRendererClient::WorkerScriptReadyForEvaluationOnWorkerThread(
+     v8::Local<v8::Context> context) {
+-  RendererClientBase::WorkerScriptReadyForEvaluationOnWorkerThread(context);
+-
+   auto* ec = blink::ExecutionContext::From(context);
+-  if (!WorkerHasNodeIntegration(ec))
++  if (!WorkerHasNodeIntegration(ec)) {
++    RendererClientBase::WorkerScriptReadyForEvaluationOnWorkerThread(context);
+     return;
++  }
+
+   auto* current = WebWorkerObserver::GetCurrent();
+   if (!current)
+     current = WebWorkerObserver::Create();
+   current->WorkerScriptReadyForEvaluation(context);
++
++  RendererClientBase::WorkerScriptReadyForEvaluationOnWorkerThread(context);
+ }
+
+ void ElectronRendererClient::WillDestroyWorkerContextOnWorkerThread(
+diff --git a/shell/renderer/renderer_client_base.cc b/shell/renderer/renderer_client_base.cc
+index c300f7fd22..9474811fde 100644
+--- a/shell/renderer/renderer_client_base.cc
++++ b/shell/renderer/renderer_client_base.cc
+@@ -5,12 +5,15 @@
+ #include "shell/renderer/renderer_client_base.h"
+
+ #include <memory>
++#include <optional>
+ #include <string>
++#include <string_view>
+ #include <utility>
+ #include <vector>
+
+ #include "base/command_line.h"
+ #include "base/functional/callback_helpers.h"
++#include "base/logging.h"
+ #include "base/strings/string_split.h"
+ #include "components/network_hints/renderer/web_prescient_networking_impl.h"
+ #include "content/common/buildflags.h"
+@@ -20,8 +23,11 @@
+ #include "content/public/renderer/render_thread.h"
+ #include "electron/buildflags/buildflags.h"
+ #include "electron/fuses.h"
++#include "gin/converter.h"
++#include "mojo/public/cpp/bindings/remote.h"
+ #include "printing/buildflags/buildflags.h"
+ #include "shell/browser/api/electron_api_protocol.h"
++#include "shell/common/api/api.mojom.h"
+ #include "shell/common/api/electron_api_native_image.h"
+ #include "shell/common/color_util.h"
+ #include "shell/common/gin_helper/dictionary.h"
+@@ -40,7 +46,9 @@
+ #include "third_party/abseil-cpp/absl/strings/str_format.h"
+ #include "third_party/blink/public/common/associated_interfaces/associated_interface_provider.h"
+ #include "third_party/blink/public/common/associated_interfaces/associated_interface_registry.h"
++#include "third_party/blink/public/common/thread_safe_browser_interface_broker_proxy.h"
+ #include "third_party/blink/public/common/web_preferences/web_preferences.h"
++#include "third_party/blink/public/platform/platform.h"
+ #include "third_party/blink/public/platform/web_runtime_features.h"
+ #include "third_party/blink/public/web/blink.h"
+ #include "third_party/blink/public/web/web_custom_element.h"  // NOLINT(build/include_alpha)
+@@ -123,6 +131,60 @@ std::vector<std::string> ParseSchemesCLISwitch(
+                            base::SPLIT_WANT_NONEMPTY);
+ }
+
++std::optional<std::string_view> GetWorkerPreloadScriptType(
++    blink::ExecutionContext* ec) {
++  if (!ec)
++    return std::nullopt;
++  if (ec->IsDedicatedWorkerGlobalScope())
++    return "dedicated-worker";
++  if (ec->IsSharedWorkerGlobalScope())
++    return "shared-worker";
++  return std::nullopt;
++}
++
++void ExecutePlainPreloadScripts(v8::Local<v8::Context> context,
++                                std::string_view type) {
++  auto* ec = blink::ExecutionContext::From(context);
++  if (!ec)
++    return;
++
++  mojo::Remote<mojom::ElectronPreloadScriptLoader> loader;
++  blink::Platform::Current()->GetBrowserInterfaceBroker()->GetInterface(
++      loader.BindNewPipeAndPassReceiver());
++
++  std::vector<mojom::PreloadScriptSourcePtr> scripts;
++  if (!loader->LoadPreloadScripts(std::string{type}, &scripts))
++    return;
++
++  v8::Isolate* isolate = v8::Isolate::GetCurrent();
++  v8::HandleScope handle_scope(isolate);
++  v8::Context::Scope context_scope(context);
++
++  for (const auto& script_source : scripts) {
++    if (!script_source->error.empty()) {
++      LOG(ERROR) << "Unable to load preload script: "
++                 << script_source->file_path << ": " << script_source->error;
++      continue;
++    }
++
++    v8::TryCatch try_catch(isolate);
++    v8::Local<v8::String> source =
++        gin::StringToV8(isolate, script_source->contents);
++    v8::Local<v8::Script> script;
++    if (!v8::Script::Compile(context, source).ToLocal(&script)) {
++      LOG(ERROR) << "Unable to compile preload script: "
++                 << script_source->file_path;
++      continue;
++    }
++
++    v8::MaybeLocal<v8::Value> result = script->Run(context);
++    if (result.IsEmpty()) {
++      LOG(ERROR) << "Unable to run preload script: "
++                 << script_source->file_path;
++    }
++  }
++}
++
+ // static
+ RendererClientBase* g_renderer_client_base = nullptr;
+
+@@ -191,6 +253,13 @@ RendererClientBase* RendererClientBase::Get() {
+   return g_renderer_client_base;
+ }
+
++void RendererClientBase::WorkerScriptReadyForEvaluationOnWorkerThread(
++    v8::Local<v8::Context> context) {
++  auto* ec = blink::ExecutionContext::From(context);
++  if (auto script_type = GetWorkerPreloadScriptType(ec))
++    ExecutePlainPreloadScripts(context, *script_type);
++}
++
+ void RendererClientBase::BindProcess(v8::Isolate* isolate,
+                                      gin_helper::Dictionary* process,
+                                      content::RenderFrame* render_frame) {
+@@ -212,8 +281,12 @@ bool RendererClientBase::ShouldLoadPreload(
+   bool is_devtools =
+       IsDevTools(render_frame) || IsDevToolsExtension(render_frame);
+   bool allow_node_in_sub_frames = prefs.node_integration_in_sub_frames;
++  bool allow_preload_in_sub_frames =
++      base::CommandLine::ForCurrentProcess()->HasSwitch(
++          switches::kFramePreloadInSubFrames);
+
+-  return (is_main_frame || is_devtools || allow_node_in_sub_frames) &&
++  return (is_main_frame || is_devtools || allow_node_in_sub_frames ||
++          allow_preload_in_sub_frames) &&
+          !IsWebViewFrame(isolate, context, render_frame);
+ }
+
+diff --git a/shell/renderer/renderer_client_base.h b/shell/renderer/renderer_client_base.h
+index 2731aca9ea..c8ddfba8b4 100644
+--- a/shell/renderer/renderer_client_base.h
++++ b/shell/renderer/renderer_client_base.h
+@@ -66,6 +66,8 @@ class RendererClientBase : public content::ContentRendererClient
+   virtual void SetupMainWorldOverrides(v8::Isolate* isolate,
+                                        v8::Local<v8::Context> context,
+                                        content::RenderFrame* render_frame);
++  void WorkerScriptReadyForEvaluationOnWorkerThread(
++      v8::Local<v8::Context> context) override;
+
+   std::unique_ptr<blink::WebPrescientNetworking> CreatePrescientNetworking(
+       content::RenderFrame* render_frame) override;
+diff --git a/spec/api-session-spec.ts b/spec/api-session-spec.ts
+index 29c99eefdc..1ac92dc0b6 100644
+--- a/spec/api-session-spec.ts
++++ b/spec/api-session-spec.ts
+@@ -11,6 +11,7 @@ import * as http from 'node:http';
+ import * as https from 'node:https';
+ import * as path from 'node:path';
+ import { setTimeout } from 'node:timers/promises';
++import { pathToFileURL } from 'node:url';
+
+ import { defer, ifit, listen, waitUntil } from './lib/spec-helpers';
+ import { closeAllWindows } from './lib/window-helpers';
+@@ -2135,6 +2136,194 @@ describe('session module', () => {
+     });
+   });
+
++  describe('ses.registerPreloadScript(script)', () => {
++    afterEach(closeAllWindows);
++
++    const workerPreload = path.join(fixtures, 'workers', 'plain-worker-preload.js');
++    const dedicatedWorker = path.join(fixtures, 'workers', 'plain-preload-worker.js');
++    const sharedWorker = path.join(fixtures, 'workers', 'plain-preload-shared-worker.js');
++    const frameScopePreload = path.join(fixtures, 'preload-frame-scope.js');
++
++    const collectFramePreloadEvents = async (
++      scope?: 'main' | 'sub-frames' | 'all',
++      nodeIntegrationInSubFrames = false
++    ) => {
++      const partition = `frame-preload-${scope ?? 'default'}-${crypto.randomUUID()}`;
++      const ses = session.fromPartition(partition);
++      ses.registerPreloadScript({
++        type: 'frame',
++        filePath: frameScopePreload,
++        ...(scope ? { scope } : {})
++      });
++
++      const w = new BrowserWindow({
++        show: false,
++        webPreferences: {
++          nodeIntegrationInSubFrames,
++          session: ses
++        }
++      });
++
++      const details: Array<{ isMainFrame: boolean, href: string }> = [];
++      const listener = (
++        _event: Electron.IpcMainEvent,
++        eventDetails: { isMainFrame: boolean, href: string }
++      ) => {
++        details.push(eventDetails);
++      };
++      ipcMain.on('frame-scope-preload-ran', listener);
++      try {
++        await w.loadFile(path.join(fixtures, 'sub-frames', 'frame-container.html'));
++        await w.webContents.executeJavaScript(`
++          new Promise(resolve => {
++            const frame = document.querySelector('iframe');
++            if (!frame || frame.contentDocument?.readyState === 'complete') {
++              resolve();
++            } else {
++              frame.addEventListener('load', () => resolve(), { once: true });
++            }
++          })
++        `);
++        await setTimeout(50);
++      } finally {
++        ipcMain.removeListener('frame-scope-preload-ran', listener);
++      }
++      return details;
++    };
++
++    it('runs frame preload scripts in main frames by default', async () => {
++      const details = await collectFramePreloadEvents();
++      expect(details.map(({ isMainFrame }) => isMainFrame)).to.deep.equal([true]);
++    });
++
++    it('preserves legacy subframe behavior when scope is omitted', async () => {
++      const details = await collectFramePreloadEvents(undefined, true);
++      expect(details.map(({ isMainFrame }) => isMainFrame).sort())
++        .to.deep.equal([false, true]);
++    });
++
++    it('keeps explicit main scope in the main frame with subframe node integration', async () => {
++      const details = await collectFramePreloadEvents('main', true);
++      expect(details.map(({ isMainFrame }) => isMainFrame)).to.deep.equal([true]);
++    });
++
++    it('runs frame preload scripts in subframes with sub-frames scope', async () => {
++      const details = await collectFramePreloadEvents('sub-frames');
++      expect(details.map(({ isMainFrame }) => isMainFrame)).to.deep.equal([false]);
++    });
++
++    it('runs frame preload scripts in main frames and subframes with all scope', async () => {
++      const details = await collectFramePreloadEvents('all');
++      expect(details.map(({ isMainFrame }) => isMainFrame).sort())
++        .to.deep.equal([false, true]);
++    });
++
++    it('rejects scope for worker preload scripts', () => {
++      const ses = session.fromPartition(`worker-preload-scope-${crypto.randomUUID()}`);
++      expect(() => {
++        ses.registerPreloadScript({
++          type: 'dedicated-worker',
++          filePath: workerPreload,
++          scope: 'all'
++        } as any);
++      }).to.throw('Preload script scope is only supported for frame type');
++    });
++
++    it('runs plain JavaScript preload scripts in dedicated workers', async () => {
++      const ses = session.fromPartition(`worker-preload-${crypto.randomUUID()}`);
++      ses.registerPreloadScript({
++        type: 'dedicated-worker',
++        filePath: workerPreload
++      });
++
++      const w = new BrowserWindow({ show: false, webPreferences: { session: ses } });
++      await w.loadFile(path.join(fixtures, 'blank.html'));
++      const result = await w.webContents.executeJavaScript(`
++        new Promise((resolve, reject) => {
++          const worker = new Worker(${JSON.stringify(pathToFileURL(dedicatedWorker).toString())});
++          worker.onmessage = event => resolve(event.data);
++          worker.onerror = event => reject(event.message);
++        })
++      `);
++
++      expect(result).to.deep.equal({
++        value: 'worker-preload',
++        requireType: 'undefined',
++        processType: 'undefined'
++      });
++    });
++
++    it('runs plain JavaScript preload scripts in dedicated workers with node integration', async () => {
++      const ses = session.fromPartition(`node-worker-preload-${crypto.randomUUID()}`);
++      ses.registerPreloadScript({
++        type: 'dedicated-worker',
++        filePath: workerPreload
++      });
++
++      const w = new BrowserWindow({
++        show: false,
++        webPreferences: {
++          nodeIntegrationInWorker: true,
++          session: ses
++        }
++      });
++      await w.loadFile(path.join(fixtures, 'blank.html'));
++      const result = await w.webContents.executeJavaScript(`
++        new Promise((resolve, reject) => {
++          const worker = new Worker(URL.createObjectURL(new Blob([\`
++            const { TextEncoder } = require('node:util');
++            const preload = globalThis.plainWorkerPreload;
++            postMessage({
++              value: preload.value,
++              preloadRequireType: preload.requireType,
++              preloadProcessType: preload.processType,
++              encoded: new TextEncoder().encode('x')[0],
++              requireType: typeof globalThis.require,
++              processType: typeof globalThis.process
++            });
++          \`], { type: 'text/javascript' })));
++          worker.onmessage = event => resolve(event.data);
++          worker.onerror = event => reject(event.message);
++        })
++      `);
++
++      expect(result).to.deep.equal({
++        value: 'worker-preload',
++        preloadRequireType: 'function',
++        preloadProcessType: 'object',
++        encoded: 120,
++        requireType: 'function',
++        processType: 'object'
++      });
++    });
++
++    it('runs plain JavaScript preload scripts in shared workers', async () => {
++      const ses = session.fromPartition(`shared-worker-preload-${crypto.randomUUID()}`);
++      ses.registerPreloadScript({
++        type: 'shared-worker',
++        filePath: workerPreload
++      });
++
++      const w = new BrowserWindow({ show: false, webPreferences: { session: ses } });
++      await w.loadFile(path.join(fixtures, 'blank.html'));
++      const workerUrl = `${pathToFileURL(sharedWorker).toString()}?${crypto.randomUUID()}`;
++      const result = await w.webContents.executeJavaScript(`
++        new Promise((resolve, reject) => {
++          const worker = new SharedWorker(${JSON.stringify(workerUrl)});
++          worker.port.onmessage = event => resolve(event.data);
++          worker.onerror = event => reject(event.message);
++          worker.port.start();
++        })
++      `);
++
++      expect(result).to.deep.equal({
++        value: 'worker-preload',
++        requireType: 'undefined',
++        processType: 'undefined'
++      });
++    });
++  });
++
+   describe('session-created event', () => {
+     it('is emitted when a session is created', async () => {
+       const sessionCreated = once(app, 'session-created') as Promise<[any, Session]>;
+diff --git a/spec/api-subframe-spec.ts b/spec/api-subframe-spec.ts
+index 9dbbe7be6b..92dcfba98e 100644
+--- a/spec/api-subframe-spec.ts
++++ b/spec/api-subframe-spec.ts
+@@ -1,4 +1,4 @@
+-import { app, BrowserWindow, ipcMain } from 'electron/main';
++import { app, BrowserWindow, ipcMain, session } from 'electron/main';
+
+ import { expect } from 'chai';
+
+@@ -213,6 +213,126 @@ describe('renderer nodeIntegrationInSubFrames', () => {
+   });
+ });
+
++describe('subframe Node.js global exposure policy', () => {
++  let w: BrowserWindow;
++
++  afterEach(async () => {
++    await closeWindow(w);
++    w = null as unknown as BrowserWindow;
++  });
++
++  const loadSameOriginFrame = async (webPreferences: Electron.WebPreferences) => {
++    w = new BrowserWindow({
++      show: false,
++      webPreferences
++    });
++
++    await w.loadFile(path.resolve(__dirname, 'fixtures/sub-frames/frame-container.html'));
++    const frame = w.webContents.mainFrame.frames.find(frame => frame.name === 'frameA');
++    expect(frame).to.not.be.undefined();
++    return frame!;
++  };
++
++  it('does not expose Node.js globals in same-origin subframes when only main frame nodeIntegration is enabled', async () => {
++    const frame = await loadSameOriginFrame({
++      nodeIntegration: true,
++      nodeIntegrationInSubFrames: false,
++      contextIsolation: false
++    });
++
++    const globals = await frame.executeJavaScript(`({
++      process: typeof globalThis.process,
++      require: typeof globalThis.require
++    })`);
++
++    expect(globals).to.deep.equal({
++      process: 'undefined',
++      require: 'undefined'
++    });
++  });
++
++  it('exposes Node.js globals in same-origin subframes when nodeIntegrationInSubFrames is enabled', async () => {
++    const frame = await loadSameOriginFrame({
++      nodeIntegration: false,
++      nodeIntegrationInSubFrames: true,
++      contextIsolation: false,
++      sandbox: false
++    });
++
++    const globals = await frame.executeJavaScript(`({
++      process: typeof globalThis.process,
++      require: typeof globalThis.require
++    })`);
++
++    expect(globals).to.deep.equal({
++      process: 'object',
++      require: 'function'
++    });
++  });
++
++  it('does not expose Node.js globals in initial empty same-origin subframes when only main frame nodeIntegration is enabled', async () => {
++    w = new BrowserWindow({
++      show: false,
++      webPreferences: {
++        nodeIntegration: true,
++        nodeIntegrationInSubFrames: false,
++        contextIsolation: false
++      }
++    });
++
++    await w.loadFile(path.resolve(__dirname, 'fixtures/blank.html'));
++    const globalsFromMain = await w.webContents.executeJavaScript(`(() => {
++      const iframe = document.createElement('iframe');
++      document.body.appendChild(iframe);
++      return {
++        contentWindowProcess: typeof iframe.contentWindow.process,
++        contentWindowRequire: typeof iframe.contentWindow.require
++      };
++    })()`);
++    const frame = w.webContents.mainFrame.frames[0];
++    expect(frame).to.not.be.undefined();
++    const globalsFromFrame = await frame.executeJavaScript(`({
++      process: typeof globalThis.process,
++      require: typeof globalThis.require
++    })`);
++
++    expect(globalsFromMain).to.deep.equal({
++      contentWindowProcess: 'undefined',
++      contentWindowRequire: 'undefined'
++    });
++    expect(globalsFromFrame).to.deep.equal({
++      process: 'undefined',
++      require: 'undefined'
++    });
++  });
++
++  it('does not expose Node.js globals in same-origin subframes when frame preload scope targets subframes', async () => {
++    const ses = session.fromPartition(`subframe-node-global-policy-${Date.now()}`);
++    ses.registerPreloadScript({
++      type: 'frame',
++      scope: 'all',
++      filePath: path.resolve(__dirname, 'fixtures/preload-frame-scope.js')
++    });
++
++    const frame = await loadSameOriginFrame({
++      nodeIntegration: true,
++      nodeIntegrationInSubFrames: false,
++      contextIsolation: false,
++      session: ses
++    });
++
++    const globals = await frame.executeJavaScript(`({
++      process: typeof globalThis.process,
++      require: typeof globalThis.require
++    })`);
++
++    expect(globals).to.deep.equal({
++      process: 'undefined',
++      require: 'undefined'
++    });
++  });
++});
++
+ describe('subframe with non-standard schemes', () => {
+   it('should not crash when changing subframe src to about:blank and back', async () => {
+     const w = new BrowserWindow({ show: false, width: 400, height: 400 });
+diff --git a/spec/fixtures/preload-frame-scope.js b/spec/fixtures/preload-frame-scope.js
+new file mode 100644
+index 0000000000..794fd85dd7
+--- /dev/null
++++ b/spec/fixtures/preload-frame-scope.js
+@@ -0,0 +1,6 @@
++const { ipcRenderer } = require('electron');
++
++ipcRenderer.send('frame-scope-preload-ran', {
++  isMainFrame: process.isMainFrame,
++  href: location.href
++});
+diff --git a/spec/fixtures/workers/plain-preload-shared-worker.js b/spec/fixtures/workers/plain-preload-shared-worker.js
+new file mode 100644
+index 0000000000..9e692a3a36
+--- /dev/null
++++ b/spec/fixtures/workers/plain-preload-shared-worker.js
+@@ -0,0 +1,3 @@
++onconnect = event => {
++  event.ports[0].postMessage(globalThis.plainWorkerPreload);
++};
+diff --git a/spec/fixtures/workers/plain-preload-worker.js b/spec/fixtures/workers/plain-preload-worker.js
+new file mode 100644
+index 0000000000..c10b1bc98a
+--- /dev/null
++++ b/spec/fixtures/workers/plain-preload-worker.js
+@@ -0,0 +1 @@
++postMessage(globalThis.plainWorkerPreload);
+diff --git a/spec/fixtures/workers/plain-worker-preload.js b/spec/fixtures/workers/plain-worker-preload.js
+new file mode 100644
+index 0000000000..a8ef09db4e
+--- /dev/null
++++ b/spec/fixtures/workers/plain-worker-preload.js
+@@ -0,0 +1,5 @@
++globalThis.plainWorkerPreload = {
++  value: 'worker-preload',
++  requireType: typeof globalThis.require,
++  processType: typeof globalThis.process
++};
+diff --git a/spec/ts-smoke/electron/main.ts b/spec/ts-smoke/electron/main.ts
+index 8c3349a8dc..890f7214fd 100644
+--- a/spec/ts-smoke/electron/main.ts
++++ b/spec/ts-smoke/electron/main.ts
+@@ -1229,6 +1229,25 @@ session.defaultSession.clearStorageData({ storages: ['shadercache', 'cachestorag
+ // @ts-expect-error Invalid type value
+ session.defaultSession.clearStorageData({ storages: ['wrong_path'] });
+
++session.defaultSession.registerPreloadScript({ type: 'frame', scope: 'all', filePath: '/tmp/preload.js' });
++session.defaultSession.registerPreloadScript({ type: 'dedicated-worker', filePath: '/tmp/worker-preload.js' });
++// @ts-expect-error scope is supported only for frame preload scripts
++session.defaultSession.registerPreloadScript({ type: 'service-worker', scope: 'all', filePath: '/tmp/sw-preload.js' });
++
++const preloadScriptRegistration: Electron.PreloadScriptRegistration = {
++  type: 'shared-worker',
++  filePath: '/tmp/shared-worker-preload.js'
++};
++session.defaultSession.registerPreloadScript(preloadScriptRegistration);
++
++const preloadScript = session.defaultSession.getPreloadScripts()[0];
++if (preloadScript.type === 'frame') {
++  console.log(preloadScript.scope);
++} else {
++  // @ts-expect-error worker preload script results do not have a frame scope
++  console.log(preloadScript.scope);
++}
++
+ session.defaultSession.on('will-download', (event, item, webContents) => {
+   console.log('will-download', webContents.id);
+   event.preventDefault();
+diff --git a/typings/internal-ambient.d.ts b/typings/internal-ambient.d.ts
+index def1dbb2ff..ef371b342e 100644
+--- a/typings/internal-ambient.d.ts
++++ b/typings/internal-ambient.d.ts
+@@ -156,6 +156,7 @@ declare namespace NodeJS {
+     isWebView: boolean;
+     hiddenPage: boolean;
+     nodeIntegration: boolean;
++    nodeIntegrationInSubFrames: boolean;
+     webviewTag: boolean;
+   }
+
+diff --git a/typings/internal-electron.d.ts b/typings/internal-electron.d.ts
+index 7cd128eb74..2e96d2557b 100644
+--- a/typings/internal-electron.d.ts
++++ b/typings/internal-electron.d.ts
+@@ -359,10 +359,10 @@ declare namespace ElectronInternal {
+     static create(opts?: Electron.WebPreferences): Electron.WebContents;
+   }
+
+-  interface PreloadScript extends Electron.PreloadScript {
++  type PreloadScript = Electron.PreloadScript & {
+     contents?: string;
+     error?: Error;
+-  }
++  };
+ }
+
+ declare namespace Chrome {

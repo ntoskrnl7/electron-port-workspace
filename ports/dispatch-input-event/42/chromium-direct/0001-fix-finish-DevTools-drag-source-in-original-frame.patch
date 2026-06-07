@@ -1,0 +1,101 @@
+From 885dc53ff201cb978ec3a23e795169064255df95 Mon Sep 17 00:00:00 2001
+From: Jung-Kwang Lee <ntoskrnl7@gmail.com>
+Date: Fri, 15 May 2026 22:04:19 +0900
+Subject: fix: finish DevTools drag source in original frame
+
+---
+ .../devtools/protocol/input_handler.cc        | 55 ++++++++++++++++---
+ 1 file changed, 48 insertions(+), 7 deletions(-)
+
+diff --git a/content/browser/devtools/protocol/input_handler.cc b/content/browser/devtools/protocol/input_handler.cc
+index 9364acb5ca137..7358bc575b218 100644
+--- a/content/browser/devtools/protocol/input_handler.cc
++++ b/content/browser/devtools/protocol/input_handler.cc
+@@ -887,6 +887,8 @@ class InputHandler::InputInjector
+ struct InputHandler::DragController::DragState {
+   DropData data;
+   blink::DragOperationsMask mask;
++  base::WeakPtr<RenderWidgetHostImpl> source_host;
++  gfx::PointF source_pos;
+   base::WeakPtr<RenderWidgetHostImpl> host;
+   gfx::PointF pos;
+   // Acts as a counting semaphore for concurrent updates.
+@@ -1002,7 +1004,13 @@ void InputHandler::DragController::StartDragging(
+   }
+
+   drag_state_ = std::make_unique<DragState>(
+-      DragState{drop_data, drag_operations_mask, nullptr, gfx::PointF(), 0,
++      DragState{drop_data,
++                drag_operations_mask,
++                initial_state_->host,
++                initial_state_->event->PositionInWidget(),
++                nullptr,
++                gfx::PointF(),
++                0,
+                 base::DoNothing()});
+   UpdateDragging(*initial_state_->host,
+                  // Note we don't move it here. See
+@@ -1020,10 +1028,19 @@ void InputHandler::DragController::CancelDragging(base::OnceClosure callback) {
+     return;
+   }
+
+-  drag_state_->host->DragTargetDragLeave(drag_state_->pos, drag_state_->pos);
+-  drag_state_->host->DragSourceEndedAt(drag_state_->pos, drag_state_->pos,
+-                                       ui::mojom::DragOperation::kNone,
+-                                       std::move(callback));
++  RenderWidgetHostImpl* current_host = drag_state_->host.get();
++  RenderWidgetHostImpl* source_host = drag_state_->source_host.get();
++  if (!source_host)
++    source_host = current_host;
++
++  const gfx::PointF current_pos = drag_state_->pos;
++  const gfx::PointF source_pos = drag_state_->source_pos;
++  current_host->DragTargetDragLeave(current_pos, current_pos);
++  source_host->DragSourceEndedAt(source_pos, source_pos,
++                                 ui::mojom::DragOperation::kNone,
++                                 std::move(callback));
++  if (source_host != current_host)
++    source_host->DragSourceSystemDragEnded();
+ }
+
+ void InputHandler::DragController::UpdateDragging(
+@@ -1120,13 +1137,37 @@ void InputHandler::DragController::EndDraggingWithRenderWidgetHostAtPoint(
+   }
+   auto* host = RenderWidgetHostImpl::From(view->GetRenderWidgetHost());
+   auto point = *maybe_point;
++  auto operation = drag_state_->data.operation;
++  RenderWidgetHostImpl* source_host = drag_state_->source_host.get();
++  if (!source_host)
++    source_host = host;
+
+   host->DragTargetDrop(drag_state_->data, point, point, event->GetModifiers(),
+                        base::DoNothing());
+-  host->DragSourceEndedAt(
+-      point, point, drag_state_->data.operation,
++  if (source_host == host) {
++    host->DragSourceEndedAt(
++        point, point, operation,
++        base::BindOnce(&FailSafe<DispatchMouseEventCallback>::sendSuccess,
++                       std::move(callback)));
++    return;
++  }
++
++  gfx::PointF source_point = drag_state_->source_pos;
++  auto* source_view =
++      static_cast<RenderWidgetHostViewBase*>(source_host->GetView());
++  if (source_view && view) {
++    view->TransformPointToCoordSpaceForView(point, source_view, &source_point);
++  }
++  gfx::PointF source_screen_point = source_point;
++  if (source_view)
++    source_screen_point =
++        ConvertWidgetPointToScreenPoint(*source_view, source_point);
++
++  source_host->DragSourceEndedAt(
++      source_point, source_screen_point, operation,
+       base::BindOnce(&FailSafe<DispatchMouseEventCallback>::sendSuccess,
+                      std::move(callback)));
++  source_host->DragSourceSystemDragEnded();
+ }
+
+ InputHandler::InputHandler(bool allow_file_access,

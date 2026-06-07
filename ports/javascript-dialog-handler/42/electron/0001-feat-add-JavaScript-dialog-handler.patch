@@ -1,0 +1,652 @@
+From fe9aee5b5468d3c43d2dd8dd8ca342be1fcaba12 Mon Sep 17 00:00:00 2001
+From: Codex <codex@localhost>
+Date: Wed, 20 May 2026 13:47:34 +0900
+Subject: feat: add JavaScript dialog handler
+
+---
+ .../api/structures/alert-javascript-dialog.md |   5 +
+ .../before-unload-javascript-dialog.md        |   9 +
+ .../structures/confirm-javascript-dialog.md   |   9 +
+ .../javascript-dialog-handler-details.md      |  14 ++
+ .../structures/prompt-javascript-dialog.md    |  10 +
+ docs/api/web-contents.md                      |  42 ++++
+ lib/browser/api/web-contents.ts               | 183 +++++++++++++++++-
+ .../browser/api/electron_api_web_contents.cc  |  35 +++-
+ shell/browser/api/electron_api_web_contents.h |   6 +
+ spec/api-web-contents-spec.ts                 |  54 ++++++
+ spec/chromium-spec.ts                         |  63 ++++++
+ spec/ts-smoke/electron/main.ts                |  18 ++
+ typings/internal-electron.d.ts                |   3 +-
+ 13 files changed, 446 insertions(+), 5 deletions(-)
+ create mode 100644 docs/api/structures/alert-javascript-dialog.md
+ create mode 100644 docs/api/structures/before-unload-javascript-dialog.md
+ create mode 100644 docs/api/structures/confirm-javascript-dialog.md
+ create mode 100644 docs/api/structures/javascript-dialog-handler-details.md
+ create mode 100644 docs/api/structures/prompt-javascript-dialog.md
+
+diff --git a/docs/api/structures/alert-javascript-dialog.md b/docs/api/structures/alert-javascript-dialog.md
+new file mode 100644
+index 0000000000..5c9875caf3
+--- /dev/null
++++ b/docs/api/structures/alert-javascript-dialog.md
+@@ -0,0 +1,5 @@
++# AlertJavaScriptDialog Object
++
++* `type` string - Can be `alert`.
++* `ok` Function\<boolean\> - Closes the alert dialog. Returns `true` if the
++  dialog was handled by this call, otherwise `false`.
+diff --git a/docs/api/structures/before-unload-javascript-dialog.md b/docs/api/structures/before-unload-javascript-dialog.md
+new file mode 100644
+index 0000000000..8b444879ea
+--- /dev/null
++++ b/docs/api/structures/before-unload-javascript-dialog.md
+@@ -0,0 +1,9 @@
++# BeforeUnloadJavaScriptDialog Object
++
++* `type` string - Can be `beforeunload`.
++* `leave` Function\<boolean\> - Ignores the page's `beforeunload` prevention and
++  continues unloading the page. Returns `true` if the dialog was handled by this
++  call, otherwise `false`.
++* `stay` Function\<boolean\> - Honors the page's `beforeunload` prevention and
++  keeps the current page loaded. Returns `true` if the dialog was handled by
++  this call, otherwise `false`.
+diff --git a/docs/api/structures/confirm-javascript-dialog.md b/docs/api/structures/confirm-javascript-dialog.md
+new file mode 100644
+index 0000000000..1d51c11144
+--- /dev/null
++++ b/docs/api/structures/confirm-javascript-dialog.md
+@@ -0,0 +1,9 @@
++# ConfirmJavaScriptDialog Object
++
++* `type` string - Can be `confirm`.
++* `confirm` Function\<boolean\> - Closes the confirm dialog and returns `true`
++  to the renderer. Returns `true` if the dialog was handled by this call,
++  otherwise `false`.
++* `cancel` Function\<boolean\> - Closes the confirm dialog and returns `false`
++  to the renderer. Returns `true` if the dialog was handled by this call,
++  otherwise `false`.
+diff --git a/docs/api/structures/javascript-dialog-handler-details.md b/docs/api/structures/javascript-dialog-handler-details.md
+new file mode 100644
+index 0000000000..15c1d2b50a
+--- /dev/null
++++ b/docs/api/structures/javascript-dialog-handler-details.md
+@@ -0,0 +1,14 @@
++# JavaScriptDialogHandlerDetails Object
++
++* `frame` [WebFrameMain](../web-frame-main.md) - The frame that requested the
++  JavaScript dialog.
++* `type` string - The dialog type. Can be `alert`, `confirm`, `prompt`, or
++  `beforeunload`.
++* `messageText` string - The dialog message text.
++* `defaultPromptText` string - The default text for `prompt` dialogs. Empty for
++  other dialog types.
++* `url` string - The last committed URL of the frame that requested the dialog.
++* `isMainFrame` boolean - Whether the frame that requested the dialog is the
++  main frame.
++* `isReload` boolean (optional) - Whether the `beforeunload` dialog was
++  triggered by a reload.
+diff --git a/docs/api/structures/prompt-javascript-dialog.md b/docs/api/structures/prompt-javascript-dialog.md
+new file mode 100644
+index 0000000000..cde07e133e
+--- /dev/null
++++ b/docs/api/structures/prompt-javascript-dialog.md
+@@ -0,0 +1,10 @@
++# PromptJavaScriptDialog Object
++
++* `type` string - Can be `prompt`.
++* `submit` Function\<boolean\> - Closes the prompt dialog and returns `value` to
++  the renderer. Returns `true` if the dialog was handled by this call, otherwise
++  `false`.
++  * `value` string
++* `cancel` Function\<boolean\> - Closes the prompt dialog and returns `null` to
++  the renderer. Returns `true` if the dialog was handled by this call, otherwise
++  `false`.
+diff --git a/docs/api/web-contents.md b/docs/api/web-contents.md
+index 21880b2649..a49406f9da 100644
+--- a/docs/api/web-contents.md
++++ b/docs/api/web-contents.md
+@@ -1591,6 +1591,48 @@ mainWindow.webContents.setWindowOpenHandler((details) => {
+ })
+ ```
+
++#### `contents.setJavaScriptDialogHandler(handler)`
++
++* `handler` Function | null
++  * `details` [JavaScriptDialogHandlerDetails](structures/javascript-dialog-handler-details.md)
++  * `dialog` [AlertJavaScriptDialog](structures/alert-javascript-dialog.md) | [ConfirmJavaScriptDialog](structures/confirm-javascript-dialog.md) | [PromptJavaScriptDialog](structures/prompt-javascript-dialog.md) | [BeforeUnloadJavaScriptDialog](structures/before-unload-javascript-dialog.md)
++
++Sets a handler for renderer-initiated JavaScript dialogs. Passing `null` clears
++the handler and restores Electron's default handling.
++
++The handler receives `alert`, `confirm`, `prompt`, and `beforeunload` dialogs.
++Each dialog object exposes only the methods valid for its `type`. The method
++returns `true` when it handles the dialog, and returns `false` if the dialog was
++already handled or canceled. A dialog method may be called asynchronously after
++the handler returns.
++
++When no handler is set, `alert`, `confirm`, and `prompt` use Electron's built-in
++message box handling, and `beforeunload` continues to use the
++[`will-prevent-unload`](#event-will-prevent-unload) event.
++
++```js
++const { BrowserWindow } = require('electron')
++
++const win = new BrowserWindow()
++
++win.webContents.setJavaScriptDialogHandler(async (details, dialog) => {
++  switch (dialog.type) {
++    case 'alert':
++      dialog.ok()
++      break
++    case 'confirm':
++      dialog.confirm()
++      break
++    case 'prompt':
++      dialog.submit(await getPromptText(details))
++      break
++    case 'beforeunload':
++      dialog.leave()
++      break
++  }
++})
++```
++
+ #### `contents.setAudioMuted(muted)`
+
+ * `muted` boolean
+diff --git a/lib/browser/api/web-contents.ts b/lib/browser/api/web-contents.ts
+index 37f53ffda5..d92004d8e6 100644
+--- a/lib/browser/api/web-contents.ts
++++ b/lib/browser/api/web-contents.ts
+@@ -429,6 +429,175 @@ WebContents.prototype.setPrintRequestHandler = function (handler) {
+   });
+ };
+
++type JavaScriptDialogType = 'alert' | 'confirm' | 'prompt' | 'beforeunload';
++
++interface JavaScriptDialogInfo {
++  frame: Electron.WebFrameMain;
++  dialogType: JavaScriptDialogType;
++  messageText: string;
++  defaultPromptText: string;
++  isReload?: boolean;
++}
++
++type JavaScriptDialogCallback = (success: boolean, userInput: string) => void;
++type JavaScriptDialog =
++  Electron.AlertJavaScriptDialog |
++  Electron.ConfirmJavaScriptDialog |
++  Electron.PromptJavaScriptDialog |
++  Electron.BeforeUnloadJavaScriptDialog;
++type JavaScriptDialogHandler = (details: Electron.JavaScriptDialogHandlerDetails, dialog: JavaScriptDialog) => void | Promise<void>;
++type PendingJavaScriptDialog = { cancel: () => void };
++type JavaScriptDialogController = PendingJavaScriptDialog & { response: JavaScriptDialog };
++
++const MAX_PENDING_JAVASCRIPT_DIALOGS = 32;
++const javaScriptDialogHandlers = new WeakMap<Electron.WebContents, JavaScriptDialogHandler>();
++const pendingJavaScriptDialogs = new WeakMap<Electron.WebContents, Set<PendingJavaScriptDialog>>();
++
++const getJavaScriptDialogOrigin = (info: JavaScriptDialogInfo) => {
++  return info.frame.origin === 'file://' ? info.frame.url : info.frame.origin;
++};
++
++const createJavaScriptDialogDetails = (info: JavaScriptDialogInfo): Electron.JavaScriptDialogHandlerDetails => {
++  return {
++    frame: info.frame,
++    type: info.dialogType,
++    messageText: info.messageText,
++    defaultPromptText: info.defaultPromptText,
++    url: info.frame.url,
++    isMainFrame: info.frame.parent === null,
++    ...(info.dialogType === 'beforeunload' ? { isReload: !!info.isReload } : {})
++  };
++};
++
++const createJavaScriptDialog = (
++  type: JavaScriptDialogType,
++  callback: JavaScriptDialogCallback,
++  onDone: () => void
++): JavaScriptDialogController => {
++  let handled = false;
++
++  const respond = (success: boolean, userInput = '') => {
++    if (handled) return false;
++    handled = true;
++    onDone();
++    callback(success, userInput);
++    return true;
++  };
++
++  const cancel = () => {
++    if (handled) return;
++    handled = true;
++    onDone();
++  };
++
++  switch (type) {
++    case 'alert':
++      return {
++        response: {
++          type,
++          ok: () => respond(true)
++        },
++        cancel
++      };
++    case 'confirm':
++      return {
++        response: {
++          type,
++          confirm: () => respond(true),
++          cancel: () => respond(false)
++        },
++        cancel
++      };
++    case 'prompt':
++      return {
++        response: {
++          type,
++          submit: (value: string) => respond(true, `${value}`),
++          cancel: () => respond(false)
++        },
++        cancel
++      };
++    case 'beforeunload':
++      return {
++        response: {
++          type,
++          leave: () => respond(true),
++          stay: () => respond(false)
++        },
++        cancel
++      };
++  }
++};
++
++const cancelJavaScriptDialog = (dialog: JavaScriptDialog) => {
++  switch (dialog.type) {
++    case 'alert':
++      dialog.ok();
++      break;
++    case 'confirm':
++      dialog.cancel();
++      break;
++    case 'prompt':
++      dialog.cancel();
++      break;
++    case 'beforeunload':
++      dialog.stay();
++      break;
++  }
++};
++
++const runJavaScriptDialogHandler = (
++  contents: Electron.WebContents,
++  info: JavaScriptDialogInfo,
++  callback: JavaScriptDialogCallback
++) => {
++  const handler = javaScriptDialogHandlers.get(contents);
++  if (!handler) return false;
++
++  const pending = pendingJavaScriptDialogs.get(contents) ?? new Set<PendingJavaScriptDialog>();
++  pendingJavaScriptDialogs.set(contents, pending);
++  if (pending.size >= MAX_PENDING_JAVASCRIPT_DIALOGS) {
++    callback(false, '');
++    return true;
++  }
++
++  let dialog: JavaScriptDialogController | undefined;
++  const onDone = () => {
++    if (dialog) pending.delete(dialog);
++  };
++  dialog = createJavaScriptDialog(info.dialogType, callback, onDone);
++  pending.add(dialog);
++
++  try {
++    Promise.resolve(handler(createJavaScriptDialogDetails(info), dialog.response)).catch(error => {
++      cancelJavaScriptDialog(dialog.response);
++      process.nextTick(() => {
++        throw error;
++      });
++    });
++  } catch (error) {
++    cancelJavaScriptDialog(dialog.response);
++    throw error;
++  }
++
++  return true;
++};
++
++WebContents.prototype.setJavaScriptDialogHandler = function (handler) {
++  if (handler === null) {
++    javaScriptDialogHandlers.delete(this);
++    this._setJavaScriptDialogHandlerInstalled(false);
++    return;
++  }
++
++  if (typeof handler !== 'function') {
++    throw new TypeError('JavaScript dialog handler must be null or a function');
++  }
++
++  javaScriptDialogHandlers.set(this, handler);
++  this._setJavaScriptDialogHandlerInstalled(true);
++};
++
+ // TODO(codebytere): deduplicate argument sanitization by moving rest of
+ // print param logic into new file shared between printToPDF and print
+ WebContents.prototype.print = function (options: ElectronInternal.WebContentsPrintOptions = {}, callback) {
+@@ -1010,8 +1179,11 @@ WebContents.prototype._init = function () {
+
+   const originCounts = new Map<string, number>();
+   const openDialogs = new Set<AbortController>();
+-  this.on('-run-dialog', async (info, callback) => {
+-    const origin = info.frame.origin === 'file://' ? info.frame.url : info.frame.origin;
++  this.on('-run-dialog', async (info: JavaScriptDialogInfo, callback: JavaScriptDialogCallback) => {
++    if (runJavaScriptDialogHandler(this, info, callback)) return;
++    if (info.dialogType === 'beforeunload') return callback(true, '');
++
++    const origin = getJavaScriptDialogOrigin(info);
+     if ((originCounts.get(origin) ?? 0) < 0) return callback(false, '');
+
+     const prefs = this.getLastWebPreferences();
+@@ -1060,6 +1232,13 @@ WebContents.prototype._init = function () {
+       controller.abort();
+     }
+     openDialogs.clear();
++    const pending = pendingJavaScriptDialogs.get(this);
++    if (pending) {
++      for (const dialog of pending) {
++        dialog.cancel();
++      }
++      pending.clear();
++    }
+   });
+
+   // TODO(samuelmaddock): remove deprecated 'console-message' arguments
+diff --git a/shell/browser/api/electron_api_web_contents.cc b/shell/browser/api/electron_api_web_contents.cc
+index 0397fc1a2f..f34ca4cdb1 100644
+--- a/shell/browser/api/electron_api_web_contents.cc
++++ b/shell/browser/api/electron_api_web_contents.cc
+@@ -6216,16 +6216,41 @@ void WebContents::RunBeforeUnloadDialog(content::WebContents* web_contents,
+                                         content::RenderFrameHost* rfh,
+                                         bool is_reload,
+                                         DialogClosedCallback callback) {
++  if (has_javascript_dialog_handler_) {
++    auto* isolate = JavascriptEnvironment::GetIsolate();
++    v8::HandleScope scope(isolate);
++    auto info = gin::DataObjectBuilder(isolate)
++                    .Set("frame", rfh)
++                    .Set("dialogType", "beforeunload")
++                    .Set("messageText", std::u16string())
++                    .Set("defaultPromptText", std::u16string())
++                    .Set("isReload", is_reload)
++                    .Build();
++
++    EmitWithoutEvent(
++        "-run-dialog", info,
++        base::BindOnce(&WebContents::OnBeforeUnloadDialogClosed,
++                       weak_factory_.GetWeakPtr(), std::move(callback)));
++    return;
++  }
++
+   bool default_prevented = Emit("will-prevent-unload");
++  OnBeforeUnloadDialogClosed(std::move(callback), default_prevented,
++                             std::u16string());
++}
+
+-  if (pending_unload_url_.has_value() && !default_prevented) {
++void WebContents::OnBeforeUnloadDialogClosed(
++    DialogClosedCallback callback,
++    bool success,
++    const std::u16string& user_input) {
++  if (pending_unload_url_.has_value() && !success) {
+     Emit("did-fail-load", static_cast<int>(net::ERR_ABORTED),
+          net::ErrorToShortString(net::ERR_ABORTED),
+          pending_unload_url_.value().possibly_invalid_spec(), true);
+     pending_unload_url_.reset();
+   }
+
+-  std::move(callback).Run(default_prevented, std::u16string());
++  std::move(callback).Run(success, user_input);
+ }
+
+ void WebContents::CancelDialogs(content::WebContents* web_contents,
+@@ -6237,6 +6262,10 @@ void WebContents::CancelDialogs(content::WebContents* web_contents,
+       gin::DataObjectBuilder(isolate).Set("resetState", reset_state).Build());
+ }
+
++void WebContents::SetJavaScriptDialogHandlerInstalled(bool installed) {
++  has_javascript_dialog_handler_ = installed;
++}
++
+ v8::Local<v8::Promise> WebContents::GetProcessMemoryInfo(v8::Isolate* isolate) {
+   gin_helper::Promise<gin_helper::Dictionary> promise(isolate);
+   v8::Local<v8::Promise> handle = promise.GetHandle();
+@@ -6844,6 +6873,8 @@ void WebContents::FillObjectTemplate(v8::Isolate* isolate,
+       .SetMethod("_setPrintRequestHandler",
+                  &WebContents::SetPrintRequestHandler)
+ #endif
++      .SetMethod("_setJavaScriptDialogHandlerInstalled",
++                 &WebContents::SetJavaScriptDialogHandlerInstalled)
+       .SetMethod("_setNextChildWebPreferences",
+                  &WebContents::SetNextChildWebPreferences)
+       .SetMethod("addWorkSpace", &WebContents::AddWorkSpace)
+diff --git a/shell/browser/api/electron_api_web_contents.h b/shell/browser/api/electron_api_web_contents.h
+index 91ce86ec93..eed5571ebb 100644
+--- a/shell/browser/api/electron_api_web_contents.h
++++ b/shell/browser/api/electron_api_web_contents.h
+@@ -276,6 +276,8 @@ class WebContents final : public ExclusiveAccessContext,
+                               base::OnceCallback<void(bool)> callback);
+ #endif
+
++  void SetJavaScriptDialogHandlerInstalled(bool installed);
++
+   void SetNextChildWebPreferences(const gin_helper::Dictionary);
+
+   // DevTools workspace api.
+@@ -797,6 +799,9 @@ class WebContents final : public ExclusiveAccessContext,
+       const content::ContextMenuParams& params,
+       content::GlobalRenderFrameHostId render_frame_host_id,
+       std::vector<std::u16string> types);
++  void OnBeforeUnloadDialogClosed(DialogClosedCallback callback,
++                                  bool success,
++                                  const std::u16string& user_input);
+
+   [[nodiscard]] bool CanGoToIndex(int index) const;
+
+@@ -878,6 +883,7 @@ class WebContents final : public ExclusiveAccessContext,
+   std::unique_ptr<InspectableWebContents> inspectable_web_contents_;
+
+   std::optional<GURL> pending_unload_url_ = std::nullopt;
++  bool has_javascript_dialog_handler_ = false;
+
+   // Maps url to file path, used by the file requests sent from devtools.
+   typedef std::map<std::string, base::FilePath> PathsMap;
+diff --git a/spec/api-web-contents-spec.ts b/spec/api-web-contents-spec.ts
+index 63a071af6d..8bc9066716 100644
+--- a/spec/api-web-contents-spec.ts
++++ b/spec/api-web-contents-spec.ts
+@@ -203,6 +203,60 @@ describe('webContents module', () => {
+       w.close();
+       await wait;
+     });
++
++    it('supports asynchronously staying on a page with setJavaScriptDialogHandler', async () => {
++      const w = new BrowserWindow({ show: false });
++      let legacyEventFired = false;
++      w.webContents.on('will-prevent-unload', () => {
++        legacyEventFired = true;
++      });
++      w.webContents.setJavaScriptDialogHandler((details, dialog) => {
++        expect(details.type).to.equal('beforeunload');
++        expect(details.frame).to.equal(w.webContents.mainFrame);
++        expect(details.isMainFrame).to.equal(true);
++        if (dialog.type === 'beforeunload') {
++          setImmediate(() => {
++            expect(dialog.stay()).to.equal(true);
++            expect(dialog.leave()).to.equal(false);
++          });
++        }
++      });
++
++      const didFailLoad = once(w.webContents, 'did-fail-load');
++      await w.loadFile(path.join(__dirname, 'fixtures', 'api', 'beforeunload-false.html'));
++      await w.webContents.executeJavaScript("console.log('gesture')", true);
++
++      w.loadFile(path.join(__dirname, 'fixtures', 'pages', 'a.html'));
++      const [, code, , validatedURL] = await didFailLoad;
++      expect(code).to.equal(-3); // ERR_ABORTED
++      const { href: expectedURL } = url.pathToFileURL(path.join(__dirname, 'fixtures', 'pages', 'a.html'));
++      expect(validatedURL).to.equal(expectedURL);
++      expect(legacyEventFired).to.equal(false);
++    });
++
++    it('supports asynchronously leaving a page with setJavaScriptDialogHandler', async () => {
++      const w = new BrowserWindow({ show: false });
++      let legacyEventFired = false;
++      w.webContents.on('will-prevent-unload', () => {
++        legacyEventFired = true;
++      });
++      w.webContents.setJavaScriptDialogHandler((details, dialog) => {
++        expect(details.type).to.equal('beforeunload');
++        if (dialog.type === 'beforeunload') {
++          setImmediate(() => {
++            expect(dialog.leave()).to.equal(true);
++            expect(dialog.stay()).to.equal(false);
++          });
++        }
++      });
++
++      await w.loadFile(path.join(__dirname, 'fixtures', 'api', 'beforeunload-false.html'));
++      await w.webContents.executeJavaScript("console.log('gesture')", true);
++      await w.loadFile(path.join(__dirname, 'fixtures', 'pages', 'a.html'));
++      const pageTitle = await w.webContents.executeJavaScript('document.title');
++      expect(pageTitle).to.equal('test');
++      expect(legacyEventFired).to.equal(false);
++    });
+   });
+
+   describe('webContents.send(channel, args...)', () => {
+diff --git a/spec/chromium-spec.ts b/spec/chromium-spec.ts
+index 5357ff9d00..76190d30a6 100644
+--- a/spec/chromium-spec.ts
++++ b/spec/chromium-spec.ts
+@@ -3636,6 +3636,69 @@ describe('chromium features', () => {
+       });
+     });
+
++    describe('webContents.setJavaScriptDialogHandler(handler)', () => {
++      it('handles alert, confirm, and prompt with type-specific dialog methods', async () => {
++        const w = new BrowserWindow({ show: false });
++        w.loadURL('about:blank');
++
++        const seen: string[] = [];
++        w.webContents.setJavaScriptDialogHandler((details, dialog) => {
++          seen.push(`${details.type}:${details.messageText}`);
++          expect(details.frame).to.equal(w.webContents.mainFrame);
++          expect(details.url).to.equal('about:blank');
++          expect(details.isMainFrame).to.equal(true);
++
++          switch (dialog.type) {
++            case 'alert':
++              expect(dialog.ok()).to.equal(true);
++              expect(dialog.ok()).to.equal(false);
++              break;
++            case 'confirm':
++              expect(dialog.confirm()).to.equal(true);
++              expect(dialog.cancel()).to.equal(false);
++              break;
++            case 'prompt':
++              expect(details.defaultPromptText).to.equal('default text');
++              setImmediate(() => {
++                expect(dialog.submit('typed text')).to.equal(true);
++                expect(dialog.cancel()).to.equal(false);
++              });
++              break;
++            case 'beforeunload':
++              expect.fail('unexpected beforeunload dialog');
++          }
++        });
++
++        await w.webContents.executeJavaScript('alert("alert message")', true);
++        expect(await w.webContents.executeJavaScript('confirm("confirm message")', true)).to.equal(true);
++        expect(await w.webContents.executeJavaScript('prompt("prompt message", "default text")', true)).to.equal('typed text');
++        expect(seen).to.deep.equal([
++          'alert:alert message',
++          'confirm:confirm message',
++          'prompt:prompt message'
++        ]);
++      });
++
++      it('clears the handler with null', async () => {
++        const w = new BrowserWindow({ show: false });
++        w.loadURL('about:blank');
++
++        let called = false;
++        w.webContents.setJavaScriptDialogHandler((details, dialog) => {
++          called = true;
++          if (dialog.type === 'alert') dialog.ok();
++        });
++        w.webContents.setJavaScriptDialogHandler(null);
++
++        const p = once(w.webContents, '-run-dialog');
++        w.webContents.executeJavaScript('alert("hello")', true);
++        const [info, cb] = await p;
++        expect(info.dialogType).to.equal('alert');
++        cb(true, '');
++        expect(called).to.equal(false);
++      });
++    });
++
+     describe('safeDialogs web preference', () => {
+       const originalShowMessageBox = dialog.showMessageBox;
+       afterEach(() => {
+diff --git a/spec/ts-smoke/electron/main.ts b/spec/ts-smoke/electron/main.ts
+index 228d9ae31b..63f8729e4e 100644
+--- a/spec/ts-smoke/electron/main.ts
++++ b/spec/ts-smoke/electron/main.ts
+@@ -131,6 +131,24 @@ app.whenReady().then(() => {
+     });
+   });
+   mainWindow.webContents.setPrintRequestHandler(null);
++  mainWindow.webContents.setJavaScriptDialogHandler((details, dialog) => {
++    console.log(details.type, details.messageText);
++    switch (dialog.type) {
++      case 'alert':
++        dialog.ok();
++        break;
++      case 'confirm':
++        dialog.cancel();
++        break;
++      case 'prompt':
++        dialog.submit(details.defaultPromptText);
++        break;
++      case 'beforeunload':
++        dialog.leave();
++        break;
++    }
++  });
++  mainWindow.webContents.setJavaScriptDialogHandler(null);
+
+   mainWindow.webContents
+     .printToPDF({
+diff --git a/typings/internal-electron.d.ts b/typings/internal-electron.d.ts
+index 505529056c..1088fe1fbb 100644
+--- a/typings/internal-electron.d.ts
++++ b/typings/internal-electron.d.ts
+@@ -123,6 +123,7 @@ declare namespace Electron {
+     _sendInternal(channel: string, ...args: any[]): void;
+     _printToPDF(options: any): Promise<Buffer>;
+     _setPrintRequestHandler(handler: any): void;
++    _setJavaScriptDialogHandlerInstalled(installed: boolean): void;
+     _print(options: any, callback?: (success: boolean, failureReason: string) => void): void;
+     _init(): void;
+     _getNavigationEntryAtIndex(index: number): Electron.NavigationEntry | null;
+@@ -283,7 +284,7 @@ declare namespace Electron {
+     on(event: '-ipc-message-sync', listener: (event: Electron.IpcMainEvent, internal: boolean, channel: string, args: any[]) => void): this;
+     on(event: '-ipc-invoke', listener: (event: Electron.IpcMainInvokeEvent, internal: boolean, channel: string, args: any[]) => void): this;
+     on(event: '-ipc-ports', listener: (event: Electron.IpcMainEvent, internal: boolean, channel: string, message: any, ports: any[]) => void): this;
+-    on(event: '-run-dialog', listener: (info: {frame: WebFrameMain, dialogType: 'prompt' | 'confirm' | 'alert', messageText: string, defaultPromptText: string}, callback: (success: boolean, user_input: string) => void) => void): this;
++    on(event: '-run-dialog', listener: (info: {frame: WebFrameMain, dialogType: 'prompt' | 'confirm' | 'alert' | 'beforeunload', messageText: string, defaultPromptText: string, isReload?: boolean}, callback: (success: boolean, user_input: string) => void) => void): this;
+     on(event: '-cancel-dialogs', listener: () => void): this;
+     on(event: 'ready-to-show', listener: () => void): this;
+     on(event: '-before-unload-fired', listener: (event: Electron.Event, proceed: boolean) => void): this;

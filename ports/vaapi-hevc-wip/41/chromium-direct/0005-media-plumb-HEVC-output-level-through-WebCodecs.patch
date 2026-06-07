@@ -1,0 +1,209 @@
+From f7609a4436dc3c6ba972d905165c1d30135aec81 Mon Sep 17 00:00:00 2001
+From: Jung-Kwang Lee <ntoskrnl7@gmail.com>
+Date: Thu, 30 Apr 2026 10:02:23 +0900
+Subject: media: plumb HEVC output level through WebCodecs
+
+---
+ media/base/video_encoder.cc                            |  4 ++++
+ media/base/video_encoder.h                             |  1 +
+ media/mojo/mojom/video_encode_accelerator.mojom        |  2 ++
+ .../mojom/video_encode_accelerator_mojom_traits.cc     |  6 ++++++
+ .../mojo/mojom/video_encode_accelerator_mojom_traits.h | 10 ++++++++++
+ media/video/video_encode_accelerator.cc                |  7 ++++++-
+ media/video/video_encode_accelerator.h                 |  4 ++++
+ media/video/video_encode_accelerator_adapter.cc        |  3 +++
+ .../blink/renderer/modules/webcodecs/video_encoder.cc  |  8 ++++++--
+ 9 files changed, 42 insertions(+), 3 deletions(-)
+
+diff --git a/media/base/video_encoder.cc b/media/base/video_encoder.cc
+index 9f71c2b7360c0..94eb8dc6a6a47 100644
+--- a/media/base/video_encoder.cc
++++ b/media/base/video_encoder.cc
+@@ -152,6 +152,10 @@ std::string VideoEncoder::Options::ToString() {
+   if (bit_depth) {
+     keys.push_back(base::StringPrintf("bit_depth: %d", *bit_depth));
+   }
++  if (hevc.output_level) {
++    keys.push_back(
++        base::StringPrintf("hevc_output_level: %d", *hevc.output_level));
++  }
+   keys.push_back(base::StringPrintf(
+       "produce_annexb: %s",
+       base::ToString(avc.produce_annexb || hevc.produce_annexb)));
+diff --git a/media/base/video_encoder.h b/media/base/video_encoder.h
+index b129c655933cd..f7d1009a2f104 100644
+--- a/media/base/video_encoder.h
++++ b/media/base/video_encoder.h
+@@ -72,6 +72,7 @@ class MEDIA_EXPORT VideoEncoder {
+ 
+   struct MEDIA_EXPORT HevcOptions {
+     bool produce_annexb = false;
++    std::optional<uint8_t> output_level;
+   };
+ 
+   enum class LatencyMode { Realtime, Quality };
+diff --git a/media/mojo/mojom/video_encode_accelerator.mojom b/media/mojo/mojom/video_encode_accelerator.mojom
+index 5926c07e73134..41db1a54e913e 100644
+--- a/media/mojo/mojom/video_encode_accelerator.mojom
++++ b/media/mojo/mojom/video_encode_accelerator.mojom
+@@ -187,6 +187,8 @@ struct VideoEncodeAcceleratorConfig {
+   bool has_gop_length;  // Whether or not config has group of picture length
+   uint8 h264_output_level;
+   bool has_h264_output_level;  // Whether or not config has H264 output level
++  uint8 hevc_output_level;
++  bool has_hevc_output_level;  // Whether or not config has HEVC output level
+   bool is_constrained_h264;
+   // See VideoEncodeAccelerator::Config for detail. Since this is a percentage
+   // between 0 and 100, the type is uint8.
+diff --git a/media/mojo/mojom/video_encode_accelerator_mojom_traits.cc b/media/mojo/mojom/video_encode_accelerator_mojom_traits.cc
+index c9f131b81a6c0..26393fd53a123 100644
+--- a/media/mojo/mojom/video_encode_accelerator_mojom_traits.cc
++++ b/media/mojo/mojom/video_encode_accelerator_mojom_traits.cc
+@@ -504,6 +504,10 @@ bool StructTraits<media::mojom::VideoEncodeAcceleratorConfigDataView,
+   if (input.has_h264_output_level())
+     h264_output_level = input.h264_output_level();
+ 
++  std::optional<uint8_t> hevc_output_level;
++  if (input.has_hevc_output_level())
++    hevc_output_level = input.hevc_output_level();
++
+   bool is_constrained_h264 = input.is_constrained_h264();
+ 
+   media::VideoEncodeAccelerator::Config::StorageType storage_type;
+@@ -552,6 +556,7 @@ bool StructTraits<media::mojom::VideoEncodeAcceleratorConfigDataView,
+     media::VideoEncodeAccelerator::Config::ContentType content_type;
+     std::optional<uint32_t> gop_length;
+     std::optional<uint8_t> h264_output_level;
++    std::optional<uint8_t> hevc_output_level;
+     bool is_constrained_h264;
+     uint8_t drop_frame_thresh_percentage;
+     std::vector<media::VideoEncodeAccelerator::Config::SpatialLayer>
+@@ -572,6 +577,7 @@ bool StructTraits<media::mojom::VideoEncodeAcceleratorConfigDataView,
+ 
+   output->gop_length = gop_length;
+   output->h264_output_level = h264_output_level;
++  output->hevc_output_level = hevc_output_level;
+   output->is_constrained_h264 = is_constrained_h264;
+   output->drop_frame_thresh_percentage = drop_frame_thresh_percentage;
+   output->spatial_layers = spatial_layers;
+diff --git a/media/mojo/mojom/video_encode_accelerator_mojom_traits.h b/media/mojo/mojom/video_encode_accelerator_mojom_traits.h
+index df4de262b6ce5..3bc7e03325082 100644
+--- a/media/mojo/mojom/video_encode_accelerator_mojom_traits.h
++++ b/media/mojo/mojom/video_encode_accelerator_mojom_traits.h
+@@ -520,6 +520,16 @@ struct StructTraits<media::mojom::VideoEncodeAcceleratorConfigDataView,
+     return input.h264_output_level.has_value();
+   }
+ 
++  static uint8_t hevc_output_level(
++      const media::VideoEncodeAccelerator::Config& input) {
++    return input.hevc_output_level.value_or(0);
++  }
++
++  static bool has_hevc_output_level(
++      const media::VideoEncodeAccelerator::Config& input) {
++    return input.hevc_output_level.has_value();
++  }
++
+   static bool is_constrained_h264(
+       const media::VideoEncodeAccelerator::Config& input) {
+     return input.is_constrained_h264;
+diff --git a/media/video/video_encode_accelerator.cc b/media/video/video_encode_accelerator.cc
+index 328e1edbce7bf..7a957dea56f91 100644
+--- a/media/video/video_encode_accelerator.cc
++++ b/media/video/video_encode_accelerator.cc
+@@ -135,13 +135,17 @@ std::string VideoEncodeAccelerator::Config::AsHumanReadableString() const {
+   if (gop_length)
+     str += base::StringPrintf(", gop_length: %u", gop_length.value());
+ 
+-  if (VideoCodecProfileToVideoCodec(output_profile) == VideoCodec::kH264) {
++  const VideoCodec codec = VideoCodecProfileToVideoCodec(output_profile);
++  if (codec == VideoCodec::kH264) {
+     if (h264_output_level) {
+       str += base::StringPrintf(", h264_output_level: %u",
+                                 h264_output_level.value());
+     }
+ 
+     str += base::StringPrintf(", is_constrained_h264: %u", is_constrained_h264);
++  } else if (codec == VideoCodec::kHEVC && hevc_output_level) {
++    str += base::StringPrintf(", hevc_output_level: %u",
++                              hevc_output_level.value());
+   }
+ 
+   str += ", required_encoder_type: ";
+@@ -371,6 +375,7 @@ bool operator==(const VideoEncodeAccelerator::Config& l,
+          l.output_profile == r.output_profile && l.bitrate == r.bitrate &&
+          l.framerate == r.framerate && l.gop_length == r.gop_length &&
+          l.h264_output_level == r.h264_output_level &&
++         l.hevc_output_level == r.hevc_output_level &&
+          l.storage_type == r.storage_type && l.content_type == r.content_type &&
+          l.spatial_layers == r.spatial_layers &&
+          l.inter_layer_pred == r.inter_layer_pred;
+diff --git a/media/video/video_encode_accelerator.h b/media/video/video_encode_accelerator.h
+index 82e26f6472a1c..1bbd4c9466ec8 100644
+--- a/media/video/video_encode_accelerator.h
++++ b/media/video/video_encode_accelerator.h
+@@ -319,6 +319,10 @@ class MEDIA_EXPORT VideoEncodeAccelerator {
+     // levels for |input_visible_size| and |framerate|.
+     std::optional<uint8_t> h264_output_level;
+ 
++    // Codec level of encoded output stream for HEVC only. This value should
++    // be aligned to profile_tier_level.general_level_idc.
++    std::optional<uint8_t> hevc_output_level;
++
+     // Indicates baseline profile or constrained baseline profile for H264 only.
+     bool is_constrained_h264 = false;
+ 
+diff --git a/media/video/video_encode_accelerator_adapter.cc b/media/video/video_encode_accelerator_adapter.cc
+index 5bec11f43ed68..faf2d548dd8bb 100644
+--- a/media/video/video_encode_accelerator_adapter.cc
++++ b/media/video/video_encode_accelerator_adapter.cc
+@@ -183,6 +183,9 @@ VideoEncodeAccelerator::Config SetUpVeaConfig(
+       VideoEncodeAccelerator::Config::ContentType::kCamera);
+   config.gop_length = opts.keyframe_interval;
+   config.storage_type = storage_type;
++  if (VideoCodecProfileToVideoCodec(profile) == VideoCodec::kHEVC) {
++    config.hevc_output_level = opts.hevc.output_level;
++  }
+ 
+   if (opts.content_hint) {
+     switch (*opts.content_hint) {
+diff --git a/third_party/blink/renderer/modules/webcodecs/video_encoder.cc b/third_party/blink/renderer/modules/webcodecs/video_encoder.cc
+index 6b29dd464353d..a27e5bbb3b634 100644
+--- a/third_party/blink/renderer/modules/webcodecs/video_encoder.cc
++++ b/third_party/blink/renderer/modules/webcodecs/video_encoder.cc
+@@ -423,6 +423,10 @@ VideoEncoderTraits::ParsedConfig* ParseConfigStatic(
+       break;
+     }
+     case media::VideoCodec::kHEVC: {
++      if (parse_result->level != media::kNoVideoCodecLevel) {
++        result->options.hevc.output_level =
++            static_cast<uint8_t>(parse_result->level);
++      }
+       if (config->hasHevc()) {
+         switch (config->hevc()->format().AsEnum()) {
+           case V8HevcBitstreamFormat::Enum::kHevc:
+@@ -1448,7 +1452,6 @@ void VideoEncoder::ProcessReconfigure(Request* request) {
+     }
+ 
+     self->active_config_ = req->config;
+-
+     auto output_cb = ConvertToBaseRepeatingCallback(CrossThreadBindRepeating(
+         &VideoEncoder::CallOutputCallback,
+         MakeUnwrappingCrossThreadWeakHandle(self),
+@@ -1592,7 +1595,7 @@ void VideoEncoder::CallOutputCallback(
+   // We need to emit new config in the following cases:
+   //  1. We haven't emitted a decoder config yet (first output)
+   //  2. Decoder config has changed.
+-  if (!last_decoder_config_.has_value() ||
++  if (first_output_after_configure_ || !last_decoder_config_.has_value() ||
+       !last_decoder_config_->Matches(current_decoder_config)) {
+ #if DCHECK_IS_ON()
+     if (!last_decoder_config_.has_value() ||
+@@ -1640,6 +1643,7 @@ void VideoEncoder::CallOutputCallback(
+     metadata->setDecoderConfig(decoder_config);
+     last_decoder_config_ = current_decoder_config;
+   }
++  first_output_after_configure_ = false;
+ 
+   encoder_metrics_provider_->IncrementEncodedFrameCount();
+   TRACE_EVENT_BEGIN1(kCategory, GetTraceNames()->output.c_str(), "timestamp",

@@ -1,0 +1,5 @@
+schema_version=1
+name=window-prompt-dialog
+target=42
+electronized_chromium_patches=false
+electron_patch_files=electron/*.patch

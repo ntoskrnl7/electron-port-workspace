@@ -1,0 +1,58 @@
+From 79eb7e47cd4ac9b18f5002bc461facf43ec30fdc Mon Sep 17 00:00:00 2001
+From: Jung-Kwang Lee <ntoskrnl7@gmail.com>
+Date: Fri, 8 May 2026 14:27:18 +0900
+Subject: fix: merge worker preload renderer hook
+
+---
+ shell/renderer/renderer_client_base.cc | 12 ++++--------
+ shell/renderer/renderer_client_base.h  |  2 --
+ 2 files changed, 4 insertions(+), 10 deletions(-)
+
+diff --git a/shell/renderer/renderer_client_base.cc b/shell/renderer/renderer_client_base.cc
+index 797c53e04f..e41aa40600 100644
+--- a/shell/renderer/renderer_client_base.cc
++++ b/shell/renderer/renderer_client_base.cc
+@@ -253,13 +253,6 @@ RendererClientBase* RendererClientBase::Get() {
+   return g_renderer_client_base;
+ }
+ 
+-void RendererClientBase::WorkerScriptReadyForEvaluationOnWorkerThread(
+-    v8::Local<v8::Context> context) {
+-  auto* ec = blink::ExecutionContext::From(context);
+-  if (auto script_type = GetWorkerPreloadScriptType(ec))
+-    ExecutePlainPreloadScripts(context, *script_type);
+-}
+-
+ void RendererClientBase::BindProcess(v8::Isolate* isolate,
+                                      gin_helper::Dictionary* process,
+                                      content::RenderFrame* render_frame) {
+@@ -620,12 +613,15 @@ void RendererClientBase::WillDestroyServiceWorkerContextOnWorkerThread(
+ 
+ void RendererClientBase::WorkerScriptReadyForEvaluationOnWorkerThread(
+     v8::Local<v8::Context> context) {
++  auto* ec = blink::ExecutionContext::From(context);
+   // Worklets can share a thread and isolate (via WorkletThreadHolder), so the
+   // per-thread OOM state would be prematurely removed when the first worklet
+   // is destroyed. Skip worklets for now; can be revisited with ref-counting.
+-  if (blink::ExecutionContext::From(context)->IsWorkletGlobalScope())
++  if (!ec || ec->IsWorkletGlobalScope())
+     return;
+   RegisterOomStackTraceCallback(v8::Isolate::GetCurrent());
++  if (auto script_type = GetWorkerPreloadScriptType(ec))
++    ExecutePlainPreloadScripts(context, *script_type);
+ }
+ 
+ void RendererClientBase::WillDestroyWorkerContextOnWorkerThread(
+diff --git a/shell/renderer/renderer_client_base.h b/shell/renderer/renderer_client_base.h
+index c8ddfba8b4..2731aca9ea 100644
+--- a/shell/renderer/renderer_client_base.h
++++ b/shell/renderer/renderer_client_base.h
+@@ -66,8 +66,6 @@ class RendererClientBase : public content::ContentRendererClient
+   virtual void SetupMainWorldOverrides(v8::Isolate* isolate,
+                                        v8::Local<v8::Context> context,
+                                        content::RenderFrame* render_frame);
+-  void WorkerScriptReadyForEvaluationOnWorkerThread(
+-      v8::Local<v8::Context> context) override;
+ 
+   std::unique_ptr<blink::WebPrescientNetworking> CreatePrescientNetworking(
+       content::RenderFrame* render_frame) override;
