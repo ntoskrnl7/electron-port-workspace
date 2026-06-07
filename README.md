@@ -1,7 +1,18 @@
 # Electron Port Workspace
 
-Electron Port Workspace manages Electron source checkouts by target and stores
-reusable feature work as portable patch bundles.
+Electron Port Workspace is a source-level maintenance workspace for carrying
+custom Electron and Chromium capabilities across Electron versions.
+
+It exists for features that product Electron builds need, but stock
+Electron/Chromium either does not expose, does not package in the required
+shape, or does not keep stable enough across major-version upgrades. The
+workspace keeps that work as reusable port bundles so a feature can be
+implemented once, exported with its source history, and reapplied to a new
+Electron major line, upstream `main`, or a disposable validation branch.
+
+This is not an Electron fork and it does not vendor Chromium or Electron source
+trees. It is the management repository around those source trees: scripts,
+feature notes, and portable patch bundles.
 
 The exported tree intentionally contains management scripts, documentation, and
 port bundles only. It does not include large Chromium/Electron source checkouts;
@@ -10,6 +21,30 @@ create those with the scripts below.
 Examples assume commands are run from the repository root. Replace
 `./<target>/src` with the target source checkout path when using a different
 workspace layout.
+
+## What Is Included
+
+The current workspace covers runtime behavior, media packaging, browser
+identity, input forwarding, text-editing state, print ownership, preload
+injection, and release packaging.
+
+| Port | Capability |
+| --- | --- |
+| `vaapi-hevc-wip` | Linux VA-API HEVC/H.265 work carried through Electron's Chromium patch stack, including encode/decode path fixes and stabilization notes. |
+| `widevine-cdm` | Widevine/CDM integration, Chromium CDM renderer visibility, `enable_widevine` defaults, version-aware CDM resolving, and package assembly support. |
+| `preload` | `session.registerPreloadScript` support for frames, subframes, dedicated workers, shared workers, and service workers. |
+| `dispatch-input-event` | Trusted Chromium-backed `webContents.dispatchInputEvent()` for keyboard, mouse, wheel, touch, text insertion, and IME composition. |
+| `text-caret-info` | Main-process caret, selection, composition, frame, URL, and editable input metadata events/snapshots from `WebContents`. |
+| `focused-editable-text` | Read, watch, and edit the focused editable element through Chromium's text input path. |
+| `print-request-handler` | `webContents.setPrintRequestHandler()` for renderer `window.print()` and PDF viewer print requests with app-owned print/PDF jobs. |
+| `user-agent-override` | Coherent User-Agent and UA Client Hints overrides at app, session, WebContents, and navigation scope. |
+| `javascript-dialog-handler` | Async-safe main-process handling for `alert`, `confirm`, `prompt`, and `beforeunload` dialogs. |
+| `window-prompt-dialog` | Restores `window.prompt()` compatibility through Electron's JavaScript dialog path. |
+| `picture-in-picture-handle-api` | Main-process handle and events for active video/document Picture-in-Picture windows. |
+
+Each feature can have separate bundles for targets such as `41`, `42`, and
+`main`. Target manifests record metadata and dependencies; apply scripts check
+that dependency state before applying a bundle.
 
 ## Layout
 
