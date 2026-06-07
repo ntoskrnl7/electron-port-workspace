@@ -160,6 +160,39 @@ state, creates backup branches, syncs the requested upstream tag, creates a new
 work branch, applies ports in the given order, and optionally runs the dev npm
 package build.
 
+## GitHub Actions Release Build
+
+The repository includes a manual workflow,
+`.github/workflows/electron-port-release.yml`, that can sync an Electron target,
+apply port bundles, build npm tarballs, upload them as workflow artifacts, and
+optionally publish them to a GitHub Release.
+
+Run it from GitHub Actions with:
+
+- `target`: Electron major target, for example `42`
+- `electron_tag`: Electron tag to build, for example `v42.0.0`
+- `ports`: comma-separated port names, or `all` to apply every bundle available
+  for the target in manifest dependency order
+- `package_mode`: `release` or `dev`
+- `package_kind`: `platform`, `wrapper`, `split`, or `bundled`
+
+Widevine CDM packaging is enabled by default for release workflow runs. Only run
+the default workflow when you have the required Widevine packaging and
+redistribution rights. Set `include_widevine_cdm` to `false` to build without
+Widevine CDM assets.
+
+Electron builds need a prepared Linux build environment, large disk space, and
+long runtime. The workflow defaults to a self-hosted Linux runner label set:
+
+```json
+["self-hosted","linux","x64"]
+```
+
+To try a GitHub-hosted runner, set `runner_labels` to a JSON string such as
+`"ubuntu-24.04"`, but full Electron builds may exceed hosted runner limits.
+Set `workspace_base` to a persistent directory on a self-hosted runner if you
+want to reuse Electron source checkouts between runs.
+
 ## Tests
 
 When running Electron specs, make sure `ELECTRON_RUN_AS_NODE` is not set.

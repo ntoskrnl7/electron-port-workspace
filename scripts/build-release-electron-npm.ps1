@@ -97,7 +97,18 @@ Resolve-WidevineCdmForPackage
 Push-Location $srcDir
 try {
   $electronBuildTools = if ($IsWindows -or $env:OS -eq 'Windows_NT') { 'e.cmd' } else { 'e' }
-  Invoke-NativeCommand -FilePath $electronBuildTools -Arguments @('build', '--target', 'electron:electron_dist_zip') -Name 'e build'
+  $buildArgs = @('--target', 'electron:electron_dist_zip')
+  if ($env:ELECTRON_BUILD_NO_REMOTE -eq '1') { $buildArgs += '--no-remote' }
+  if ($env:ELECTRON_BUILD_LOCAL_JOBS) {
+    $buildArgs += @('-local_jobs', $env:ELECTRON_BUILD_LOCAL_JOBS)
+  } elseif ($env:ELECTRON_BUILD_JOBS) {
+    $buildArgs += @('-j', $env:ELECTRON_BUILD_JOBS)
+  }
+  if ($env:ELECTRON_BUILD_REMOTE_JOBS) {
+    $buildArgs += @('-remote_jobs', $env:ELECTRON_BUILD_REMOTE_JOBS)
+  }
+
+  Invoke-NativeCommand -FilePath $electronBuildTools -Arguments (@('build') + $buildArgs) -Name 'e build'
 
   Invoke-NativeCommand -FilePath 'npm.cmd' -Arguments @('--prefix', 'electron', 'run', 'create-typescript-definitions') -Name 'npm create-typescript-definitions'
 

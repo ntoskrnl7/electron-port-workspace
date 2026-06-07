@@ -1,0 +1,441 @@
+name: Build Electron port release
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: Electron major target that exists under ports/<feature>/<target>.
+        required: true
+        default: "42"
+        type: string
+      electron_tag:
+        description: Electron tag to build, for example v42.0.0.
+        required: true
+        type: string
+      ports:
+        description: Comma-separated ports to apply, or "all" for the target.
+        required: true
+        default: all
+        type: string
+      package_mode:
+        description: Package version mode.
+        required: true
+        default: release
+        type: choice
+        options:
+          - release
+          - dev
+      package_kind:
+        description: npm package layout.
+        required: true
+        default: platform
+        type: choice
+        options:
+          - platform
+          - wrapper
+          - split
+          - bundled
+      package_name:
+        description: Base npm package name.
+        required: true
+        default: electron
+        type: string
+      dev_number:
+        description: Dev sequence when package_mode is dev. Use auto or a number.
+        required: true
+        default: auto
+        type: string
+      include_widevine_cdm:
+        description: Include Widevine CDM in package artifacts.
+        required: true
+        default: true
+        type: boolean
+      widevine_license_ack:
+        description: Confirm that you have rights to package Widevine CDM.
+        required: true
+        default: true
+        type: boolean
+      create_release:
+        description: Publish the generated tarballs to a GitHub Release.
+        required: true
+        default: true
+        type: boolean
+      mark_latest:
+        description: Mark the created GitHub Release as latest.
+        required: true
+        default: false
+        type: boolean
+      release_tag:
+        description: GitHub Release tag. Leave blank to derive one from target and Electron tag.
+        required: false
+        default: ""
+        type: string
+      release_name:
+        description: GitHub Release title. Leave blank to derive one.
+        required: false
+        default: ""
+        type: string
+      runner_labels:
+        description: JSON runs-on value. Example "ubuntu-24.04" or ["self-hosted","linux","x64"].
+        required: true
+        default: '["self-hosted","linux","x64"]'
+        type: string
+      workspace_base:
+        description: Persistent workspace base directory. Leave blank to use runner.temp.
+        required: false
+        default: ""
+        type: string
+      node_version:
+        description: Node.js version used for tooling.
+        required: true
+        default: "24"
+        type: string
+      build_jobs:
+        description: Local Electron build parallelism.
+        required: true
+        default: "16"
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: electron-port-release-${{ inputs.target }}-${{ inputs.electron_tag }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build ${{ inputs.electron_tag }} with ports
+    runs-on: ${{ fromJSON(inputs.runner_labels) }}
+    timeout-minutes: 360
+
+    env:
+      ELECTRON_BUILD_NO_REMOTE: "1"
+      ELECTRON_BUILD_REMOTE_JOBS: "0"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: ${{ inputs.node_version }}
+          package-manager-cache: false
+
+      - name: Prepare tooling
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if ! command -v e >/dev/null 2>&1; then
+            npm install --global @electron/build-tools
+          fi
+          command -v e
+          e --version || true
+
+      - name: Resolve inputs
+        id: inputs
+        shell: bash
+        env:
+          RAW_PORTS: ${{ inputs.ports }}
+          TARGET: ${{ inputs.target }}
+          ELECTRON_TAG: ${{ inputs.electron_tag }}
+          WORKSPACE_BASE_INPUT: ${{ inputs.workspace_base }}
+          RELEASE_TAG_INPUT: ${{ inputs.release_tag }}
+          RELEASE_NAME_INPUT: ${{ inputs.release_name }}
+          PACKAGE_MODE: ${{ inputs.package_mode }}
+          PACKAGE_KIND: ${{ inputs.package_kind }}
+        run: |
+          set -euo pipefail
+
+          if [[ ! "$TARGET" =~ ^[0-9]+$ ]]; then
+            echo "target must be an Electron major number for this workflow: $TARGET" >&2
+            exit 1
+          fi
+
+          workspace_base="$WORKSPACE_BASE_INPUT"
+          if [[ -z "$workspace_base" ]]; then
+            workspace_base="$RUNNER_TEMP/electron-port-workspace"
+          fi
+          mkdir -p "$workspace_base"
+
+          safe_tag="$(printf '%s\n' "$ELECTRON_TAG" | sed -E 's/[^A-Za-z0-9._-]+/-/g; s/^-+//; s/-+$//')"
+          release_tag="$RELEASE_TAG_INPUT"
+          if [[ -z "$release_tag" ]]; then
+            release_tag="electron-$TARGET-$safe_tag"
+          fi
+
+          release_name="$RELEASE_NAME_INPUT"
+          if [[ -z "$release_name" ]]; then
+            release_name="Electron $ELECTRON_TAG ports ($TARGET)"
+          fi
+
+          port_csv="$(
+            python3 - <<'PY'
+          import os
+          import sys
+          from pathlib import Path
+
+          target = os.environ["TARGET"]
+          raw_ports = os.environ["RAW_PORTS"].strip()
+          ports_root = Path("ports")
+
+          available = sorted(
+              p.parent.parent.name
+              for p in ports_root.glob(f"*/{target}/manifest.txt")
+          )
+          if not available:
+              raise SystemExit(f"no port manifests found for target {target}")
+
+          if not raw_ports or raw_ports.lower() == "all":
+              selected = available
+          else:
+              selected = []
+              for chunk in raw_ports.replace("\n", ",").split(","):
+                  name = chunk.strip()
+                  if name and name not in selected:
+                      selected.append(name)
+
+          missing = [name for name in selected if name not in available]
+          if missing:
+              raise SystemExit(
+                  "ports are not available for target "
+                  + target
+                  + ": "
+                  + ", ".join(missing)
+              )
+
+          deps = {}
+          for name in selected:
+              manifest = ports_root / name / target / "manifest.txt"
+              values = []
+              for line in manifest.read_text(encoding="utf-8").splitlines():
+                  if line.startswith("depends_on="):
+                      values = [
+                          item.strip()
+                          for item in line.split("=", 1)[1].split(",")
+                          if item.strip()
+                      ]
+                      break
+              deps[name] = values
+
+          selected_set = set(selected)
+          missing_deps = {
+              name: [dep for dep in values if dep not in selected_set]
+              for name, values in deps.items()
+          }
+          missing_deps = {name: values for name, values in missing_deps.items() if values}
+          if missing_deps:
+              parts = [
+                  f"{name} needs {', '.join(values)}"
+                  for name, values in sorted(missing_deps.items())
+              ]
+              raise SystemExit("selected ports are missing dependencies: " + "; ".join(parts))
+
+          visiting = set()
+          visited = set()
+          ordered = []
+
+          def visit(name):
+              if name in visited:
+                  return
+              if name in visiting:
+                  raise SystemExit(f"cycle in port dependencies at {name}")
+              visiting.add(name)
+              for dep in deps[name]:
+                  visit(dep)
+              visiting.remove(name)
+              visited.add(name)
+              ordered.append(name)
+
+          for name in selected:
+              visit(name)
+
+          sys.stdout.write(",".join(ordered))
+          PY
+          )"
+
+          if [[ -z "$port_csv" ]]; then
+            echo "resolved port list is empty" >&2
+            exit 1
+          fi
+
+          echo "workspace_base=$workspace_base" >> "$GITHUB_OUTPUT"
+          echo "safe_tag=$safe_tag" >> "$GITHUB_OUTPUT"
+          echo "release_tag=$release_tag" >> "$GITHUB_OUTPUT"
+          echo "release_name=$release_name" >> "$GITHUB_OUTPUT"
+          echo "port_csv=$port_csv" >> "$GITHUB_OUTPUT"
+          echo "package_mode=$PACKAGE_MODE" >> "$GITHUB_OUTPUT"
+          echo "package_kind=$PACKAGE_KIND" >> "$GITHUB_OUTPUT"
+
+          {
+            echo "### Electron port release inputs"
+            echo
+            echo "- Target: $TARGET"
+            echo "- Electron tag: $ELECTRON_TAG"
+            echo "- Ports: $port_csv"
+            echo "- Package mode: $PACKAGE_MODE"
+            echo "- Package kind: $PACKAGE_KIND"
+            echo "- Workspace base: $workspace_base"
+            echo "- Release tag: $release_tag"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Create and sync Electron workspace
+        shell: bash
+        env:
+          TARGET: ${{ inputs.target }}
+          ELECTRON_TAG: ${{ inputs.electron_tag }}
+          WORKSPACE_BASE: ${{ steps.inputs.outputs.workspace_base }}
+        run: |
+          set -euo pipefail
+          scripts/create-electron-major.sh "$TARGET" \
+            --base-dir "$WORKSPACE_BASE" \
+            --tag "$ELECTRON_TAG" \
+            --sync \
+            --force-config
+
+      - name: Apply port bundles
+        shell: bash
+        env:
+          TARGET: ${{ inputs.target }}
+          ELECTRON_TAG: ${{ inputs.electron_tag }}
+          WORKSPACE_BASE: ${{ steps.inputs.outputs.workspace_base }}
+          PORTS: ${{ steps.inputs.outputs.port_csv }}
+          SAFE_TAG: ${{ steps.inputs.outputs.safe_tag }}
+        run: |
+          set -euo pipefail
+          branch_name="actions/$TARGET-$SAFE_TAG-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          scripts/upgrade-electron-target.sh \
+            --target "$TARGET" \
+            --tag "$ELECTRON_TAG" \
+            --ports "$PORTS" \
+            --base-dir "$WORKSPACE_BASE" \
+            --branch-name "$branch_name" \
+            --skip-checkout \
+            --no-sync \
+            --no-backup
+
+      - name: Build npm package tarballs
+        id: build
+        shell: bash
+        env:
+          TARGET: ${{ inputs.target }}
+          WORKSPACE_BASE: ${{ steps.inputs.outputs.workspace_base }}
+          PACKAGE_MODE: ${{ inputs.package_mode }}
+          PACKAGE_KIND: ${{ inputs.package_kind }}
+          PACKAGE_NAME: ${{ inputs.package_name }}
+          DEV_NUMBER: ${{ inputs.dev_number }}
+          INCLUDE_WIDEVINE_CDM: ${{ inputs.include_widevine_cdm }}
+          WIDEVINE_LICENSE_ACK: ${{ inputs.widevine_license_ack }}
+          ELECTRON_BUILD_JOBS: ${{ inputs.build_jobs }}
+        run: |
+          set -euo pipefail
+
+          if [[ "$INCLUDE_WIDEVINE_CDM" == "true" && "$WIDEVINE_LICENSE_ACK" != "true" ]]; then
+            echo "include_widevine_cdm requires widevine_license_ack=true." >&2
+            exit 1
+          fi
+
+          src_root="$WORKSPACE_BASE/$TARGET/src"
+          artifact_dir="$RUNNER_TEMP/electron-port-artifacts"
+          rm -rf "$artifact_dir"
+          mkdir -p "$artifact_dir"
+
+          export ELECTRON_WORKSPACE_TARGET="$TARGET"
+          export ELECTRON_WORKSPACE_SRC_DIR="$src_root"
+          export ELECTRON_PACKAGE_STAGING_DIR="$artifact_dir"
+
+          e use "$TARGET-release"
+
+          package_args=(
+            --target "$TARGET"
+            --package-kind "$PACKAGE_KIND"
+            --package-name "$PACKAGE_NAME"
+            --staging-dir "$artifact_dir"
+          )
+
+          if [[ "$INCLUDE_WIDEVINE_CDM" == "true" ]]; then
+            package_args+=(--include-widevine-cdm --widevine-license-ack)
+          fi
+
+          if [[ "$PACKAGE_MODE" == "release" ]]; then
+            scripts/build-release-electron-npm.sh "${package_args[@]}"
+          else
+            package_args+=(--dev-number "$DEV_NUMBER")
+            scripts/build-dev-electron-npm.sh "${package_args[@]}"
+          fi
+
+          shopt -s nullglob
+          tarballs=("$artifact_dir"/*.tgz)
+          shopt -u nullglob
+          if [[ "${#tarballs[@]}" -eq 0 ]]; then
+            echo "no npm tarballs were generated under $artifact_dir" >&2
+            exit 1
+          fi
+
+          printf '%s\n' "${tarballs[@]}" | tee "$artifact_dir/tarballs.txt"
+          echo "artifact_dir=$artifact_dir" >> "$GITHUB_OUTPUT"
+
+      - name: Upload package artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: electron-port-${{ inputs.target }}-${{ steps.inputs.outputs.safe_tag }}-${{ inputs.package_mode }}
+          path: ${{ steps.build.outputs.artifact_dir }}/*.tgz
+          if-no-files-found: error
+          compression-level: 0
+
+      - name: Prepare release notes
+        id: release_notes
+        if: ${{ inputs.create_release }}
+        shell: bash
+        env:
+          TARGET: ${{ inputs.target }}
+          ELECTRON_TAG: ${{ inputs.electron_tag }}
+          PORTS: ${{ steps.inputs.outputs.port_csv }}
+          PACKAGE_MODE: ${{ inputs.package_mode }}
+          PACKAGE_KIND: ${{ inputs.package_kind }}
+          ARTIFACT_DIR: ${{ steps.build.outputs.artifact_dir }}
+          RELEASE_TAG: ${{ steps.inputs.outputs.release_tag }}
+          RELEASE_NAME: ${{ steps.inputs.outputs.release_name }}
+        run: |
+          set -euo pipefail
+          notes_file="$RUNNER_TEMP/electron-port-release-notes.md"
+          {
+            echo "# $RELEASE_NAME"
+            echo
+            echo "- Electron tag: $ELECTRON_TAG"
+            echo "- Target: $TARGET"
+            echo "- Ports: $PORTS"
+            echo "- Package mode: $PACKAGE_MODE"
+            echo "- Package kind: $PACKAGE_KIND"
+            echo "- Workflow run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+            echo
+            echo "Assets:"
+            while IFS= read -r tarball; do
+              echo "- $(basename "$tarball")"
+            done < "$ARTIFACT_DIR/tarballs.txt"
+          } > "$notes_file"
+          echo "notes_file=$notes_file" >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub Release
+        if: ${{ inputs.create_release }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARTIFACT_DIR: ${{ steps.build.outputs.artifact_dir }}
+          RELEASE_TAG: ${{ steps.inputs.outputs.release_tag }}
+          RELEASE_NAME: ${{ steps.inputs.outputs.release_name }}
+          NOTES_FILE: ${{ steps.release_notes.outputs.notes_file }}
+          MARK_LATEST: ${{ inputs.mark_latest }}
+        run: |
+          set -euo pipefail
+          latest_flag="--latest=false"
+          if [[ "$MARK_LATEST" == "true" ]]; then
+            latest_flag="--latest=true"
+          fi
+          gh release create "$RELEASE_TAG" "$ARTIFACT_DIR"/*.tgz \
+            --title "$RELEASE_NAME" \
+            --notes-file "$NOTES_FILE" \
+            "$latest_flag"

@@ -106,7 +106,18 @@ resolve_widevine_cdm_for_package
 
 cd "$ELECTRON_SRC_DIR"
 
-e build --target electron:electron_dist_zip
+BUILD_ARGS=(--target electron:electron_dist_zip)
+if [[ "${ELECTRON_BUILD_NO_REMOTE:-0}" == "1" ]]; then
+  BUILD_ARGS+=(--no-remote)
+fi
+if [[ -n "${ELECTRON_BUILD_JOBS:-}" ]]; then
+  BUILD_ARGS+=(-j "$ELECTRON_BUILD_JOBS")
+fi
+if [[ -n "${ELECTRON_BUILD_REMOTE_JOBS:-}" ]]; then
+  BUILD_ARGS+=(-remote_jobs "$ELECTRON_BUILD_REMOTE_JOBS")
+fi
+
+e build "${BUILD_ARGS[@]}"
 npm --prefix electron run create-typescript-definitions
 
 node "$SCRIPT_DIR/package-electron-npm.js" \
