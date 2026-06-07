@@ -306,12 +306,14 @@ jobs:
           SAFE_TAG: ${{ steps.inputs.outputs.safe_tag }}
         run: |
           set -euo pipefail
+          src_root="$WORKSPACE_BASE/$TARGET/src"
           branch_name="actions/$TARGET-$SAFE_TAG-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           scripts/upgrade-electron-target.sh \
             --target "$TARGET" \
             --tag "$ELECTRON_TAG" \
             --ports "$PORTS" \
-            --base-dir "$WORKSPACE_BASE" \
+            --base-dir "$GITHUB_WORKSPACE" \
+            --src-root "$src_root" \
             --branch-name "$branch_name" \
             --skip-checkout \
             --no-sync \
