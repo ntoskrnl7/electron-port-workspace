@@ -1,7 +1,7 @@
-From b6044ca71063e38bacaa3701cca1d2f163295018 Mon Sep 17 00:00:00 2001
+From 02c7e2fad578463c8994f71dbdd15c59fcde0ec7 Mon Sep 17 00:00:00 2001
 From: Jung-Kwang Lee <ntoskrnl7@gmail.com>
 Date: Tue, 12 May 2026 17:07:45 +0900
-Subject: patches: gate Intel HEVC tuning to Intel VAAPI
+Subject: [PATCH] patches: gate Intel HEVC tuning to Intel VAAPI
 
 ---
  patches/chromium/.patches                     |   1 +
@@ -10,10 +10,10 @@ Subject: patches: gate Intel HEVC tuning to Intel VAAPI
  create mode 100644 patches/chromium/media_gpu_vaapi_gate_intel_hevc_tuning_to_intel_drivers.patch
 
 diff --git a/patches/chromium/.patches b/patches/chromium/.patches
-index e870b7ed27..763993ec42 100644
+index c67e5dd626..949acec4b8 100644
 --- a/patches/chromium/.patches
 +++ b/patches/chromium/.patches
-@@ -159,3 +159,4 @@ media_plumb_hevc_output_level_through_webcodecs.patch
+@@ -167,3 +167,4 @@ media_plumb_hevc_output_level_through_webcodecs.patch
  media_gpu_extend_hevc_bitstream_builder_and_parser.patch
  media_gpu_vaapi_support_hevc_input_formats_and_stream_reset.patch
  media_gpu_vaapi_stabilize_intel_ihd_hevc_encoding.patch
@@ -473,3 +473,6 @@ index 0000000000..61b4511ccc
 +       VideoEncodeAccelerator::Config::ContentType::kCamera;
 +--
 +2.53.0
+-- 
+2.53.0
+

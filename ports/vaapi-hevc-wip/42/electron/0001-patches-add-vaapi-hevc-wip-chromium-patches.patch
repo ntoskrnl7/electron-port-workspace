@@ -1,7 +1,7 @@
-From dd26cd00e4c22137d45d7f667700d8a8ec7b9471 Mon Sep 17 00:00:00 2001
+From d6dc3197b95a802482416f32b50bdfdb0f4c1511 Mon Sep 17 00:00:00 2001
 From: Jung-Kwang Lee <ntoskrnl7@gmail.com>
 Date: Sun, 3 May 2026 17:34:56 +0900
-Subject: patches: add vaapi-hevc-wip chromium patches
+Subject: [PATCH] patches: add vaapi-hevc-wip chromium patches
 
 ---
  patches/chromium/.patches                     |    8 +
@@ -24,13 +24,13 @@ Subject: patches: add vaapi-hevc-wip chromium patches
  create mode 100644 patches/chromium/media_plumb_hevc_output_level_through_webcodecs.patch
 
 diff --git a/patches/chromium/.patches b/patches/chromium/.patches
-index 073cca57b6..e870b7ed27 100644
+index ecdabeb3aa..c67e5dd626 100644
 --- a/patches/chromium/.patches
 +++ b/patches/chromium/.patches
-@@ -151,3 +151,11 @@ fix_use_fresh_lazynow_for_onendworkitemimpl_after_didruntask.patch
- fix_make_macos_text_replacement_work_on_contenteditable.patch
- fix_constrain_allowuniversalaccessfromfileurls_to_file_origins_in.patch
- feat_allow_electron_to_handle_renderer_print_requests.patch
+@@ -159,3 +159,11 @@ feat_support_browser_context_user_agent_metadata.patch
+ fix_finish_devtools_drag_source_in_original_frame.patch
+ expose_picture_in_picture_window_state.patch
+ content_expose_websocket_interception_metadata.patch
 +fix_support_nvidia_va-api_native_pixmap_import.patch
 +fix_nvidia_vaapi_modifier_import_and_webcodecs_software_fallback.patch
 +media_allow_webcodecs_hevc_main10_and_4_4_4_encode_configs.patch
@@ -6037,3 +6037,6 @@ index 0000000000..ba548b5d82
 +
 +   encoder_metrics_provider_->IncrementEncodedFrameCount();
 +   TRACE_EVENT_BEGIN1(kCategory, GetTraceNames()->output.c_str(), "timestamp",
+-- 
+2.53.0
+

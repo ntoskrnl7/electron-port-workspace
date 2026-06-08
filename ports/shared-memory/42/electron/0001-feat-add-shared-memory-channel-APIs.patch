@@ -1,4 +1,4 @@
-From 12f3a496905d3fbdc7e9ae4d1efae25f67d79731 Mon Sep 17 00:00:00 2001
+From 7f3d710f8f05e7e9842c5886f21635a8d96c3bcd Mon Sep 17 00:00:00 2001
 From: Electron Scripts <scripts@electron>
 Date: Thu, 28 May 2026 22:00:38 +0900
 Subject: [PATCH] feat: add shared memory channel APIs
@@ -938,7 +938,7 @@ index 6132532e7a..8ca54a4b5c 100644
      console.error('Error sending from SharedWorkerMain: ', e);
    }
 diff --git a/lib/browser/api/web-contents.ts b/lib/browser/api/web-contents.ts
-index f6b3a18642..20908e0d9b 100644
+index d92004d8e6..44cd7f6bad 100644
 --- a/lib/browser/api/web-contents.ts
 +++ b/lib/browser/api/web-contents.ts
 @@ -7,6 +7,7 @@ import { IpcMainImpl } from '@electron/internal/browser/ipc-main-impl';
@@ -4560,7 +4560,7 @@ index 0000000000..39aff2235b
 --- /dev/null
 +++ b/shell/browser/api/electron_api_shared_memory_pool.cc
 @@ -0,0 +1,105 @@
-+// Copyright (c) 2026 Electron Port Workspace contributors
++// Copyright (c) 2026 SOFTCAMP
 +// Use of this source code is governed by the MIT license that can be
 +// found in the LICENSE file.
 +
@@ -5214,7 +5214,7 @@ index 0000000000..becb2a0a47
 --- /dev/null
 +++ b/shell/common/api/electron_api_shared_memory.cc
 @@ -0,0 +1,769 @@
-+// Copyright (c) 2026 Electron Port Workspace contributors
++// Copyright (c) 2026 SOFTCAMP
 +// Use of this source code is governed by the MIT license that can be
 +// found in the LICENSE file.
 +
@@ -5989,7 +5989,7 @@ index 0000000000..dade0ba166
 --- /dev/null
 +++ b/shell/common/api/electron_api_shared_memory.h
 @@ -0,0 +1,54 @@
-+// Copyright (c) 2026 Electron Port Workspace contributors
++// Copyright (c) 2026 SOFTCAMP
 +// Use of this source code is governed by the MIT license that can be
 +// found in the LICENSE file.
 +
@@ -8803,7 +8803,7 @@ index 0000000000..e8f802145f
 +  });
 +});
 diff --git a/spec/ts-smoke/electron/main.ts b/spec/ts-smoke/electron/main.ts
-index 977c0d1af0..ce232eaaa6 100644
+index 63f8729e4e..164722a9c0 100644
 --- a/spec/ts-smoke/electron/main.ts
 +++ b/spec/ts-smoke/electron/main.ts
 @@ -1,5 +1,6 @@
