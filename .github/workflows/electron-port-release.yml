@@ -100,7 +100,7 @@ permissions:
   contents: write
 
 concurrency:
-  group: electron-port-release-${{ inputs.target }}-${{ inputs.electron_tag }}
+  group: electron-port-release-${{ inputs.target }}-${{ inputs.electron_tag }}-${{ inputs.runner_labels }}
   cancel-in-progress: false
 
 jobs:
