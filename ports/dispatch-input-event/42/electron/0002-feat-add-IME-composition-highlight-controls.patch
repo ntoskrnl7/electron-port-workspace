@@ -1,7 +1,7 @@
-From 651de813927c8965362f5988372265c9d8604af7 Mon Sep 17 00:00:00 2001
+From cf07fd536867ad08eac34fba860f9390b2113137 Mon Sep 17 00:00:00 2001
 From: Jung-Kwang Lee <ntoskrnl7@gmail.com>
 Date: Thu, 4 Jun 2026 00:23:28 +0900
-Subject: [PATCH] feat: add IME composition highlight controls
+Subject: [PATCH 2/2] feat: add IME composition highlight controls
 
 ---
  ...tch-input-composition-highlight-options.md |  15 ++
@@ -42,10 +42,10 @@ index 09d6b55aa8..ed3517ce41 100644
    Must be provided together with `replacementStart`.
 +* `highlight` boolean | [DispatchInputCompositionHighlightOptions](dispatch-input-composition-highlight-options.md) (optional) - Controls how Chromium paints the composition range. If omitted or `true`, Chromium's default composition highlight is used. If `false`, the composition range is kept active but its background, underline, and text highlight are transparent. If an object is provided, its style is applied to the composition range.
 diff --git a/shell/browser/api/electron_api_web_contents.cc b/shell/browser/api/electron_api_web_contents.cc
-index a292c979fe..5a6bd8121a 100644
+index a5cd7edbc6..00260b847f 100644
 --- a/shell/browser/api/electron_api_web_contents.cc
 +++ b/shell/browser/api/electron_api_web_contents.cc
-@@ -181,6 +181,7 @@
+@@ -182,6 +182,7 @@
  #include "third_party/blink/public/mojom/renderer_preferences.mojom.h"
  #include "ui/base/cursor/cursor.h"
  #include "ui/base/cursor/mojom/cursor_type.mojom-shared.h"
@@ -53,7 +53,7 @@ index a292c979fe..5a6bd8121a 100644
  #include "ui/base/ime/text_input_action.h"
  #include "ui/base/ime/text_input_mode.h"
  #include "ui/base/ime/text_input_type.h"
-@@ -758,6 +759,178 @@ bool SetKeyboardEventText(
+@@ -756,6 +757,178 @@ bool SetKeyboardEventText(
    return true;
  }
  
@@ -232,7 +232,7 @@ index a292c979fe..5a6bd8121a 100644
  ui::KeyboardCode InferWindowsVirtualKeyCode(ui::DomCode dom_code,
                                              ui::DomKey dom_key) {
    if (dom_code != ui::DomCode::NONE) {
-@@ -6679,6 +6852,15 @@ v8::Local<v8::Promise> WebContents::DispatchInputEvent(
+@@ -5878,6 +6051,15 @@ v8::Local<v8::Promise> WebContents::DispatchInputEvent(
        replacement_range.set_end(replacement_end);
      }
  
@@ -248,7 +248,7 @@ index a292c979fe..5a6bd8121a 100644
      auto* target_widget = GetFocusedRenderWidgetHost(web_contents());
      if (!target_widget) {
        promise.RejectWithErrorMessage("Unable to find a focused frame");
-@@ -6690,9 +6872,8 @@ v8::Local<v8::Promise> WebContents::DispatchInputEvent(
+@@ -5889,9 +6071,8 @@ v8::Local<v8::Promise> WebContents::DispatchInputEvent(
      auto target_widget_weak = target_widget->GetWeakPtr();
      target_widget->Focus();
      target_widget->GetWidgetInputHandler()->ImeSetComposition(
@@ -261,10 +261,10 @@ index a292c979fe..5a6bd8121a 100644
              [](InputDispatchRequest* request,
                 base::WeakPtr<content::RenderWidgetHostImpl> target_widget) {
 diff --git a/spec/api-web-contents-spec.ts b/spec/api-web-contents-spec.ts
-index 04dc797d2c..6c75e6a435 100644
+index 506eb56751..774e2d6c48 100644
 --- a/spec/api-web-contents-spec.ts
 +++ b/spec/api-web-contents-spec.ts
-@@ -2305,6 +2305,84 @@ describe('webContents module', () => {
+@@ -1774,6 +1774,84 @@ describe('webContents module', () => {
        await expect(w.webContents.dispatchInputEvent(inputEvent)).to.eventually.be.rejectedWith(message);
      };
  
@@ -349,7 +349,7 @@ index 04dc797d2c..6c75e6a435 100644
      it('rejects invalid input event parameters before dispatching', async () => {
        const w = new BrowserWindow({ show: false });
        await w.loadURL('about:blank');
-@@ -2405,6 +2483,49 @@ describe('webContents module', () => {
+@@ -1874,6 +1952,49 @@ describe('webContents module', () => {
          { kind: 'imeSetComposition', text: 'a', selectionStart: 0, selectionEnd: 1, replacementStart: 0 },
          'Either both replacementStart/replacementEnd are specified or neither'
        );
@@ -399,7 +399,7 @@ index 04dc797d2c..6c75e6a435 100644
      });
  
      it('reports consumed keyboard events when the page prevents default', async () => {
-@@ -2773,6 +2894,58 @@ describe('webContents module', () => {
+@@ -2242,6 +2363,58 @@ describe('webContents module', () => {
        expect(value).to.equal('compose');
      });
  

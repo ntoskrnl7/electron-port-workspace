@@ -1,7 +1,7 @@
-From 3911195378cd3b81348d91ec1be7d9bfde2af444 Mon Sep 17 00:00:00 2001
+From 6e00cc527eb7aa80cd1f325da420dfb5587b4e06 Mon Sep 17 00:00:00 2001
 From: Jung-Kwang Lee <ntoskrnl7@gmail.com>
 Date: Mon, 11 May 2026 17:30:00 +0900
-Subject: fix: disable DOM storage in PDF renderers
+Subject: [PATCH 7/9] fix: disable DOM storage in PDF renderers
 
 Chromium PDF renderer processes are not allowed to access origin data such as
 localStorage. Match Chrome's renderer client behavior and disable DOM storage
@@ -14,13 +14,13 @@ terminates as a bad message.
  2 files changed, 9 insertions(+)
 
 diff --git a/shell/renderer/renderer_client_base.cc b/shell/renderer/renderer_client_base.cc
-index 882e5c9214..21c1396e03 100644
+index 75bd2ac2c5..504eb9dc0c 100644
 --- a/shell/renderer/renderer_client_base.cc
 +++ b/shell/renderer/renderer_client_base.cc
-@@ -513,6 +513,14 @@ bool RendererClientBase::IsPluginHandledExternally(
+@@ -527,6 +527,14 @@ bool RendererClientBase::IsPluginHandledExternally(
  #endif
  }
-
+ 
 +bool RendererClientBase::IsDomStorageDisabled() const {
 +#if BUILDFLAG(ENABLE_PDF_VIEWER)
 +  return pdf::IsPdfRenderer();
@@ -33,10 +33,10 @@ index 882e5c9214..21c1396e03 100644
      const blink::WebElement& plugin_element,
      v8::Isolate* isolate) {
 diff --git a/shell/renderer/renderer_client_base.h b/shell/renderer/renderer_client_base.h
-index 2731aca9ea..fe69b2473d 100644
+index 3d5f73ddec..9dfa34b58c 100644
 --- a/shell/renderer/renderer_client_base.h
 +++ b/shell/renderer/renderer_client_base.h
-@@ -108,6 +108,7 @@ class RendererClientBase : public content::ContentRendererClient
+@@ -109,6 +109,7 @@ class RendererClientBase : public content::ContentRendererClient
                                   const blink::WebElement& plugin_element,
                                   const GURL& original_url,
                                   const std::string& mime_type) override;
@@ -44,3 +44,6 @@ index 2731aca9ea..fe69b2473d 100644
    v8::Local<v8::Object> GetScriptableObject(
        const blink::WebElement& plugin_element,
        v8::Isolate* isolate) override;
+-- 
+2.53.0
+

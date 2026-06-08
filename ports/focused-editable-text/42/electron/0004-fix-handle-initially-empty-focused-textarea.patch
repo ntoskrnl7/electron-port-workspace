@@ -1,4 +1,4 @@
-From 04f2ce5a71984c302b0bcd3c18434525bf9effc4 Mon Sep 17 00:00:00 2001
+From 774389efebdb78b43a1a80efe66392b37bb4c1f4 Mon Sep 17 00:00:00 2001
 From: Jung-Kwang Lee <ntoskrnl7@gmail.com>
 Date: Mon, 8 Jun 2026 15:42:31 +0900
 Subject: [PATCH 4/4] fix: handle initially empty focused textarea
@@ -10,10 +10,10 @@ Subject: [PATCH 4/4] fix: handle initially empty focused textarea
  3 files changed, 150 insertions(+), 21 deletions(-)
 
 diff --git a/docs/api/web-contents.md b/docs/api/web-contents.md
-index 4f932f7f19..b82252cbd7 100644
+index c1470eb7ff..1f505b67a5 100644
 --- a/docs/api/web-contents.md
 +++ b/docs/api/web-contents.md
-@@ -1268,6 +1268,7 @@ const selectedText = info.text.slice(info.selection.start, info.selection.end)
+@@ -1222,6 +1222,7 @@ const selectedText = info.text.slice(info.selection.start, info.selection.end)
  Password inputs return `null`. Custom editors backed by DOM-editable content are
  handled on a best-effort basis. Editors backed by canvas, virtual documents, or
  application-internal models may only expose the focused DOM control.
@@ -22,10 +22,10 @@ index 4f932f7f19..b82252cbd7 100644
  #### `contents.watchFocusedEditableText([options, ]callback)` _Experimental_
  
 diff --git a/shell/browser/api/electron_api_web_contents.cc b/shell/browser/api/electron_api_web_contents.cc
-index ca95dc63ca..619b7e46d0 100644
+index 9ffdeb5264..9f6fc8269d 100644
 --- a/shell/browser/api/electron_api_web_contents.cc
 +++ b/shell/browser/api/electron_api_web_contents.cc
-@@ -2269,11 +2269,13 @@ std::optional<FocusedEditableTextSnapshot>
+@@ -2442,11 +2442,13 @@ std::optional<FocusedEditableTextSnapshot>
  CreateFocusedEditableTextSnapshotFromInputState(
      const ui::mojom::TextInputState& state,
      uint32_t max_length) {
@@ -43,7 +43,7 @@ index ca95dc63ca..619b7e46d0 100644
    snapshot.selection = state.selection;
    snapshot.composition = ClampCompositionToText(
        state.composition ? std::make_optional(*state.composition) : std::nullopt,
-@@ -6742,24 +6744,14 @@ v8::Local<v8::Promise> WebContents::EditFocusedEditableText(
+@@ -6915,24 +6917,14 @@ v8::Local<v8::Promise> WebContents::EditFocusedEditableText(
      return handle;
    }
  
@@ -71,7 +71,7 @@ index ca95dc63ca..619b7e46d0 100644
                                                         &error);
      if (!error.empty()) {
        promise.RejectWithErrorMessage(error);
-@@ -6769,18 +6761,18 @@ v8::Local<v8::Promise> WebContents::EditFocusedEditableText(
+@@ -6942,18 +6934,18 @@ v8::Local<v8::Promise> WebContents::EditFocusedEditableText(
        replaced_length = replacement_range->length();
      } else {
        gfx::Range current = GetFocusedEditableTextEditCurrentReplacementRange(
@@ -95,10 +95,10 @@ index ca95dc63ca..619b7e46d0 100644
      selection_after = ClampFocusedEditableTextSelectionAfter(
          *edit.selection_after, final_text_length);
 diff --git a/spec/api-web-contents-spec.ts b/spec/api-web-contents-spec.ts
-index 3a3c30d8ed..a549044a96 100644
+index 55df628eb6..79623bbdd6 100644
 --- a/spec/api-web-contents-spec.ts
 +++ b/spec/api-web-contents-spec.ts
-@@ -1380,6 +1380,42 @@ describe('webContents module', () => {
+@@ -1326,6 +1326,42 @@ describe('webContents module', () => {
      });
    });
  
@@ -141,7 +141,7 @@ index 3a3c30d8ed..a549044a96 100644
    describe('getFocusedEditableText() API', () => {
      afterEach(closeAllWindows);
  
-@@ -1449,6 +1485,53 @@ describe('webContents module', () => {
+@@ -1395,6 +1431,53 @@ describe('webContents module', () => {
        expect(info.isPartial).to.be.false();
      });
  
@@ -195,7 +195,7 @@ index 3a3c30d8ed..a549044a96 100644
      it('returns full contenteditable text on a best-effort DOM path', async () => {
        const w = new BrowserWindow({ show: false, width: 400, height: 300 });
        await w.loadURL(
-@@ -1654,6 +1737,59 @@ describe('webContents module', () => {
+@@ -1600,6 +1683,59 @@ describe('webContents module', () => {
        });
      });
  

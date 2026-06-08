@@ -1,45 +1,48 @@
-From ea9ee25884e24f0cdbe7fede3c5509f467a768cf Mon Sep 17 00:00:00 2001
+From 8a21c82cc0c10e6b6310dc0fe571d645849f960b Mon Sep 17 00:00:00 2001
 From: Jung-Kwang Lee <ntoskrnl7@gmail.com>
 Date: Mon, 18 May 2026 12:01:38 +0900
-Subject: feat: add service worker preload realms
+Subject: [PATCH 8/9] feat: add service worker preload realms
 
 ---
- docs/api/session.md                           |  6 ++
- .../structures/preload-script-registration.md |  8 ++
- docs/api/structures/preload-script.md         |  4 +
- lib/browser/rpc-server.ts                     | 25 ++++-
- lib/preload_realm/init.ts                     |  5 +-
- script/fix-preload-typescript-definitions.mjs | 45 ++++++++-
- shell/browser/api/electron_api_session.cc     |  8 ++
- shell/browser/electron_browser_client.cc      |  6 +-
- shell/browser/preload_script.cc               | 36 ++++++++
- shell/browser/preload_script.h                | 19 ++++
- shell/browser/session_preferences.cc          | 34 ++++++-
- shell/browser/session_preferences.h           |  3 +-
- shell/common/options_switches.h               |  4 +
- .../renderer/api/electron_api_ipc_renderer.cc |  2 +
- .../electron_sandboxed_renderer_client.cc     | 16 +++-
- shell/renderer/preload_realm_context.cc       | 90 +++++++++++-------
- shell/renderer/preload_realm_context.h        |  5 +
- shell/renderer/service_worker_data.cc         | 54 +++++++++--
- shell/renderer/service_worker_data.h          | 12 +++
- spec/api-service-worker-main-spec.ts          | 92 ++++++++++++++++++-
- spec/api-session-spec.ts                      | 24 +++++
- .../api/preload-realm/preload-global-probe.js | 10 ++
- ...reload-shadow-throw-service-worker-send.js | 10 ++
- spec/ts-smoke/electron/main.ts                |  5 +
- 24 files changed, 467 insertions(+), 56 deletions(-)
+ docs/api/session.md                           |   6 +
+ .../structures/preload-script-registration.md |   8 +
+ docs/api/structures/preload-script.md         |   4 +
+ lib/preload_realm/init.ts                     |  10 +-
+ script/fix-preload-typescript-definitions.mjs |  45 +++++-
+ shell/browser/api/electron_api_session.cc     |   8 +
+ .../browser/api/electron_api_web_contents.cc  |   1 +
+ shell/browser/electron_browser_client.cc      |  20 ++-
+ shell/browser/preload_script.cc               |  36 +++++
+ shell/browser/preload_script.h                |  19 +++
+ shell/browser/renderer_startup_data.cc        |  33 ++++
+ shell/browser/session_preferences.cc          |  37 ++++-
+ shell/browser/session_preferences.h           |   2 +
+ shell/common/api/api.mojom                    |  13 ++
+ shell/common/options_switches.h               |   4 +
+ .../renderer/api/electron_api_ipc_renderer.cc |   2 +
+ .../electron_sandboxed_renderer_client.cc     |  16 +-
+ shell/renderer/preload_realm_context.cc       | 147 ++++++++++--------
+ shell/renderer/preload_realm_context.h        |   5 +
+ shell/renderer/preload_utils.cc               |   5 +-
+ shell/renderer/service_worker_data.cc         |  54 +++++--
+ shell/renderer/service_worker_data.h          |  12 ++
+ spec/api-service-worker-main-spec.ts          |  92 ++++++++++-
+ spec/api-session-spec.ts                      |  24 +++
+ .../api/preload-realm/preload-global-probe.js |  10 ++
+ ...reload-shadow-throw-service-worker-send.js |  10 ++
+ spec/ts-smoke/electron/main.ts                |   5 +
+ 27 files changed, 538 insertions(+), 90 deletions(-)
  create mode 100644 spec/fixtures/api/preload-realm/preload-global-probe.js
  create mode 100644 spec/fixtures/api/preload-realm/preload-shadow-throw-service-worker-send.js
 
 diff --git a/docs/api/session.md b/docs/api/session.md
-index b5af3efcb4..b952b4c650 100644
+index f4189bbcbb..27df6c3a19 100644
 --- a/docs/api/session.md
 +++ b/docs/api/session.md
-@@ -1446,6 +1446,12 @@ JavaScript in the worker global scope before the worker's main script is
+@@ -1427,6 +1427,12 @@ JavaScript in the worker global scope before the worker's main script is
  evaluated. Dedicated workers have Node.js globals only when
  `nodeIntegrationInWorker` is enabled.
-
+ 
 +For `service-worker` contexts, scripts run in Electron's isolated
 +`ShadowRealmGlobalScope` by default to preserve existing behavior. Set `target`
 +to `service-worker-global-scope` to run the preload in the actual
@@ -47,7 +50,7 @@ index b5af3efcb4..b952b4c650 100644
 +available, or `both` to run it in both global scopes.
 +
  Returns `string` - The ID of the registered preload script.
-
+ 
  #### `ses.unregisterPreloadScript(id)`
 diff --git a/docs/api/structures/preload-script-registration.md b/docs/api/structures/preload-script-registration.md
 index 2f7403fce3..ad3145c055 100644
@@ -81,89 +84,43 @@ index 79423133e6..930fde70f0 100644
 +  `service-worker` and the option is provided.
  * `id` string - Unique ID of preload script.
  * `filePath` string - Path of the script file. Must be an absolute path.
-diff --git a/lib/browser/rpc-server.ts b/lib/browser/rpc-server.ts
-index f34d62fefd..ec2f62aaa4 100644
---- a/lib/browser/rpc-server.ts
-+++ b/lib/browser/rpc-server.ts
-@@ -49,7 +49,13 @@ ipcMainUtils.handleSync(IPC_MESSAGES.BROWSER_CLIPBOARD_SYNC, function (event, me
-   return (clipboard as any)[method](...args);
- });
-
--const getPreloadScriptsFromEvent = (event: ElectronInternal.IpcMainInternalEvent, isInitialEmptyDocument = false) => {
-+type ServiceWorkerPreloadTarget = 'service-worker-global-scope' | 'shadow-realm-global-scope';
-+
-+const getPreloadScriptsFromEvent = (
-+  event: ElectronInternal.IpcMainInternalEvent,
-+  isInitialEmptyDocument = false,
-+  serviceWorkerPreloadTarget?: ServiceWorkerPreloadTarget
-+) => {
-   const session: Electron.Session = event.type === 'service-worker' ? event.session : event.sender.session;
-   let preloadScripts = session.getPreloadScripts();
-
-@@ -85,7 +91,14 @@ const getPreloadScriptsFromEvent = (event: ElectronInternal.IpcMainInternalEvent
-       preloadScripts.push(webPrefPreload);
-     }
-   } else if (event.type === 'service-worker') {
--    preloadScripts = preloadScripts.filter((script) => script.type === 'service-worker');
-+    const matchesServiceWorkerTarget = (script: Extract<Electron.PreloadScript, { type: 'service-worker' }>) => {
-+      const target = script.target ?? 'shadow-realm-global-scope';
-+      return !serviceWorkerPreloadTarget || target === 'both' || target === serviceWorkerPreloadTarget;
-+    };
-+    preloadScripts = preloadScripts.filter(
-+      (script): script is Extract<Electron.PreloadScript, { type: 'service-worker' }> =>
-+        script.type === 'service-worker' && matchesServiceWorkerTarget(script)
-+    );
-   } else {
-     throw new Error(`getPreloadScriptsFromEvent: event.type is invalid (${(event as any).type})`);
-   }
-@@ -112,8 +125,12 @@ const readPreloadScript = async function (script: Electron.PreloadScript): Promi
-   };
- };
-
--ipcMainUtils.handleSync(IPC_MESSAGES.BROWSER_SANDBOX_LOAD, async function (event, isInitialEmptyDocument = false) {
--  const preloadScripts = getPreloadScriptsFromEvent(event, isInitialEmptyDocument);
-+ipcMainUtils.handleSync(IPC_MESSAGES.BROWSER_SANDBOX_LOAD, async function (
-+  event,
-+  isInitialEmptyDocument = false,
-+  serviceWorkerPreloadTarget?: ServiceWorkerPreloadTarget
-+) {
-+  const preloadScripts = getPreloadScriptsFromEvent(event, isInitialEmptyDocument, serviceWorkerPreloadTarget);
-   return {
-     preloadScripts: await Promise.all(preloadScripts.map(readPreloadScript)),
-     process: {
 diff --git a/lib/preload_realm/init.ts b/lib/preload_realm/init.ts
-index 1a3a9c5092..2ca1d93ac0 100644
+index f546c2651d..b3a7a0008e 100644
 --- a/lib/preload_realm/init.ts
 +++ b/lib/preload_realm/init.ts
-@@ -19,10 +19,13 @@ const ipcRendererUtils =
-
- const v8Util = process._linkedBinding('electron_common_v8_util');
- const isInitialEmptyDocument = Boolean(v8Util.getHiddenValue(globalThis, 'isInitialEmptyDocument'));
-+const serviceWorkerPreloadTarget = process.type === 'service-worker'
-+  ? v8Util.getHiddenValue(globalThis, 'serviceWorkerPreloadTarget')
-+  : undefined;
- const { preloadScripts, process: processProps } = ipcRendererUtils.invokeSync<{
-   preloadScripts: ElectronInternal.PreloadScript[];
-   process: NodeJS.Process;
--}>(IPC_MESSAGES.BROWSER_SANDBOX_LOAD, isInitialEmptyDocument);
-+}>(IPC_MESSAGES.BROWSER_SANDBOX_LOAD, isInitialEmptyDocument, serviceWorkerPreloadTarget);
-
+@@ -18,9 +18,17 @@ declare const binding: {
+     preloadScripts: ElectronInternal.PreloadScript[];
+     process: NodeJS.Process;
+   };
++  serviceWorkerPreloadTarget?: 'shadow-realm-global-scope' | 'service-worker-global-scope';
+ };
+ 
+-const { preloadScripts, process: processProps } = binding.startupData;
++const { preloadScripts: startupPreloadScripts, process: processProps } = binding.startupData;
++const preloadScripts = binding.serviceWorkerPreloadTarget
++  ? startupPreloadScripts.filter((script) => {
++    if (script.type !== 'service-worker') return true;
++    const target = script.target ?? 'shadow-realm-global-scope';
++    return target === 'both' || target === binding.serviceWorkerPreloadTarget;
++  })
++  : startupPreloadScripts;
+ 
  const electron = require('electron');
-
+ 
 diff --git a/script/fix-preload-typescript-definitions.mjs b/script/fix-preload-typescript-definitions.mjs
 index 3527a0334e..2392c8cc53 100644
 --- a/script/fix-preload-typescript-definitions.mjs
 +++ b/script/fix-preload-typescript-definitions.mjs
 @@ -5,7 +5,8 @@ const definitionsPath = path.resolve('electron.d.ts');
  let definitions = fs.readFileSync(definitionsPath, 'utf8');
-
+ 
  const frameScope = "('main' | 'sub-frames' | 'all')";
 -const workerType = "('dedicated-worker' | 'shared-worker' | 'service-worker')";
 +const workerType = "('dedicated-worker' | 'shared-worker')";
 +const serviceWorkerTarget = "('shadow-realm-global-scope' | 'service-worker-global-scope' | 'both')";
-
+ 
  const preloadScript = `  type PreloadScript = ({
-
+ 
 @@ -49,6 +50,27 @@ const preloadScript = `  type PreloadScript = ({
       * Context type where the preload script will be executed.
       */
@@ -190,7 +147,7 @@ index 3527a0334e..2392c8cc53 100644
 +     */
 +    type: 'service-worker';
    });`;
-
+ 
  const preloadScriptRegistration = `  type PreloadScriptRegistration = ({
 @@ -95,6 +117,27 @@ const preloadScriptRegistration = `  type PreloadScriptRegistration = ({
       * Context type where the preload script will be executed.
@@ -218,16 +175,16 @@ index 3527a0334e..2392c8cc53 100644
 +     */
 +    type: 'service-worker';
    });`;
-
+ 
  function replaceGeneratedInterface(source, name, replacement) {
 diff --git a/shell/browser/api/electron_api_session.cc b/shell/browser/api/electron_api_session.cc
-index c75d2c382d..df2e0c7c84 100644
+index ebcc37528c..9683a4d6e7 100644
 --- a/shell/browser/api/electron_api_session.cc
 +++ b/shell/browser/api/electron_api_session.cc
-@@ -1178,6 +1178,14 @@ std::string Session::RegisterPreloadScript(
+@@ -1145,6 +1145,14 @@ std::string Session::RegisterPreloadScript(
      return "";
    }
-
+ 
 +  if (new_preload_script.has_service_worker_target &&
 +      new_preload_script.script_type !=
 +          PreloadScript::ScriptType::kServiceWorker) {
@@ -237,13 +194,25 @@ index c75d2c382d..df2e0c7c84 100644
 +  }
 +
    preload_scripts.push_back(new_preload_script);
-   return new_preload_script.id;
- }
+   // A service worker that starts after this point picks up the new preload
+   // automatically — GetServiceWorkerStartupData() rebuilds from
+diff --git a/shell/browser/api/electron_api_web_contents.cc b/shell/browser/api/electron_api_web_contents.cc
+index 9ade5ddf5f..f64594f91b 100644
+--- a/shell/browser/api/electron_api_web_contents.cc
++++ b/shell/browser/api/electron_api_web_contents.cc
+@@ -2254,6 +2254,7 @@ void WebContents::MaybeSendRendererStartupData(
+       auto ps = mojom::PreloadScriptData::New();
+       ps->id = "preload-" + preload->AsUTF8Unsafe();
+       ps->file_path = preload->AsUTF8Unsafe();
++      ps->type = "frame";
+       std::string contents;
+       if (asar::ReadFileToString(*preload, &contents)) {
+         ps->contents.assign(contents.begin(), contents.end());
 diff --git a/shell/browser/electron_browser_client.cc b/shell/browser/electron_browser_client.cc
-index e37ed71544..d0cc767bbe 100644
+index 4061e3b939..ed73c4cbc6 100644
 --- a/shell/browser/electron_browser_client.cc
 +++ b/shell/browser/electron_browser_client.cc
-@@ -693,9 +693,13 @@ void ElectronBrowserClient::AppendExtraCommandLineSwitches(
+@@ -697,9 +697,13 @@ void ElectronBrowserClient::AppendExtraCommandLineSwitches(
        auto* browser_context = render_process_host->GetBrowserContext();
        auto* session_prefs =
            SessionPreferences::FromBrowserContext(browser_context);
@@ -258,6 +227,41 @@ index e37ed71544..d0cc767bbe 100644
        if (session_prefs->HasFramePreloadScriptInSubFrames()) {
          command_line->AppendSwitch(switches::kFramePreloadInSubFrames);
        }
+@@ -841,6 +845,7 @@ ElectronBrowserClient::GetExtraCreateNewWindowReplyData(
+       auto ps = mojom::PreloadScriptData::New();
+       ps->id = "preload-" + preload->AsUTF8Unsafe();
+       ps->file_path = preload->AsUTF8Unsafe();
++      ps->type = "frame";
+       std::string contents;
+       if (asar::ReadFileToString(*preload, &contents)) {
+         ps->contents.assign(contents.begin(), contents.end());
+@@ -863,9 +868,9 @@ std::optional<mojo_base::BigBuffer>
+ ElectronBrowserClient::GetServiceWorkerStartupData(
+     content::BrowserContext* browser_context,
+     const GURL& scope) {
+-  // Only the service-worker preload realm consumes this, and it's only created
+-  // when SW preloads are registered. Skip the asar reads + serialization
+-  // otherwise — this runs on every service worker start.
++  // Service-worker preload contexts consume this, and it's only created when
++  // SW preloads are registered. Skip the asar reads + serialization otherwise
++  // — this runs on every service worker start.
+   auto* session_prefs = SessionPreferences::FromBrowserContext(browser_context);
+   if (!session_prefs || !session_prefs->HasServiceWorkerPreloadScript())
+     return std::nullopt;
+@@ -2062,13 +2067,6 @@ void ElectronBrowserClient::RegisterBrowserInterfaceBindersForServiceWorker(
+     const content::ServiceWorkerVersionBaseInfo& service_worker_version_info,
+     mojo::BinderMapWithContext<const content::ServiceWorkerVersionBaseInfo&>*
+         map) {
+-  map->Add<mojom::ElectronPreloadScriptLoader>(base::BindRepeating(
+-      [](content::BrowserContext* browser_context,
+-         const content::ServiceWorkerVersionBaseInfo&,
+-         mojo::PendingReceiver<mojom::ElectronPreloadScriptLoader> receiver) {
+-        BindPreloadScriptLoader(browser_context, std::move(receiver));
+-      },
+-      browser_context));
+   map->Add<blink::mojom::BadgeService>(
+       base::BindRepeating(&BindBadgeServiceForServiceWorker));
+ }
 diff --git a/shell/browser/preload_script.cc b/shell/browser/preload_script.cc
 index f28c0278e8..722c949891 100644
 --- a/shell/browser/preload_script.cc
@@ -265,7 +269,7 @@ index f28c0278e8..722c949891 100644
 @@ -89,6 +89,33 @@ bool Converter<PreloadScript::FrameScope>::FromV8(
    return FromV8WithLookup(isolate, val, Lookup, out);
  }
-
+ 
 +// static
 +v8::Local<v8::Value> Converter<PreloadScript::ServiceWorkerTarget>::ToV8(
 +    v8::Isolate* isolate,
@@ -306,7 +310,7 @@ index f28c0278e8..722c949891 100644
 +  }
    return ConvertToV8(isolate, dict).As<v8::Object>();
  }
-
+ 
 @@ -136,6 +167,11 @@ bool Converter<PreloadScript>::FromV8(v8::Isolate* isolate,
                     &out->run_in_initial_empty_document)) {
      return false;
@@ -324,9 +328,9 @@ index 4238b4ab4c..69bbcc4c10 100644
 --- a/shell/browser/preload_script.h
 +++ b/shell/browser/preload_script.h
 @@ -23,6 +23,12 @@ struct PreloadScript {
-
+ 
    enum class FrameScope { kMain, kSubFrames, kAll };
-
+ 
 +  enum class ServiceWorkerTarget {
 +    kShadowRealmGlobalScope,
 +    kServiceWorkerGlobalScope,
@@ -343,13 +347,13 @@ index 4238b4ab4c..69bbcc4c10 100644
 +  ServiceWorkerTarget service_worker_target =
 +      ServiceWorkerTarget::kShadowRealmGlobalScope;
 +  bool has_service_worker_target = false;
-
+ 
    // If set, use the deprecated validation behavior of Session.setPreloads
    bool deprecated = false;
 @@ -67,6 +76,16 @@ struct Converter<PreloadScript::FrameScope> {
                       PreloadScript::FrameScope* out);
  };
-
+ 
 +template <>
 +struct Converter<PreloadScript::ServiceWorkerTarget> {
 +  static v8::Local<v8::Value> ToV8(
@@ -363,24 +367,85 @@ index 4238b4ab4c..69bbcc4c10 100644
  template <>
  struct Converter<PreloadScript> {
    static v8::Local<v8::Value> ToV8(v8::Isolate* isolate,
+diff --git a/shell/browser/renderer_startup_data.cc b/shell/browser/renderer_startup_data.cc
+index dddb3a0ff3..e190a13ba4 100644
+--- a/shell/browser/renderer_startup_data.cc
++++ b/shell/browser/renderer_startup_data.cc
+@@ -4,6 +4,7 @@
+ 
+ #include "shell/browser/renderer_startup_data.h"
+ 
++#include <optional>
+ #include <string>
+ 
+ #include "base/containers/flat_map.h"
+@@ -47,6 +48,36 @@ base::FilePath GetHelperExecPath() {
+   return path;
+ }
+ 
++std::string PreloadScriptTypeToString(PreloadScript::ScriptType type) {
++  switch (type) {
++    case PreloadScript::ScriptType::kWebFrame:
++      return "frame";
++    case PreloadScript::ScriptType::kDedicatedWorker:
++      return "dedicated-worker";
++    case PreloadScript::ScriptType::kSharedWorker:
++      return "shared-worker";
++    case PreloadScript::ScriptType::kServiceWorker:
++      return "service-worker";
++  }
++}
++
++std::optional<std::string> ServiceWorkerTargetToString(
++    const PreloadScript& script) {
++  if (script.script_type != PreloadScript::ScriptType::kServiceWorker ||
++      !script.has_service_worker_target) {
++    return std::nullopt;
++  }
++
++  switch (script.service_worker_target) {
++    case PreloadScript::ServiceWorkerTarget::kShadowRealmGlobalScope:
++      return "shadow-realm-global-scope";
++    case PreloadScript::ServiceWorkerTarget::kServiceWorkerGlobalScope:
++      return "service-worker-global-scope";
++    case PreloadScript::ServiceWorkerTarget::kBoth:
++      return "both";
++  }
++}
++
+ }  // namespace
+ 
+ mojom::RendererStartupDataPtr Build(content::BrowserContext* browser_context,
+@@ -63,6 +94,8 @@ mojom::RendererStartupDataPtr Build(content::BrowserContext* browser_context,
+       auto ps = mojom::PreloadScriptData::New();
+       ps->id = script.id;
+       ps->file_path = script.file_path.AsUTF8Unsafe();
++      ps->type = PreloadScriptTypeToString(script.script_type);
++      ps->target = ServiceWorkerTargetToString(script);
+       std::string contents;
+       if (asar::ReadFileToString(script.file_path, &contents)) {
+         ps->contents.assign(contents.begin(), contents.end());
 diff --git a/shell/browser/session_preferences.cc b/shell/browser/session_preferences.cc
-index e3d3a7cca2..ee2fdc12c7 100644
+index e3d3a7cca2..38bfbf1b05 100644
 --- a/shell/browser/session_preferences.cc
 +++ b/shell/browser/session_preferences.cc
 @@ -4,6 +4,8 @@
-
+ 
  #include "shell/browser/session_preferences.h"
-
+ 
 +#include <algorithm>
 +
  #include "base/logging.h"
  #include "base/memory/ptr_util.h"
  #include "content/public/browser/browser_context.h"
-@@ -30,11 +32,39 @@ SessionPreferences* SessionPreferences::FromBrowserContext(
-   return static_cast<SessionPreferences*>(context->GetUserData(&kLocatorKey));
+@@ -31,10 +33,43 @@ SessionPreferences* SessionPreferences::FromBrowserContext(
  }
-
--bool SessionPreferences::HasServiceWorkerPreloadScript() {
+ 
+ bool SessionPreferences::HasServiceWorkerPreloadScript() {
++  return HasServiceWorkerPreloadScriptInShadowRealm() ||
++         HasServiceWorkerPreloadScriptInServiceWorker();
++}
++
 +namespace {
 +
 +bool ServiceWorkerTargetMatches(
@@ -419,19 +484,47 @@ index e3d3a7cca2..ee2fdc12c7 100644
    return it != preloads.end();
  }
 diff --git a/shell/browser/session_preferences.h b/shell/browser/session_preferences.h
-index 5001019122..3477d64353 100644
+index 5001019122..e0f60e0de6 100644
 --- a/shell/browser/session_preferences.h
 +++ b/shell/browser/session_preferences.h
-@@ -28,7 +28,8 @@ class SessionPreferences : public base::SupportsUserData::Data {
-
+@@ -29,6 +29,8 @@ class SessionPreferences : public base::SupportsUserData::Data {
    std::vector<PreloadScript>& preload_scripts() { return preload_scripts_; }
-
--  bool HasServiceWorkerPreloadScript();
+ 
+   bool HasServiceWorkerPreloadScript();
 +  bool HasServiceWorkerPreloadScriptInShadowRealm();
 +  bool HasServiceWorkerPreloadScriptInServiceWorker();
    bool HasFramePreloadScriptInSubFrames();
    bool HasFramePreloadScriptInInitialEmptyDocuments();
-
+ 
+diff --git a/shell/common/api/api.mojom b/shell/common/api/api.mojom
+index 6ea3158b27..b5c20f9d89 100644
+--- a/shell/common/api/api.mojom
++++ b/shell/common/api/api.mojom
+@@ -5,11 +5,24 @@ import "ui/gfx/geometry/mojom/geometry.mojom";
+ import "third_party/blink/public/mojom/messaging/cloneable_message.mojom";
+ import "third_party/blink/public/mojom/messaging/transferable_message.mojom";
+ 
++struct PreloadScriptSource {
++  string file_path;
++  string contents;
++  string error;
++};
++
++interface ElectronPreloadScriptLoader {
++  [Sync]
++  LoadPreloadScripts(string type) => (array<PreloadScriptSource> scripts);
++};
++
+ // A preload script and its contents, pushed to the renderer ahead of the
+ // document that needs it.
+ struct PreloadScriptData {
+   string id;
+   string file_path;
++  string type;
++  string? target;
+   // UTF-8 contents. array<uint8> rather than BigBuffer so RendererStartupData
+   // can be flat-serialized into an opaque blob for the CreateNewWindowReply
+   // path.
 diff --git a/shell/common/options_switches.h b/shell/common/options_switches.h
 index 772d08153f..9a614f8cc5 100644
 --- a/shell/common/options_switches.h
@@ -439,7 +532,7 @@ index 772d08153f..9a614f8cc5 100644
 @@ -315,6 +315,10 @@ inline constexpr base::cstring_view kDisableNTLMv2 = "disable-ntlm-v2";
  inline constexpr base::cstring_view kServiceWorkerPreload =
      "service-worker-preload";
-
+ 
 +// Indicates that service worker preloads should run in ServiceWorkerGlobalScope.
 +inline constexpr base::cstring_view kServiceWorkerPreloadInServiceWorker =
 +    "service-worker-preload-in-service-worker";
@@ -461,12 +554,12 @@ index 1bf1065ca8..a0ae866a52 100644
      service_worker_data->proxy()->GetRemoteAssociatedInterface(
          electron_ipc_remote_.BindNewEndpointAndPassReceiver());
 diff --git a/shell/renderer/electron_sandboxed_renderer_client.cc b/shell/renderer/electron_sandboxed_renderer_client.cc
-index 31ea086820..40114325e9 100644
+index df70e35d1c..51255922da 100644
 --- a/shell/renderer/electron_sandboxed_renderer_client.cc
 +++ b/shell/renderer/electron_sandboxed_renderer_client.cc
-@@ -187,14 +187,24 @@ void ElectronSandboxedRendererClient::WillEvaluateServiceWorkerOnWorkerThread(
+@@ -212,14 +212,24 @@ void ElectronSandboxedRendererClient::WillEvaluateServiceWorkerOnWorkerThread(
        service_worker_scope, script_url, service_worker_token);
-
+ 
    auto* command_line = base::CommandLine::ForCurrentProcess();
 -  if (command_line->HasSwitch(switches::kServiceWorkerPreload)) {
 +  const bool has_shadow_realm_preload =
@@ -478,7 +571,7 @@ index 31ea086820..40114325e9 100644
        service_worker_data = new ServiceWorkerData{
            context_proxy, service_worker_version_id, v8_isolate, v8_context};
      }
-
+ 
 -    preload_realm::OnCreatePreloadableV8Context(v8_isolate, v8_context,
 -                                                service_worker_data);
 +    if (has_shadow_realm_preload) {
@@ -486,50 +579,69 @@ index 31ea086820..40114325e9 100644
 +                                                  service_worker_data);
 +    }
 +    if (has_service_worker_preload) {
-+      preload_realm::ExecuteServiceWorkerPreloadScripts(v8_isolate, v8_context,
-+                                                        service_worker_data);
++      preload_realm::ExecuteServiceWorkerPreloadScripts(
++          v8_isolate, v8_context, service_worker_data);
 +    }
    }
  }
-
+ 
 diff --git a/shell/renderer/preload_realm_context.cc b/shell/renderer/preload_realm_context.cc
-index da11d25018..71891dcee9 100644
+index d88a92cde8..1f5112551f 100644
 --- a/shell/renderer/preload_realm_context.cc
 +++ b/shell/renderer/preload_realm_context.cc
-@@ -4,6 +4,9 @@
-
+@@ -4,6 +4,10 @@
+ 
  #include "shell/renderer/preload_realm_context.h"
-
+ 
++#include <optional>
 +#include <string>
 +#include <string_view>
 +
  #include "base/command_line.h"
+ #include "base/containers/span.h"
  #include "base/process/process.h"
- #include "base/process/process_metrics.h"
-@@ -32,6 +35,49 @@ static constexpr int kElectronContextEmbedderDataIndex =
+@@ -35,6 +39,75 @@ static constexpr int kElectronContextEmbedderDataIndex =
      static_cast<int>(gin::kPerContextDataStartIndex) +
      static_cast<int>(gin::kEmbedderElectron);
-
+ 
++void EnsureServiceWorkerStartupData(
++    electron::ServiceWorkerData* service_worker_data) {
++  if (service_worker_data->worker_startup_data())
++    return;
++
++  if (const std::optional<mojo_base::BigBuffer>& blob =
++          service_worker_data->proxy()->ElectronPreloadData()) {
++    mojom::RendererStartupDataPtr data;
++    if (mojom::RendererStartupData::Deserialize(base::span<const uint8_t>(*blob),
++                                                &data)) {
++      service_worker_data->SetWorkerStartupData(std::move(data));
++    }
++  }
++}
++
 +void RunServiceWorkerPreloadInitScript(
 +    v8::Isolate* isolate,
 +    v8::Local<v8::Context> context,
 +    base::ProcessMetrics* metrics,
 +    bool context_isolated,
++    electron::ServiceWorkerData* service_worker_data,
 +    std::string_view service_worker_target) {
++  EnsureServiceWorkerStartupData(service_worker_data);
++
 +  v8::Context::Scope context_scope(context);
 +  v8::MicrotasksScope microtasks_scope(
 +      isolate, context->GetMicrotaskQueue(),
 +      v8::MicrotasksScope::kDoNotRunMicrotasks);
 +
-+  gin_helper::Dictionary global(isolate, context->Global());
-+  global.SetHidden("serviceWorkerPreloadTarget",
-+                   std::string{service_worker_target});
-+
 +  v8::Local<v8::Object> binding = v8::Object::New(isolate);
 +
 +  gin_helper::Dictionary b(isolate, binding);
 +  b.SetMethod("get", preload_utils::GetBinding);
-+  b.SetMethod("createPreloadScript", preload_utils::CreatePreloadScript);
++  b.SetMethod(
++      "createPreloadScript",
++      base::BindRepeating(&preload_utils::CreatePreloadScript, nullptr,
++                          base::Unretained(service_worker_data)));
++  b.Set("serviceWorkerPreloadTarget", std::string{service_worker_target});
 +
 +  gin_helper::Dictionary process = gin::Dictionary::CreateEmpty(isolate);
 +  b.Set("process", process);
@@ -543,12 +655,20 @@ index da11d25018..71891dcee9 100644
 +  process.SetReadOnly("type", "service-worker");
 +  process.SetReadOnly("contextIsolated", context_isolated);
 +
-+  v8::LocalVector<v8::String> preload_realm_bundle_params(
-+      isolate, {node::FIXED_ONE_BYTE_STRING(isolate, "binding")});
++  v8::Local<v8::Value> startup_data;
++  if (!preload_utils::BuildStartupData(
++           isolate, service_worker_data->worker_startup_data())
++           .ToLocal(&startup_data)) {
++    startup_data = v8::Null(isolate);
++  }
++  b.Set("startupData", startup_data);
++
++  v8::LocalVector<v8::String> preload_realm_bundle_params =
++      js2c::MakeBundleParams(isolate, js2c::kPreloadRealmBundleParams);
 +
 +  v8::LocalVector<v8::Value> preload_realm_bundle_args(isolate, {binding});
 +
-+  util::CompileAndCall(isolate, context, "electron/js2c/preload_realm_bundle",
++  util::CompileAndCall(isolate, context, js2c::kPreloadRealmBundleId,
 +                       &preload_realm_bundle_params,
 +                       &preload_realm_bundle_args);
 +}
@@ -556,18 +676,18 @@ index da11d25018..71891dcee9 100644
  // This is a helper class to make the initiator ExecutionContext the owner
  // of a ShadowRealmGlobalScope and its ScriptState. When the initiator
  // ExecutionContext is destroyed, the ShadowRealmGlobalScope is destroyed,
-@@ -78,7 +124,6 @@ class PreloadRealmLifetimeController
+@@ -81,7 +154,6 @@ class PreloadRealmLifetimeController
          context->GetAlignedPointerFromEmbedderData(
              kElectronContextEmbedderDataIndex,
              v8::kEmbedderDataTypeTagDefault));
 -    CHECK(controller);
      return controller;
    }
-
-@@ -163,37 +208,8 @@ class PreloadRealmLifetimeController
+ 
+@@ -166,66 +238,9 @@ class PreloadRealmLifetimeController
      v8::Isolate* isolate = realm_isolate();
      v8::Local<v8::Context> context = realm_context();
-
+ 
 -    v8::Context::Scope context_scope(context);
 -    v8::MicrotasksScope microtasks_scope(
 -        isolate, context->GetMicrotaskQueue(),
@@ -577,7 +697,28 @@ index da11d25018..71891dcee9 100644
 -
 -    gin_helper::Dictionary b(isolate, binding);
 -    b.SetMethod("get", preload_utils::GetBinding);
--    b.SetMethod("createPreloadScript", preload_utils::CreatePreloadScript);
+-    // The browser attached the service-worker preload set + process info to
+-    // this worker's EmbeddedWorkerStartParams (see
+-    // ContentBrowserClient::GetServiceWorkerStartupData); Chromium marshalled
+-    // it onto the worker thread with the rest of the start params, ordered
+-    // with worker creation. Deserialize and capture it once on the
+-    // ServiceWorkerData so createPreloadScript can look up preload contents
+-    // and code caches without marshaling them through V8.
+-    if (const std::optional<mojo_base::BigBuffer>& blob =
+-            service_worker_data_->proxy()->ElectronPreloadData()) {
+-      mojom::RendererStartupDataPtr data;
+-      if (mojom::RendererStartupData::Deserialize(
+-              base::span<const uint8_t>(*blob), &data)) {
+-        service_worker_data_->SetWorkerStartupData(std::move(data));
+-      }
+-    }
+-    // No RenderFrame in the SW preload realm — no per-frame cache lookup or
+-    // ship-back channel — but contents are still looked up from the captured
+-    // worker startup data instead of crossing the V8 boundary.
+-    b.SetMethod(
+-        "createPreloadScript",
+-        base::BindRepeating(&preload_utils::CreatePreloadScript, nullptr,
+-                            base::Unretained(service_worker_data_.get())));
 -
 -    gin_helper::Dictionary process = gin::Dictionary::CreateEmpty(isolate);
 -    b.Set("process", process);
@@ -591,30 +732,39 @@ index da11d25018..71891dcee9 100644
 -    process.SetReadOnly("type", "service-worker");
 -    process.SetReadOnly("contextIsolated", true);
 -
--    v8::LocalVector<v8::String> preload_realm_bundle_params(
--        isolate, {node::FIXED_ONE_BYTE_STRING(isolate, "binding")});
+-    v8::Local<v8::Value> startup_data;
+-    if (!preload_utils::BuildStartupData(
+-             isolate, service_worker_data_->worker_startup_data())
+-             .ToLocal(&startup_data)) {
+-      startup_data = v8::Null(isolate);
+-    }
+-    b.Set("startupData", startup_data);
+-
+-    v8::LocalVector<v8::String> preload_realm_bundle_params =
+-        js2c::MakeBundleParams(isolate, js2c::kPreloadRealmBundleParams);
 -
 -    v8::LocalVector<v8::Value> preload_realm_bundle_args(isolate, {binding});
 -
--    util::CompileAndCall(isolate, context, "electron/js2c/preload_realm_bundle",
+-    util::CompileAndCall(isolate, context, js2c::kPreloadRealmBundleId,
 -                         &preload_realm_bundle_params,
 -                         &preload_realm_bundle_args);
-+    RunServiceWorkerPreloadInitScript(isolate, context, metrics_.get(), true,
-+                                      "shadow-realm-global-scope");
++    RunServiceWorkerPreloadInitScript(
++        isolate, context, metrics_.get(), true, service_worker_data_.get(),
++        "shadow-realm-global-scope");
    }
-
+ 
    const blink::WeakMember<blink::ScriptState> initiator_script_state_;
-@@ -244,6 +260,16 @@ electron::ServiceWorkerData* GetServiceWorkerData(
+@@ -276,6 +291,16 @@ electron::ServiceWorkerData* GetServiceWorkerData(
    return controller ? controller->service_worker_data() : nullptr;
  }
-
+ 
 +void ExecuteServiceWorkerPreloadScripts(
 +    v8::Isolate* const isolate,
 +    v8::Local<v8::Context> service_worker_context,
 +    electron::ServiceWorkerData* service_worker_data) {
-+  RunServiceWorkerPreloadInitScript(isolate, service_worker_context,
-+                                    service_worker_data->process_metrics(),
-+                                    false, "service-worker-global-scope");
++  RunServiceWorkerPreloadInitScript(
++      isolate, service_worker_context, service_worker_data->process_metrics(),
++      false, service_worker_data, "service-worker-global-scope");
 +  service_worker_data->MarkServiceWorkerPreloadRealmInitialized();
 +}
 +
@@ -628,7 +778,7 @@ index 223a8fc838..64e5adc999 100644
 @@ -25,6 +25,11 @@ v8::MaybeLocal<v8::Context> GetPreloadRealmContext(
  electron::ServiceWorkerData* GetServiceWorkerData(
      v8::Local<v8::Context> context);
-
+ 
 +void ExecuteServiceWorkerPreloadScripts(
 +    v8::Isolate* const isolate,
 +    v8::Local<v8::Context> service_worker_context,
@@ -637,14 +787,36 @@ index 223a8fc838..64e5adc999 100644
  // Create
  void OnCreatePreloadableV8Context(
      v8::Isolate* const isolate,
+diff --git a/shell/renderer/preload_utils.cc b/shell/renderer/preload_utils.cc
+index 2d62e707b9..e17b51d409 100644
+--- a/shell/renderer/preload_utils.cc
++++ b/shell/renderer/preload_utils.cc
+@@ -242,13 +242,16 @@ v8::MaybeLocal<v8::Value> BuildStartupData(
+ 
+   auto out = gin_helper::Dictionary::CreateEmpty(isolate);
+ 
+-  // preloadScripts: [{ id, type, filePath, contents, error }]
++  // preloadScripts: [{ id, type, filePath, target, contents, error }]
+   v8::LocalVector<v8::Value> scripts(isolate);
+   scripts.reserve(data->preload_scripts.size());
+   for (const auto& ps : data->preload_scripts) {
+     auto entry = gin_helper::Dictionary::CreateEmpty(isolate);
+     entry.Set("id", ps->id);
+     entry.Set("filePath", ps->file_path);
++    entry.Set("type", ps->type);
++    if (ps->target)
++      entry.Set("target", *ps->target);
+     // The contents are not marshaled to V8 — createPreloadScript() looks them
+     // up from the mojo-cached startup data by id, avoiding a ~150 KB heap
+     // allocation per preload per navigation. JS only needs to know whether
 diff --git a/shell/renderer/service_worker_data.cc b/shell/renderer/service_worker_data.cc
-index 1484148a72..c16d7075e5 100644
+index 1484148a72..73c6e42647 100644
 --- a/shell/renderer/service_worker_data.cc
 +++ b/shell/renderer/service_worker_data.cc
 @@ -4,7 +4,9 @@
-
+ 
  #include "electron/shell/renderer/service_worker_data.h"
-
+ 
 +#include "base/check.h"
  #include "base/notimplemented.h"
 +#include "base/process/process_metrics.h"
@@ -652,9 +824,9 @@ index 1484148a72..c16d7075e5 100644
  #include "shell/common/gin_converters/value_converter.h"
  #include "shell/common/heap_snapshot.h"
 @@ -14,7 +16,26 @@
-
+ 
  namespace electron {
-
+ 
 -ServiceWorkerData::~ServiceWorkerData() = default;
 +namespace {
 +
@@ -676,7 +848,7 @@ index 1484148a72..c16d7075e5 100644
 +  DCHECK_EQ(current_service_worker_data, this);
 +  current_service_worker_data = nullptr;
 +}
-
+ 
  ServiceWorkerData::ServiceWorkerData(blink::WebServiceWorkerContextProxy* proxy,
                                       int64_t service_worker_version_id,
 @@ -23,13 +44,25 @@ ServiceWorkerData::ServiceWorkerData(blink::WebServiceWorkerContextProxy* proxy,
@@ -693,7 +865,7 @@ index 1484148a72..c16d7075e5 100644
            base::BindRepeating(&ServiceWorkerData::OnElectronRendererRequest,
                                weak_ptr_factory_.GetWeakPtr()));
  }
-
+ 
 +// static
 +ServiceWorkerData* ServiceWorkerData::GetCurrent() {
 +  return current_service_worker_data;
@@ -708,94 +880,94 @@ index 1484148a72..c16d7075e5 100644
    receiver_.reset();
 @@ -43,22 +76,25 @@ void ServiceWorkerData::Message(bool internal,
    v8::HandleScope handle_scope(isolate);
-
+ 
    v8::Local<v8::Context> context = v8_context_.Get(isolate_);
 +  if (context.IsEmpty())
 +    return;
-
+ 
    v8::MaybeLocal<v8::Context> maybe_preload_context =
        preload_realm::GetPreloadRealmContext(context);
-
+ 
    if (maybe_preload_context.IsEmpty()) {
-+    if (!service_worker_preload_realm_initialized_)
-+      return;
-+
-+    EmitIPCMessageInContext(isolate, context, internal, channel, arguments);
++    if (service_worker_preload_realm_initialized_) {
++      EmitIPCMessageInContext(isolate, context, internal, channel, arguments);
++    }
      return;
    }
-
+ 
 -  v8::Local<v8::Context> preload_context =
 -      maybe_preload_context.ToLocalChecked();
 -  v8::Context::Scope context_scope(preload_context);
--
--  v8::Local<v8::Value> args = gin::ConvertToV8(isolate, arguments);
 +  EmitIPCMessageInContext(isolate, maybe_preload_context.ToLocalChecked(),
 +                          internal, channel, arguments);
-
+ 
+-  v8::Local<v8::Value> args = gin::ConvertToV8(isolate, arguments);
+-
 -  ipc_native::EmitIPCEvent(isolate, preload_context, internal, channel, {},
 -                           args);
-+  if (service_worker_preload_realm_initialized_)
++  if (service_worker_preload_realm_initialized_) {
 +    EmitIPCMessageInContext(isolate, context, internal, channel, arguments);
++  }
  }
-
+ 
  void ServiceWorkerData::ReceivePostMessage(const std::string& channel,
 diff --git a/shell/renderer/service_worker_data.h b/shell/renderer/service_worker_data.h
-index 73a5b343a7..a214d0c2cd 100644
+index 4fbc3776d9..844fdae9fc 100644
 --- a/shell/renderer/service_worker_data.h
 +++ b/shell/renderer/service_worker_data.h
 @@ -5,6 +5,7 @@
  #ifndef ELECTRON_SHELL_RENDERER_SERVICE_WORKER_DATA_H_
  #define ELECTRON_SHELL_RENDERER_SERVICE_WORKER_DATA_H_
-
+ 
 +#include <memory>
  #include <string>
-
+ 
  #include "base/memory/raw_ptr.h"
 @@ -18,6 +19,10 @@
  #include "v8/include/v8-context.h"
  #include "v8/include/v8-forward.h"
-
+ 
 +namespace base {
 +class ProcessMetrics;
 +}
 +
  namespace electron {
-
+ 
  // Per ServiceWorker data in worker thread.
 @@ -33,11 +38,16 @@ class ServiceWorkerData : public mojom::ElectronRenderer {
    ServiceWorkerData(const ServiceWorkerData&) = delete;
    ServiceWorkerData& operator=(const ServiceWorkerData&) = delete;
-
+ 
 +  static ServiceWorkerData* GetCurrent();
 +
    int64_t service_worker_version_id() const {
      return service_worker_version_id_;
    }
-
+ 
    blink::WebServiceWorkerContextProxy* proxy() const { return proxy_; }
 +  base::ProcessMetrics* process_metrics() const { return process_metrics_.get(); }
 +
 +  void MarkServiceWorkerPreloadRealmInitialized();
-
-   // mojom::ElectronRenderer
-   void Message(bool internal,
-@@ -58,6 +68,8 @@ class ServiceWorkerData : public mojom::ElectronRenderer {
+ 
+   // The startup data the browser pushed for this renderer process at
+   // RenderProcessReady(), captured once when the preload realm is created
+@@ -69,6 +79,8 @@ class ServiceWorkerData : public mojom::ElectronRenderer {
    // The v8 context the bindings are accessible to.
    raw_ptr<v8::Isolate> isolate_;
    v8::Global<v8::Context> v8_context_;
 +  std::unique_ptr<base::ProcessMetrics> process_metrics_;
 +  bool service_worker_preload_realm_initialized_ = false;
-
+ 
    mojo::AssociatedReceiver<mojom::ElectronRenderer> receiver_{this};
-
+ 
 diff --git a/spec/api-service-worker-main-spec.ts b/spec/api-service-worker-main-spec.ts
-index 9463ca4523..61a4ab790f 100644
+index 0870c787e7..c498265a2e 100644
 --- a/spec/api-service-worker-main-spec.ts
 +++ b/spec/api-service-worker-main-spec.ts
 @@ -65,10 +65,21 @@ describe('ServiceWorkerMain module', () => {
      ses.getPreloadScripts().map(({ id }) => ses.unregisterPreloadScript(id));
    });
-
+ 
 -  function registerPreload(scriptName: string) {
 +  type ServiceWorkerPreloadTarget = 'shadow-realm-global-scope' | 'service-worker-global-scope' | 'both';
 +  type ServiceWorkerPreloadGlobalProbe = {
@@ -816,10 +988,10 @@ index 9463ca4523..61a4ab790f 100644
      });
      expect(id).to.be.a('string');
    }
-@@ -125,6 +136,25 @@ describe('ServiceWorkerMain module', () => {
-     });
-   };
-
+@@ -110,6 +121,25 @@ describe('ServiceWorkerMain module', () => {
+     return serviceWorker!;
+   }
+ 
 +  const collectPreloadGlobalProbes = async (target?: ServiceWorkerPreloadTarget) => {
 +    const expectedProbeCount = target === 'both' ? 2 : 1;
 +    const probes: ServiceWorkerPreloadGlobalProbe[] = [];
@@ -839,13 +1011,13 @@ index 9463ca4523..61a4ab790f 100644
 +    return probes;
 +  };
 +
-   describe('serviceWorkers.getWorkerFromVersionID', () => {
-     it('returns undefined for non-live service worker', () => {
-       expect(serviceWorkers.getWorkerFromVersionID(-1)).to.be.undefined();
-@@ -415,6 +445,64 @@ describe('ServiceWorkerMain module', () => {
+   /** Runs a test using the framework in preload-tests.js */
+   const runTest = async (serviceWorker: Electron.ServiceWorkerMain, rpc: { name: string; args: any[] }) => {
+     const uuid = crypto.randomUUID();
+@@ -442,6 +472,64 @@ describe('ServiceWorkerMain module', () => {
      });
    });
-
+ 
 +  describe('preload realm', () => {
 +    it('runs service worker preloads in ShadowRealmGlobalScope by default', async () => {
 +      const [probe] = await collectPreloadGlobalProbes();
@@ -908,13 +1080,13 @@ index 9463ca4523..61a4ab790f 100644
      const extensionFixtures = path.join(fixtures, 'extensions');
      const testExtensionFixture = path.join(extensionFixtures, 'mv3-service-worker');
 diff --git a/spec/api-session-spec.ts b/spec/api-session-spec.ts
-index e900ba2bad..18e72e9ba4 100644
+index 63052d826b..8a073fbc3c 100644
 --- a/spec/api-session-spec.ts
 +++ b/spec/api-session-spec.ts
-@@ -2893,6 +2893,30 @@ describe('session module', () => {
+@@ -2675,6 +2675,30 @@ describe('session module', () => {
        }).to.throw('Preload script runInInitialEmptyDocument is only supported for frame type');
      });
-
+ 
 +    it('rejects target for non-service-worker preload scripts', () => {
 +      const ses = session.fromPartition(`worker-preload-target-${crypto.randomUUID()}`);
 +      expect(() => {
@@ -975,10 +1147,10 @@ index 0000000000..b284124249
 +  processContextIsolated: process.contextIsolated
 +});
 diff --git a/spec/ts-smoke/electron/main.ts b/spec/ts-smoke/electron/main.ts
-index 89eed06626..adb675e2e3 100644
+index 02e299d7dd..d8e89ca75a 100644
 --- a/spec/ts-smoke/electron/main.ts
 +++ b/spec/ts-smoke/electron/main.ts
-@@ -1270,8 +1270,11 @@ session.defaultSession.registerPreloadScript({
+@@ -1236,8 +1236,11 @@ session.defaultSession.registerPreloadScript({
    filePath: '/tmp/preload.js'
  });
  session.defaultSession.registerPreloadScript({ type: 'dedicated-worker', filePath: '/tmp/worker-preload.js' });
@@ -990,7 +1162,7 @@ index 89eed06626..adb675e2e3 100644
  session.defaultSession.registerPreloadScript({
    type: 'service-worker',
    // @ts-expect-error runInInitialEmptyDocument is supported only for frame preload scripts
-@@ -1289,6 +1292,8 @@ const preloadScript = session.defaultSession.getPreloadScripts()[0];
+@@ -1255,6 +1258,8 @@ const preloadScript = session.defaultSession.getPreloadScripts()[0];
  if (preloadScript.type === 'frame') {
    console.log(preloadScript.scope);
    console.log(preloadScript.runInInitialEmptyDocument);
@@ -999,3 +1171,6 @@ index 89eed06626..adb675e2e3 100644
  } else {
    // @ts-expect-error worker preload script results do not have a frame scope
    console.log(preloadScript.scope);
+-- 
+2.53.0
+

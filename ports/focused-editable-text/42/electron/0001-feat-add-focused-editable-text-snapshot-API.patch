@@ -1,4 +1,4 @@
-From 232b76c841903280be55362c900dbe25af55803c Mon Sep 17 00:00:00 2001
+From 24b9a650e155c8b2827cdf9b3ced46be15038ad8 Mon Sep 17 00:00:00 2001
 From: Codex <codex@localhost>
 Date: Wed, 3 Jun 2026 19:41:41 +0900
 Subject: [PATCH 1/4] feat: add focused editable text snapshot API
@@ -103,10 +103,10 @@ index 0000000000..2ccb89cdd8
 +`selection.start` and `selection.end` are UTF-16 offsets into `text`, so
 +`text.slice(selection.start, selection.end)` returns the selected text.
 diff --git a/docs/api/web-contents.md b/docs/api/web-contents.md
-index 8defe9c689..a1bfd0ac8c 100644
+index 3ea4901d9a..c4d94a658c 100644
 --- a/docs/api/web-contents.md
 +++ b/docs/api/web-contents.md
-@@ -1250,6 +1250,25 @@ Returns [`TextCaretInfo | null`](structures/text-caret-info.md) - The current
+@@ -1204,6 +1204,25 @@ Returns [`TextCaretInfo | null`](structures/text-caret-info.md) - The current
  text caret state for the focused editable element, or `null` if no editable
  caret information is available.
  
@@ -133,10 +133,10 @@ index 8defe9c689..a1bfd0ac8c 100644
  
  Returns `boolean` - Whether web page is still loading resources.
 diff --git a/shell/browser/api/electron_api_web_contents.cc b/shell/browser/api/electron_api_web_contents.cc
-index 566c69b194..c4b6e75c91 100644
+index 00260b847f..2b383e8e97 100644
 --- a/shell/browser/api/electron_api_web_contents.cc
 +++ b/shell/browser/api/electron_api_web_contents.cc
-@@ -2108,6 +2108,481 @@ v8::Local<v8::Value> CreateTextCaretInfo(
+@@ -2281,6 +2281,481 @@ v8::Local<v8::Value> CreateTextCaretInfo(
    return details.GetHandle();
  }
  
@@ -618,7 +618,7 @@ index 566c69b194..c4b6e75c91 100644
  class TextCaretFrameObserver : public base::SupportsUserData::Data,
                                 public content::WebContentsObserver,
                                 public content::TextInputManager::Observer {
-@@ -5554,6 +6029,63 @@ v8::Local<v8::Value> WebContents::GetTextCaretInfo(v8::Isolate* isolate) {
+@@ -5727,6 +6202,63 @@ v8::Local<v8::Value> WebContents::GetTextCaretInfo(v8::Isolate* isolate) {
                               active_view, std::nullopt);
  }
  
@@ -682,7 +682,7 @@ index 566c69b194..c4b6e75c91 100644
  void WebContents::SendInputEvent(v8::Isolate* isolate,
                                   v8::Local<v8::Value> input_event) {
    content::RenderWidgetHostView* view =
-@@ -6954,6 +7486,8 @@ void WebContents::FillObjectTemplate(v8::Isolate* isolate,
+@@ -7099,6 +7631,8 @@ void WebContents::FillObjectTemplate(v8::Isolate* isolate,
        .SetMethod("focus", &WebContents::Focus)
        .SetMethod("isFocused", &WebContents::IsFocused)
        .SetMethod("getTextCaretInfo", &WebContents::GetTextCaretInfo)
@@ -692,10 +692,10 @@ index 566c69b194..c4b6e75c91 100644
        .SetMethod("dispatchInputEvent", &WebContents::DispatchInputEvent)
        .SetMethod("beginFrameSubscription", &WebContents::BeginFrameSubscription)
 diff --git a/shell/browser/api/electron_api_web_contents.h b/shell/browser/api/electron_api_web_contents.h
-index 52075b74c2..7633859022 100644
+index 71a68eb621..b2a0c1a2d4 100644
 --- a/shell/browser/api/electron_api_web_contents.h
 +++ b/shell/browser/api/electron_api_web_contents.h
-@@ -309,6 +309,7 @@ class WebContents final : public ExclusiveAccessContext,
+@@ -306,6 +306,7 @@ class WebContents final : public ExclusiveAccessContext,
    void Focus();
    bool IsFocused() const;
    v8::Local<v8::Value> GetTextCaretInfo(v8::Isolate* isolate);
@@ -704,10 +704,10 @@ index 52075b74c2..7633859022 100644
    // Send WebInputEvent to the page.
    void SendInputEvent(v8::Isolate* isolate, v8::Local<v8::Value> input_event);
 diff --git a/spec/api-web-contents-spec.ts b/spec/api-web-contents-spec.ts
-index de30110e02..e9aedce770 100644
+index 774e2d6c48..ebc9e94d81 100644
 --- a/spec/api-web-contents-spec.ts
 +++ b/spec/api-web-contents-spec.ts
-@@ -1380,6 +1380,198 @@ describe('webContents module', () => {
+@@ -1326,6 +1326,198 @@ describe('webContents module', () => {
      });
    });
  

@@ -1,7 +1,7 @@
-From c95ae2a2c4e0cb186f74184cc691210b217f4103 Mon Sep 17 00:00:00 2001
+From 842cd694c1d6b64fe9c5c1cf25c2df969f95a3c5 Mon Sep 17 00:00:00 2001
 From: Codex <codex@localhost>
 Date: Tue, 19 May 2026 19:12:14 +0900
-Subject: feat: add session websocket handler
+Subject: [PATCH 1/2] feat: add session websocket handler
 
 ---
  docs/api/session.md                           |   4 +
@@ -36,15 +36,15 @@ index 7a9e868bea..79d99b0337 100644
 --- a/docs/api/session.md
 +++ b/docs/api/session.md
 @@ -1761,6 +1761,10 @@ shared workers in this session.
-
+ 
  A [`WebRequest`](web-request.md) object for this session.
-
+ 
 +#### `ses.webSocket` _Readonly_
 +
 +A [`WebSocket`](web-socket.md) object for this session.
 +
  #### `ses.protocol` _Readonly_
-
+ 
  A [`Protocol`](protocol.md) object for this session.
 diff --git a/docs/api/structures/web-socket-accept-options.md b/docs/api/structures/web-socket-accept-options.md
 new file mode 100644
@@ -249,7 +249,7 @@ index 0000000000..3725eb561d
 +[`socket.send(message)`](#socketsendmessage) and not yet written to the
 +renderer.
 diff --git a/filenames.gni b/filenames.gni
-index af90176840..850978e755 100644
+index a8e2c68a68..a41dd6a2b6 100644
 --- a/filenames.gni
 +++ b/filenames.gni
 @@ -337,6 +337,10 @@ filenames = {
@@ -264,10 +264,10 @@ index af90176840..850978e755 100644
      "shell/browser/api/electron_api_worker_util.cc",
      "shell/browser/api/electron_api_worker_util.h",
 diff --git a/shell/browser/api/electron_api_session.cc b/shell/browser/api/electron_api_session.cc
-index 2676bc162c..7b5c14cf76 100644
+index cbc03c612d..d018d72a51 100644
 --- a/shell/browser/api/electron_api_session.cc
 +++ b/shell/browser/api/electron_api_session.cc
-@@ -70,6 +70,7 @@
+@@ -71,6 +71,7 @@
  #include "shell/browser/api/electron_api_shared_worker_context.h"
  #include "shell/browser/api/electron_api_web_frame_main.h"
  #include "shell/browser/api/electron_api_web_request.h"
@@ -275,10 +275,10 @@ index 2676bc162c..7b5c14cf76 100644
  #include "shell/browser/browser.h"
  #include "shell/browser/electron_browser_client.h"
  #include "shell/browser/electron_browser_context.h"
-@@ -1444,6 +1445,12 @@ WebRequest* Session::WebRequest(v8::Isolate* isolate) {
+@@ -1449,6 +1450,12 @@ WebRequest* Session::WebRequest(v8::Isolate* isolate) {
    return web_request_;
  }
-
+ 
 +WebSocket* Session::WebSocket(v8::Isolate* isolate) {
 +  if (!web_socket_)
 +    web_socket_ = WebSocket::Create(isolate, base::PassKey<Session>{});
@@ -288,7 +288,7 @@ index 2676bc162c..7b5c14cf76 100644
  NetLog* Session::NetLog(v8::Isolate* isolate) {
    if (!net_log_) {
      net_log_ = NetLog::Create(isolate, browser_context());
-@@ -1924,6 +1931,7 @@ void Session::FillObjectTemplate(v8::Isolate* isolate,
+@@ -1929,6 +1936,7 @@ void Session::FillObjectTemplate(v8::Isolate* isolate,
        .SetProperty("protocol", &Session::Protocol)
        .SetProperty("serviceWorkers", &Session::ServiceWorkerContext)
        .SetProperty("sharedWorkers", &Session::SharedWorkerContext)
@@ -296,7 +296,7 @@ index 2676bc162c..7b5c14cf76 100644
        .SetProperty("webRequest", &Session::WebRequest)
        .SetProperty("storagePath", &Session::GetPath)
        .Build();
-@@ -1937,6 +1945,7 @@ void Session::Trace(cppgc::Visitor* visitor) const {
+@@ -1942,6 +1950,7 @@ void Session::Trace(cppgc::Visitor* visitor) const {
    visitor->Trace(net_log_);
    visitor->Trace(service_worker_context_);
    visitor->Trace(shared_worker_context_);
@@ -314,7 +314,7 @@ index 022ccaa0c6..2b9d2f2003 100644
  class SharedWorkerContext;
 +class WebSocket;
  class WebRequest;
-
+ 
  class Session final : public gin::Wrappable<Session>,
 @@ -175,6 +176,7 @@ class Session final : public gin::Wrappable<Session>,
    api::Protocol* Protocol();
@@ -330,7 +330,7 @@ index 022ccaa0c6..2b9d2f2003 100644
    cppgc::Member<api::SharedWorkerContext> shared_worker_context_;
 +  cppgc::Member<api::WebSocket> web_socket_;
    cppgc::Member<api::WebRequest> web_request_;
-
+ 
    raw_ptr<v8::Isolate> isolate_;
 diff --git a/shell/browser/api/electron_api_web_socket.cc b/shell/browser/api/electron_api_web_socket.cc
 new file mode 100644
@@ -338,7 +338,7 @@ index 0000000000..a4b6490e49
 --- /dev/null
 +++ b/shell/browser/api/electron_api_web_socket.cc
 @@ -0,0 +1,199 @@
-+// Copyright (c) 2026 Electron Port Workspace contributors
++// Copyright (c) 2026 Electron Port Workspace contributors Co., LTD
 +// Use of this source code is governed by the MIT license that can be
 +// found in the LICENSE file.
 +
@@ -543,7 +543,7 @@ index 0000000000..9d2c21ea4a
 --- /dev/null
 +++ b/shell/browser/api/electron_api_web_socket.h
 @@ -0,0 +1,118 @@
-+// Copyright (c) 2026 Electron Port Workspace contributors
++// Copyright (c) 2026 Electron Port Workspace contributors Co., LTD
 +// Use of this source code is governed by the MIT license that can be
 +// found in the LICENSE file.
 +
@@ -667,7 +667,7 @@ index 0000000000..2c5e6b4954
 --- /dev/null
 +++ b/shell/browser/api/electron_api_web_socket_main.cc
 @@ -0,0 +1,759 @@
-+// Copyright (c) 2026 Electron Port Workspace contributors
++// Copyright (c) 2026 Electron Port Workspace contributors Co., LTD
 +// Use of this source code is governed by the MIT license that can be
 +// found in the LICENSE file.
 +
@@ -1432,7 +1432,7 @@ index 0000000000..4466f3f47b
 --- /dev/null
 +++ b/shell/browser/api/electron_api_web_socket_main.h
 @@ -0,0 +1,199 @@
-+// Copyright (c) 2026 Electron Port Workspace contributors
++// Copyright (c) 2026 Electron Port Workspace contributors Co., LTD
 +// Use of this source code is governed by the MIT license that can be
 +// found in the LICENSE file.
 +
@@ -1632,7 +1632,7 @@ index 0000000000..4466f3f47b
 +
 +#endif  // ELECTRON_SHELL_BROWSER_API_ELECTRON_API_WEB_SOCKET_MAIN_H_
 diff --git a/shell/browser/electron_browser_client.cc b/shell/browser/electron_browser_client.cc
-index f6a63460a7..234888d505 100644
+index 2c2a78bc9b..cbba09f966 100644
 --- a/shell/browser/electron_browser_client.cc
 +++ b/shell/browser/electron_browser_client.cc
 @@ -84,6 +84,7 @@
@@ -1643,9 +1643,9 @@ index f6a63460a7..234888d505 100644
  #include "shell/browser/badging/badge_manager.h"
  #include "shell/browser/bluetooth/electron_bluetooth_delegate.h"
  #include "shell/browser/child_web_contents_tracker.h"
-@@ -1449,13 +1450,20 @@ bool ElectronBrowserClient::ShouldTreatURLSchemeAsFirstPartyWhenTopLevel(
+@@ -1514,13 +1515,20 @@ bool ElectronBrowserClient::ShouldTreatURLSchemeAsFirstPartyWhenTopLevel(
  }
-
+ 
  bool ElectronBrowserClient::WillInterceptWebSocket(
 -    content::RenderFrameHost* frame) {
 -  if (!frame)
@@ -1656,7 +1656,7 @@ index f6a63460a7..234888d505 100644
 +            : creator_info.browser_context;
 +  if (!browser_context)
      return false;
-
+ 
    v8::Isolate* isolate = JavascriptEnvironment::GetIsolate();
    v8::HandleScope scope(isolate);
 -  auto* browser_context = frame->GetProcess()->GetBrowserContext();
@@ -1665,10 +1665,10 @@ index f6a63460a7..234888d505 100644
 +    return true;
 +
    auto* web_request = api::WebRequest::FromOrCreate(isolate, browser_context);
-
+ 
    // NOTE: Some unit test environments do not initialize
-@@ -1478,6 +1486,8 @@ bool ElectronBrowserClient::WillInterceptWebSocket(
-
+@@ -1543,6 +1551,8 @@ bool ElectronBrowserClient::WillInterceptWebSocket(
+ 
  void ElectronBrowserClient::CreateWebSocket(
      content::RenderFrameHost* frame,
 +    const content::ContentBrowserClient::WebSocketCreatorInfo& creator_info,
@@ -1676,7 +1676,7 @@ index f6a63460a7..234888d505 100644
      WebSocketFactory factory,
      const GURL& url,
      const net::SiteForCookies& site_for_cookies,
-@@ -1486,13 +1496,57 @@ void ElectronBrowserClient::CreateWebSocket(
+@@ -1551,13 +1561,57 @@ void ElectronBrowserClient::CreateWebSocket(
          handshake_client) {
    v8::Isolate* isolate = JavascriptEnvironment::GetIsolate();
    v8::HandleScope scope(isolate);
@@ -1726,18 +1726,18 @@ index f6a63460a7..234888d505 100644
 +            : creator_info.browser_context;
 +  if (!browser_context)
 +    return;
-
+ 
    auto* web_request = api::WebRequest::FromOrCreate(isolate, browser_context);
    DCHECK(web_request);
-
+ 
  #if BUILDFLAG(ENABLE_ELECTRON_EXTENSIONS)
 -  if (!web_request->HasListener()) {
 +  if (frame && !web_request->HasListener()) {
      auto* web_request_api = extensions::BrowserContextKeyedAPIFactory<
          extensions::WebRequestAPI>::Get(browser_context);
-
-@@ -1507,8 +1561,11 @@ void ElectronBrowserClient::CreateWebSocket(
-
+ 
+@@ -1572,8 +1626,11 @@ void ElectronBrowserClient::CreateWebSocket(
+ 
    ProxyingWebSocket::StartProxying(
        web_request, std::move(factory), url, site_for_cookies, user_agent,
 -      std::move(handshake_client), true, frame->GetProcess()->GetDeprecatedID(),
@@ -1749,12 +1749,12 @@ index f6a63460a7..234888d505 100644
 +      browser_context,
        &next_id_);
  }
-
+ 
 diff --git a/shell/browser/electron_browser_client.h b/shell/browser/electron_browser_client.h
-index 002f355f2b..5721430dcc 100644
+index e93f8a5acc..636ea6878a 100644
 --- a/shell/browser/electron_browser_client.h
 +++ b/shell/browser/electron_browser_client.h
-@@ -249,13 +249,18 @@ class ElectronBrowserClient : public content::ContentBrowserClient,
+@@ -255,13 +255,18 @@ class ElectronBrowserClient : public content::ContentBrowserClient,
        NonNetworkURLLoaderFactoryMap* factories) override;
    void CreateWebSocket(
        content::RenderFrameHost* frame,
@@ -1774,9 +1774,9 @@ index 002f355f2b..5721430dcc 100644
    void WillCreateURLLoaderFactory(
        content::BrowserContext* browser_context,
        content::RenderFrameHost* frame,
-@@ -356,6 +361,16 @@ class ElectronBrowserClient : public content::ContentBrowserClient,
+@@ -362,6 +367,16 @@ class ElectronBrowserClient : public content::ContentBrowserClient,
        const content::ChildProcessTerminationInfo& info) override;
-
+ 
   private:
 +  void ContinueWebSocketConnection(
 +      content::GlobalRenderFrameHostId frame_id,
@@ -1792,7 +1792,7 @@ index 002f355f2b..5721430dcc 100644
        content::BrowserContext* browser_context,
        const GURL& url,
 diff --git a/spec/chromium-spec.ts b/spec/chromium-spec.ts
-index 84efec6091..975d4e26f8 100644
+index fba3052d57..b316d84014 100644
 --- a/spec/chromium-spec.ts
 +++ b/spec/chromium-spec.ts
 @@ -3395,6 +3395,87 @@ describe('chromium features', () => {
@@ -1881,5 +1881,8 @@ index 84efec6091..975d4e26f8 100644
 +      });
 +    });
    });
-
+ 
    describe('fetch', () => {
+-- 
+2.53.0
+

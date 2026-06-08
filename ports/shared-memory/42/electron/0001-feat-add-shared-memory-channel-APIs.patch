@@ -1,7 +1,7 @@
-From f5cd74174c44e91dc1d7879934548d7d793282bc Mon Sep 17 00:00:00 2001
+From 12f3a496905d3fbdc7e9ae4d1efae25f67d79731 Mon Sep 17 00:00:00 2001
 From: Electron Scripts <scripts@electron>
 Date: Thu, 28 May 2026 22:00:38 +0900
-Subject: feat: add shared memory channel APIs
+Subject: [PATCH] feat: add shared memory channel APIs
 
 ---
  docs/api/shared-memory.md                     |  446 +++
@@ -47,14 +47,14 @@ Subject: feat: add shared memory channel APIs
  .../renderer/api/electron_api_ipc_renderer.cc |  128 +-
  shell/renderer/electron_api_service_impl.cc   |   11 +
  shell/renderer/electron_api_service_impl.h    |    7 +
- shell/renderer/service_worker_data.cc         |   18 +-
- shell/renderer/service_worker_data.h          |   21 +
+ shell/renderer/service_worker_data.cc         |   17 +-
+ shell/renderer/service_worker_data.h          |    7 +
  shell/renderer/worker_data.cc                 |   11 +
  shell/renderer/worker_data.h                  |   10 +-
  spec/api-shared-memory-spec.ts                | 2355 +++++++++++++
  spec/ts-smoke/electron/main.ts                |   76 +
- typings/internal-ambient.d.ts                 |  175 +-
- 50 files changed, 8062 insertions(+), 109 deletions(-)
+ typings/internal-ambient.d.ts                 |   73 +
+ 50 files changed, 7981 insertions(+), 73 deletions(-)
  create mode 100644 docs/api/shared-memory.md
  create mode 100644 docs/api/structures/create-shared-memory-pool-options.md
  create mode 100644 docs/api/structures/shared-allocator-options.md
@@ -762,7 +762,7 @@ index 0000000000..71e8d5e34e
 +* `slotSize` number - Maximum payload size in bytes for this class.
 +* `slotCount` number - Number of reusable slots in this class.
 diff --git a/filenames.auto.gni b/filenames.auto.gni
-index 2696858633..439388fc9a 100644
+index 79b001a358..19f94ed895 100644
 --- a/filenames.auto.gni
 +++ b/filenames.auto.gni
 @@ -60,6 +60,7 @@ auto_filenames = {
@@ -799,7 +799,7 @@ index 2696858633..439388fc9a 100644
      "docs/api/structures/shared-texture-import-texture-info.md",
      "docs/api/structures/shared-texture-imported-subtle.md",
 @@ -214,6 +226,7 @@ auto_filenames = {
-
+ 
    sandbox_bundle_deps = [
      "lib/common/api/native-image.ts",
 +    "lib/common/api/shared-memory.ts",
@@ -831,7 +831,7 @@ index 2696858633..439388fc9a 100644
      "lib/common/define-properties.ts",
      "lib/common/deprecate.ts",
 @@ -456,6 +472,7 @@ auto_filenames = {
-
+ 
    preload_realm_bundle_deps = [
      "lib/common/api/native-image.ts",
 +    "lib/common/api/shared-memory.ts",
@@ -839,7 +839,7 @@ index 2696858633..439388fc9a 100644
      "lib/common/ipc-messages.ts",
      "lib/common/webpack-globals-provider.ts",
 diff --git a/filenames.gni b/filenames.gni
-index 93aee76fda..f06f9e757e 100644
+index a41dd6a2b6..6b12f500b9 100644
 --- a/filenames.gni
 +++ b/filenames.gni
 @@ -316,6 +316,7 @@ filenames = {
@@ -850,7 +850,7 @@ index 93aee76fda..f06f9e757e 100644
      "shell/browser/api/electron_api_shared_worker_context.cc",
      "shell/browser/api/electron_api_shared_worker_context.h",
      "shell/browser/api/electron_api_shared_worker_main.cc",
-@@ -602,6 +603,8 @@ filenames = {
+@@ -606,6 +607,8 @@ filenames = {
      "shell/common/api/electron_api_native_image.cc",
      "shell/common/api/electron_api_native_image.h",
      "shell/common/api/electron_api_net.cc",
@@ -866,12 +866,12 @@ index c3dc958be5..85257fd077 100644
 @@ -1,4 +1,5 @@
  import { IpcMainImpl } from '@electron/internal/browser/ipc-main-impl';
 +import { _wrapForIpc } from '@electron/internal/common/api/shared-memory';
-
+ 
  const { DedicatedWorkerMain } = process._linkedBinding('electron_browser_dedicated_worker_main');
-
+ 
 @@ -19,7 +20,7 @@ const send = function (this: any, channel: string, ...args: any[]) {
    }
-
+ 
    try {
 -    return this._send(false /* internal */, channel, args);
 +    return this._send(false /* internal */, channel, _wrapForIpc(args));
@@ -885,12 +885,12 @@ index 98eddae032..2af13728db 100644
 @@ -1,4 +1,5 @@
  import { IpcMainImpl } from '@electron/internal/browser/ipc-main-impl';
 +import { _wrapForIpc } from '@electron/internal/common/api/shared-memory';
-
+ 
  const { ServiceWorkerMain } = process._linkedBinding('electron_browser_service_worker_main');
-
+ 
 @@ -16,7 +17,7 @@ ServiceWorkerMain.prototype.send = function (channel, ...args) {
    }
-
+ 
    try {
 -    return this._send(false /* internal */, channel, args);
 +    return this._send(false /* internal */, channel, _wrapForIpc(args));
@@ -907,11 +907,11 @@ index 2f4bd3739e..e3e0f11563 100644
  import { IpcMainImpl } from '@electron/internal/browser/ipc-main-impl';
 +import { _wrapForIpc } from '@electron/internal/common/api/shared-memory';
  import * as deprecate from '@electron/internal/common/deprecate';
-
+ 
  import { net } from 'electron/main';
 @@ -32,7 +33,7 @@ const sendWorkerMessage = function (this: any, channel: string, ...args: any[])
    }
-
+ 
    try {
 -    return this._send(false /* internal */, channel, args);
 +    return this._send(false /* internal */, channel, _wrapForIpc(args));
@@ -925,12 +925,12 @@ index 6132532e7a..8ca54a4b5c 100644
 @@ -1,4 +1,5 @@
  import { IpcMainImpl } from '@electron/internal/browser/ipc-main-impl';
 +import { _wrapForIpc } from '@electron/internal/common/api/shared-memory';
-
+ 
  const { SharedWorkerMain } = process._linkedBinding('electron_browser_shared_worker_main');
-
+ 
 @@ -19,7 +20,7 @@ const send = function (this: any, channel: string, ...args: any[]) {
    }
-
+ 
    try {
 -    return this._send(false /* internal */, channel, args);
 +    return this._send(false /* internal */, channel, _wrapForIpc(args));
@@ -948,10 +948,10 @@ index f6b3a18642..20908e0d9b 100644
 +import { _wrapForIpc } from '@electron/internal/common/api/shared-memory';
  import * as deprecate from '@electron/internal/common/deprecate';
  import { IPC_MESSAGES } from '@electron/internal/common/ipc-messages';
-
+ 
 @@ -147,7 +148,7 @@ const sendWorkerMessage = function (this: any, channel: string, ...args: any[])
    }
-
+ 
    try {
 -    return this._send(false /* internal */, channel, args);
 +    return this._send(false /* internal */, channel, _wrapForIpc(args));
@@ -968,12 +968,12 @@ index f6b3a18642..20908e0d9b 100644
 +    callback?: (success: boolean, failureReason?: string) => void
 +  ) => void;
  }
-
+ 
  interface PrintRequestHandlerJob {
 @@ -372,7 +376,10 @@ interface PrintRequestHandlerRequest {
    handle: (handler: (job: PrintRequestHandlerJob) => void | Promise<void>) => void;
  }
-
+ 
 -const createPrintRequestHandlerJob = function (contents: Electron.WebContents, nativeJob: NativePrintRequestHandlerJob): PrintRequestHandlerJob {
 +const createPrintRequestHandlerJob = function (
 +  contents: Electron.WebContents,
@@ -990,12 +990,12 @@ index 1cc8203128..240566c48f 100644
  import { IpcMainImpl } from '@electron/internal/browser/ipc-main-impl';
  import { MessagePortMain } from '@electron/internal/browser/message-port-main';
 +import { _wrapForIpc } from '@electron/internal/common/api/shared-memory';
-
+ 
  const { WebFrameMain, fromId, fromFrameToken } = process._linkedBinding('electron_browser_web_frame_main');
-
+ 
 @@ -17,7 +18,7 @@ WebFrameMain.prototype.send = function (channel, ...args) {
    }
-
+ 
    try {
 -    return this._send(false /* internal */, channel, args);
 +    return this._send(false /* internal */, channel, _wrapForIpc(args));
@@ -1004,7 +1004,7 @@ index 1cc8203128..240566c48f 100644
    }
 @@ -29,7 +30,7 @@ WebFrameMain.prototype._sendInternal = function (channel, ...args) {
    }
-
+ 
    try {
 -    return this._send(true /* internal */, channel, args);
 +    return this._send(true /* internal */, channel, _wrapForIpc(args));
@@ -1030,12 +1030,12 @@ index 669b06a88a..0ac3026695 100644
 +  _unwrapFromIpc,
 +  _wrapForIpc
 +} from '@electron/internal/common/api/shared-memory';
-
+ 
  import type { ServiceWorkerMain } from 'electron/main';
  import { ipcMain } from 'electron/main';
 @@ -26,12 +36,8 @@ type WorkerIpcMainInvokeEvent =
    | Electron.IpcMainSharedWorkerInvokeEvent;
-
+ 
  type IpcEmitter = IpcMainImpl | undefined;
 -type IpcEvent =
 -  | Electron.IpcMainEvent
@@ -1050,7 +1050,7 @@ index 669b06a88a..0ac3026695 100644
    | Electron.IpcMainDedicatedWorker
 @@ -62,7 +68,7 @@ const sendWorkerMessage = function (this: any, channel: string, ...args: any[])
    }
-
+ 
    try {
 -    return this._send(false /* internal */, channel, args);
 +    return this._send(false /* internal */, channel, _wrapForIpc(args));
@@ -1068,7 +1068,7 @@ index 669b06a88a..0ac3026695 100644
      },
 @@ -142,9 +148,7 @@ const cachedDedicatedWorkerIpcEmitters: IpcEmitter[] = [
  ];
-
+ 
  // Get list of relevant IPC emitters for dispatch.
 -const getIpcEmittersForFrameEvent = (
 -  event: Electron.IpcMainEvent | Electron.IpcMainInvokeEvent
@@ -1088,7 +1088,7 @@ index 669b06a88a..0ac3026695 100644
 -  ];
 +  return [asIpcEmitter(getServiceWorkerFromEvent(event)?.ipc), asIpcEmitter(event.session.ipc), ipcMainEmitter];
  };
-
+ 
  const getIpcEmittersForSharedWorkerEvent = (
    event: Electron.IpcMainSharedWorkerEvent | Electron.IpcMainSharedWorkerInvokeEvent
  ): IpcEmitter[] => {
@@ -1099,12 +1099,12 @@ index 669b06a88a..0ac3026695 100644
 -  ];
 +  return [asIpcEmitter(decorateWorkerMain(event.sharedWorker)?.ipc), asIpcEmitter(event.session.ipc), ipcMainEmitter];
  };
-
+ 
  const getIpcEmittersForEvent = (event: IpcEvent | IpcInvokeEvent): IpcEmitter[] => {
 @@ -197,12 +193,7 @@ const getIpcEmittersForEvent = (event: IpcEvent | IpcInvokeEvent): IpcEmitter[]
    return getIpcEmittersForSharedWorkerEvent(event);
  };
-
+ 
 -const emitToIpcEmitters = (
 -  ipcEmitters: IpcEmitter[],
 -  channel: string,
@@ -1120,11 +1120,11 @@ index 669b06a88a..0ac3026695 100644
      function (event: IpcEvent, channel: string, args: any[]) {
        const internal = v8Util.getHiddenValue<boolean>(event, 'internal');
 +      args = _unwrapFromIpc(args);
-
+ 
        if (internal) {
          ipcMainInternal.emit(channel, event, ...args);
 @@ -241,14 +233,11 @@ export function addIpcDispatchListeners(api: NodeJS.EventEmitter) {
-
+ 
    api.on(
      '-ipc-invoke' as any,
 -    async function (
@@ -1135,7 +1135,7 @@ index 669b06a88a..0ac3026695 100644
 +    async function (event: IpcInvokeEvent, channel: string, args: any[]) {
        const internal = v8Util.getHiddenValue<boolean>(event, 'internal');
 +      args = _unwrapFromIpc(args);
-
+ 
 -      const replyWithResult = (result: any) => event._replyChannel.sendReply({ result });
 +      const replyWithResult = (result: any) => event._replyChannel.sendReply({ result: _wrapForIpc(result) });
        const replyWithError = (error: Error) => {
@@ -1152,7 +1152,7 @@ index 669b06a88a..0ac3026695 100644
 @@ -318,20 +308,57 @@ export function addIpcDispatchListeners(api: NodeJS.EventEmitter) {
      } as any
    );
-
+ 
 +  api.on(
 +    '-ipc-shared-memory-channel-message' as any,
 +    function (event: IpcEvent, channelId: number, payloadId: number, byteLength: number) {
@@ -1199,7 +1199,7 @@ index 669b06a88a..0ac3026695 100644
 -    event.sender.emit('-ipc-message-host', event, channel, args);
 +    event.sender.emit('-ipc-message-host', event, channel, _unwrapFromIpc(args));
    });
-
+ 
    api.on(
      '-ipc-ports' as any,
 -    function (
@@ -4154,26 +4154,26 @@ index 4d107734f5..c8e995ed4b 100644
 @@ -1,3 +1,4 @@
 +import { _unwrapFromIpc, _wrapForIpc } from '@electron/internal/common/api/shared-memory';
  import { getIPCRenderer } from '@electron/internal/renderer/ipc-renderer-bindings';
-
+ 
  import { EventEmitter } from 'events';
 @@ -7,23 +8,23 @@ const internal = false;
-
+ 
  class IpcRenderer extends EventEmitter implements Electron.IpcRenderer {
    send(channel: string, ...args: any[]) {
 -    return ipc.send(internal, channel, args);
 +    return ipc.send(internal, channel, _wrapForIpc(args));
    }
-
+ 
    sendSync(channel: string, ...args: any[]) {
 -    return ipc.sendSync(internal, channel, args);
 +    return _unwrapFromIpc(ipc.sendSync(internal, channel, _wrapForIpc(args)));
    }
-
+ 
    sendToHost(channel: string, ...args: any[]) {
 -    return ipc.sendToHost(channel, args);
 +    return ipc.sendToHost(channel, _wrapForIpc(args));
    }
-
+ 
    async invoke(channel: string, ...args: any[]) {
 -    const { error, result } = await ipc.invoke(internal, channel, args);
 +    const { error, result } = await ipc.invoke(internal, channel, _wrapForIpc(args));
@@ -4183,7 +4183,7 @@ index 4d107734f5..c8e995ed4b 100644
 -    return result;
 +    return _unwrapFromIpc(result);
    }
-
+ 
    postMessage(channel: string, message: any, transferables: any) {
 diff --git a/lib/renderer/ipc-native-setup.ts b/lib/renderer/ipc-native-setup.ts
 index 83a8a4ffa2..1b9f4f280e 100644
@@ -4193,20 +4193,20 @@ index 83a8a4ffa2..1b9f4f280e 100644
 +import { _unwrapFromIpc } from '@electron/internal/common/api/shared-memory';
 +
  const v8Util = process._linkedBinding('electron_common_v8_util');
-
+ 
  let ipcRendererInternal: typeof import('@electron/internal/renderer/ipc-renderer-internal').ipcRendererInternal;
  let ipcRenderer: typeof import('electron/renderer').ipcRenderer;
-
+ 
  const getIpcRendererInternal = () => {
 -  return ipcRendererInternal ??= require('@electron/internal/renderer/ipc-renderer-internal').ipcRendererInternal;
 +  return (ipcRendererInternal ??= require('@electron/internal/renderer/ipc-renderer-internal').ipcRendererInternal);
  };
-
+ 
  const getIpcRenderer = () => {
 -  return ipcRenderer ??= require('electron').ipcRenderer;
 +  return (ipcRenderer ??= require('electron').ipcRenderer);
  };
-
+ 
  // ElectronApiServiceImpl will look for the "ipcNative" hidden object when
 @@ -16,6 +18,6 @@ const getIpcRenderer = () => {
  v8Util.setHiddenValue(globalThis, 'ipcNative', {
@@ -4223,21 +4223,21 @@ index 4d3db9a97f..0d24330036 100644
 @@ -1,3 +1,4 @@
 +import { _unwrapFromIpc, _wrapForIpc } from '@electron/internal/common/api/shared-memory';
  import { getIPCRenderer } from '@electron/internal/renderer/ipc-renderer-bindings';
-
+ 
  import { EventEmitter } from 'events';
 @@ -7,19 +8,19 @@ const internal = true;
-
+ 
  class IpcRendererInternal extends EventEmitter implements ElectronInternal.IpcRendererInternal {
    send(channel: string, ...args: any[]) {
 -    return ipc.send(internal, channel, args);
 +    return ipc.send(internal, channel, _wrapForIpc(args));
    }
-
+ 
    sendSync(channel: string, ...args: any[]) {
 -    return ipc.sendSync(internal, channel, args);
 +    return _unwrapFromIpc(ipc.sendSync(internal, channel, _wrapForIpc(args)));
    }
-
+ 
    async invoke<T>(channel: string, ...args: any[]) {
 -    const { error, result } = await ipc.invoke<T>(internal, channel, args);
 +    const { error, result } = await ipc.invoke<T>(internal, channel, _wrapForIpc(args));
@@ -4248,7 +4248,7 @@ index 4d3db9a97f..0d24330036 100644
 +    return _unwrapFromIpc(result);
    }
  }
-
+ 
 diff --git a/script/fix-preload-typescript-definitions.mjs b/script/fix-preload-typescript-definitions.mjs
 index ed044ab5dd..966341618b 100644
 --- a/script/fix-preload-typescript-definitions.mjs
@@ -4256,7 +4256,7 @@ index ed044ab5dd..966341618b 100644
 @@ -257,6 +257,233 @@ const ipcMain = `  type IpcMainMessageEvent = ((IpcMainEvent) | (IpcMainDedicate
      removeListener(channel: string, listener: (...args: any[]) => void): this;
    }`;
-
+ 
 +const sharedMemoryChannelMessage = `  interface SharedMemoryChannelMessage {
 +
 +    // Docs: https://electronjs.org/docs/api/structures/shared-memory-channel-message
@@ -4552,7 +4552,7 @@ index ed044ab5dd..966341618b 100644
 +  'type OpenChannelOptions = Electron.OpenChannelOptions;',
 +  'type OpenChannelOptions<TViews = undefined> = Electron.OpenChannelOptions<TViews>;'
 +);
-
+ 
  fs.writeFileSync(definitionsPath, definitions);
 diff --git a/shell/browser/api/electron_api_shared_memory_pool.cc b/shell/browser/api/electron_api_shared_memory_pool.cc
 new file mode 100644
@@ -4672,17 +4672,17 @@ index 29cffe472e..bd09ade709 100644
 @@ -5,7 +5,9 @@
  #ifndef ELECTRON_SHELL_BROWSER_API_IPC_DISPATCHER_H_
  #define ELECTRON_SHELL_BROWSER_API_IPC_DISPATCHER_H_
-
+ 
 +#include <cstdint>
  #include <string>
 +#include <vector>
-
+ 
  #include "base/trace_event/trace_event.h"
  #include "base/values.h"
 @@ -59,6 +61,81 @@ class IpcDispatcher {
                                  std::move(wrapped_ports));
    }
-
+ 
 +  void SharedMemoryChannelMessage(v8::Local<v8::Object> event,
 +                                  uint32_t channel_id,
 +                                  uint32_t payload_id,
@@ -4763,7 +4763,7 @@ index 29cffe472e..bd09ade709 100644
                     blink::CloneableMessage arguments) {
 @@ -76,6 +153,33 @@ class IpcDispatcher {
    }
-
+ 
   private:
 +  v8::Local<v8::Array> Uint32VectorToArray(
 +      v8::Isolate* isolate,
@@ -4802,7 +4802,7 @@ index 8304c44a0f..7df8afcb09 100644
 @@ -91,6 +91,92 @@ void ElectronApiIPCHandlerImpl::ReceivePostMessage(
    }
  }
-
+ 
 +void ElectronApiIPCHandlerImpl::SharedMemoryChannelMessage(
 +    uint32_t channel_id,
 +    uint32_t payload_id,
@@ -4899,11 +4899,11 @@ index 57135ccc1c..036e1d0248 100644
 @@ -5,7 +5,9 @@
  #ifndef ELECTRON_SHELL_BROWSER_ELECTRON_API_IPC_HANDLER_IMPL_H_
  #define ELECTRON_SHELL_BROWSER_ELECTRON_API_IPC_HANDLER_IMPL_H_
-
+ 
 +#include <cstdint>
  #include <string>
 +#include <vector>
-
+ 
  #include "base/memory/weak_ptr.h"
  #include "content/public/browser/global_routing_id.h"
 @@ -50,6 +52,17 @@ class ElectronApiIPCHandlerImpl : public mojom::ElectronApiIPC,
@@ -4931,7 +4931,7 @@ index 0827854786..4ac27330f2 100644
 @@ -119,6 +119,68 @@ void ElectronApiSWIPCHandlerImpl::ReceivePostMessage(
    }
  }
-
+ 
 +void ElectronApiSWIPCHandlerImpl::SharedMemoryChannelMessage(
 +    uint32_t channel_id,
 +    uint32_t payload_id,
@@ -5004,11 +5004,11 @@ index eca6057882..fedef026f8 100644
 @@ -5,7 +5,9 @@
  #ifndef ELECTRON_SHELL_BROWSER_ELECTRON_API_SW_IPC_HANDLER_IMPL_H_
  #define ELECTRON_SHELL_BROWSER_ELECTRON_API_SW_IPC_HANDLER_IMPL_H_
-
+ 
 +#include <cstdint>
  #include <string>
 +#include <vector>
-
+ 
  #include "base/memory/weak_ptr.h"
  #include "content/public/browser/browser_thread.h"
 @@ -60,6 +62,17 @@ class ElectronApiSWIPCHandlerImpl : public mojom::ElectronApiIPC,
@@ -5035,7 +5035,7 @@ index bc31b283ff..dec74d67c4 100644
 +++ b/shell/browser/electron_api_worker_ipc_handler_impl.cc
 @@ -106,8 +106,7 @@ ElectronApiWorkerIPCHandlerImpl::ElectronApiWorkerIPCHandlerImpl(
    DCHECK_CURRENTLY_ON(content::BrowserThread::UI);
-
+ 
    if (type_ == Type::kDedicatedWorker) {
 -    const auto& dedicated_token =
 -        token_.GetAs<blink::DedicatedWorkerToken>();
@@ -5056,7 +5056,7 @@ index bc31b283ff..dec74d67c4 100644
 @@ -284,6 +282,68 @@ void ElectronApiWorkerIPCHandlerImpl::ReceivePostMessage(
    }
  }
-
+ 
 +void ElectronApiWorkerIPCHandlerImpl::SharedMemoryChannelMessage(
 +    uint32_t channel_id,
 +    uint32_t payload_id,
@@ -5129,11 +5129,11 @@ index 8be296385b..b4b75e77b3 100644
 @@ -5,7 +5,9 @@
  #ifndef ELECTRON_SHELL_BROWSER_ELECTRON_API_WORKER_IPC_HANDLER_IMPL_H_
  #define ELECTRON_SHELL_BROWSER_ELECTRON_API_WORKER_IPC_HANDLER_IMPL_H_
-
+ 
 +#include <cstdint>
  #include <string>
 +#include <vector>
-
+ 
  #include "base/memory/raw_ptr.h"
  #include "base/memory/weak_ptr.h"
 @@ -95,6 +97,17 @@ class ElectronApiWorkerIPCHandlerImpl
@@ -5155,21 +5155,21 @@ index 8be296385b..b4b75e77b3 100644
                     const std::string& channel,
                     blink::CloneableMessage arguments,
 diff --git a/shell/common/api/api.mojom b/shell/common/api/api.mojom
-index 835d4070d9..eccabc12ce 100644
+index a4a3d88aa8..e147112d9f 100644
 --- a/shell/common/api/api.mojom
 +++ b/shell/common/api/api.mojom
 @@ -1,6 +1,7 @@
  module electron.mojom;
-
+ 
  import "mojo/public/mojom/base/string16.mojom";
 +import "mojo/public/mojom/base/shared_memory.mojom";
  import "ui/gfx/geometry/mojom/geometry.mojom";
  import "third_party/blink/public/mojom/messaging/cloneable_message.mojom";
  import "third_party/blink/public/mojom/messaging/transferable_message.mojom";
-@@ -29,6 +30,12 @@ interface ElectronRenderer {
+@@ -58,6 +59,12 @@ interface ElectronRenderer {
    ExecuteJavaScript(string code)
        => (blink.mojom.CloneableMessage result, string error);
-
+ 
 +  RegisterSharedMemoryPool(
 +      string id,
 +      mojo_base.mojom.UnsafeSharedMemoryRegion region,
@@ -5178,11 +5178,11 @@ index 835d4070d9..eccabc12ce 100644
 +
    TakeHeapSnapshot(handle file) => (bool success);
  };
-
-@@ -76,6 +83,28 @@ interface ElectronApiIPC {
-
+ 
+@@ -105,6 +112,28 @@ interface ElectronApiIPC {
+ 
    ReceivePostMessage(string channel, blink.mojom.TransferableMessage message);
-
+ 
 +  // Wakes a main-process SharedMemoryChannel receiver without serializing a
 +  // CloneableMessage payload.
 +  SharedMemoryChannelMessage(
@@ -6083,10 +6083,10 @@ index 0000000000..3228a19c41
 +
 +#endif  // ELECTRON_SHELL_COMMON_API_ELECTRON_API_V8_UTIL_H_
 diff --git a/shell/common/node_bindings.cc b/shell/common/node_bindings.cc
-index 99f5b2633f..a7d3de784e 100644
+index 57073064df..190bee16df 100644
 --- a/shell/common/node_bindings.cc
 +++ b/shell/common/node_bindings.cc
-@@ -82,6 +82,7 @@
+@@ -84,6 +84,7 @@
    V(electron_browser_service_worker_main) \
    V(electron_browser_session)             \
    V(electron_browser_screen)              \
@@ -6094,7 +6094,7 @@ index 99f5b2633f..a7d3de784e 100644
    V(electron_browser_system_preferences)  \
    V(electron_browser_base_window)         \
    V(electron_browser_tray)                \
-@@ -102,6 +103,7 @@
+@@ -104,6 +105,7 @@
    V(electron_common_environment)      \
    V(electron_common_features)         \
    V(electron_common_native_image)     \
@@ -6103,25 +6103,25 @@ index 99f5b2633f..a7d3de784e 100644
    V(electron_common_shell)            \
    V(electron_common_v8_util)
 diff --git a/shell/renderer/api/electron_api_ipc_renderer.cc b/shell/renderer/api/electron_api_ipc_renderer.cc
-index c60b4e3925..4d5bb559fe 100644
+index 1484b4058e..d056c40b5f 100644
 --- a/shell/renderer/api/electron_api_ipc_renderer.cc
 +++ b/shell/renderer/api/electron_api_ipc_renderer.cc
 @@ -2,7 +2,11 @@
  // Use of this source code is governed by the MIT license that can be
  // found in the LICENSE file.
-
+ 
 +#include <cmath>
 +#include <cstdint>
 +#include <limits>
  #include <string>
 +#include <vector>
-
+ 
  #include "content/public/renderer/render_frame.h"
  #include "content/public/renderer/render_frame_observer.h"
 @@ -149,6 +153,122 @@ class IPCBase : public gin_helper::DeprecatedWrappable<T> {
                                               std::move(transferable_message));
    }
-
+ 
 +  void SendSharedMemoryChannelMessage(gin_helper::ErrorThrower thrower,
 +                                      uint32_t channel_id,
 +                                      uint32_t payload_id,
@@ -6254,24 +6254,24 @@ index c60b4e3925..4d5bb559fe 100644
 +        .SetMethod("sendSharedMemoryChannelMessages",
 +                   &T::SendSharedMemoryChannelMessages);
    }
-
+ 
   protected:
 diff --git a/shell/renderer/electron_api_service_impl.cc b/shell/renderer/electron_api_service_impl.cc
-index 6984133e91..12c4771922 100644
+index 4a3ce7ece6..4b817aef29 100644
 --- a/shell/renderer/electron_api_service_impl.cc
 +++ b/shell/renderer/electron_api_service_impl.cc
-@@ -7,6 +7,7 @@
- #include <utility>
-
- #include "base/functional/bind.h"
+@@ -19,6 +19,7 @@
+ #include "shell/common/options_switches.h"
+ #include "shell/common/thread_restrictions.h"
+ #include "shell/common/v8_util.h"
 +#include "shell/common/api/electron_api_shared_memory.h"
+ #include "shell/renderer/electron_ipc_native.h"
  #include "shell/renderer/electron_renderer_v8_util.h"
- #include "shell/renderer/renderer_client_base.h"
- #include "third_party/blink/public/platform/scheduler/web_agent_group_scheduler.h"
-@@ -113,6 +114,16 @@ void ElectronApiServiceImpl::ExecuteJavaScript(
+ 
+@@ -179,6 +180,16 @@ void ElectronApiServiceImpl::ExecuteJavaScript(
                                              std::move(callback));
  }
-
+ 
 +void ElectronApiServiceImpl::RegisterSharedMemoryPool(
 +    const std::string& id,
 +    base::UnsafeSharedMemoryRegion region,
@@ -6286,18 +6286,18 @@ index 6984133e91..12c4771922 100644
      mojo::ScopedHandle file,
      TakeHeapSnapshotCallback callback) {
 diff --git a/shell/renderer/electron_api_service_impl.h b/shell/renderer/electron_api_service_impl.h
-index 6f36493891..8ad1b2b9b0 100644
+index f45eca8530..18b2d93c81 100644
 --- a/shell/renderer/electron_api_service_impl.h
 +++ b/shell/renderer/electron_api_service_impl.h
 @@ -7,6 +7,7 @@
-
+ 
  #include <string>
-
+ 
 +#include "base/memory/unsafe_shared_memory_region.h"
  #include "base/memory/weak_ptr.h"
  #include "content/public/renderer/render_frame.h"
  #include "content/public/renderer/render_frame_observer.h"
-@@ -39,6 +40,12 @@ class ElectronApiServiceImpl : public mojom::ElectronRenderer,
+@@ -47,6 +48,12 @@ class ElectronApiServiceImpl
                            blink::TransferableMessage message) override;
    void ExecuteJavaScript(const std::string& code,
                           ExecuteJavaScriptCallback callback) override;
@@ -6311,42 +6311,34 @@ index 6f36493891..8ad1b2b9b0 100644
                          TakeHeapSnapshotCallback callback) override;
    void ProcessPendingMessages();
 diff --git a/shell/renderer/service_worker_data.cc b/shell/renderer/service_worker_data.cc
-index 8c5fd80555..f08ab62b80 100644
+index 8fd5a9a8e0..a6477c510d 100644
 --- a/shell/renderer/service_worker_data.cc
 +++ b/shell/renderer/service_worker_data.cc
 @@ -7,6 +7,7 @@
  #include <utility>
-
+ 
  #include "base/process/process_metrics.h"
 +#include "shell/common/api/electron_api_shared_memory.h"
  #include "shell/renderer/electron_renderer_v8_util.h"
  #include "shell/renderer/preload_realm_context.h"
  #include "third_party/blink/public/common/associated_interfaces/associated_interface_registry.h"
-@@ -64,9 +65,9 @@ void ServiceWorkerData::Message(bool internal,
+@@ -77,9 +78,9 @@ void ServiceWorkerData::Message(bool internal,
      return;
    }
-
+ 
 -  renderer_util::EmitIPCMessageInContext(
 -      isolate, maybe_preload_context.ToLocalChecked(), internal, channel,
 -      arguments);
 +  renderer_util::EmitIPCMessageInContext(isolate,
 +                                         maybe_preload_context.ToLocalChecked(),
 +                                         internal, channel, arguments);
-
+ 
    if (service_worker_preload_realm_initialized_) {
      renderer_util::EmitIPCMessageInContext(isolate, context, internal, channel,
-@@ -97,7 +98,6 @@ void ServiceWorkerData::ReceivePostMessage(const std::string& channel,
-   renderer_util::EmitIPCPostMessageInContext(
-       isolate, maybe_preload_context.ToLocalChecked(), channel,
-       std::move(message));
--
- }
-
- void ServiceWorkerData::ExecuteJavaScript(const std::string& code,
-@@ -115,6 +115,16 @@ void ServiceWorkerData::ExecuteJavaScript(const std::string& code,
+@@ -127,6 +128,16 @@ void ServiceWorkerData::ExecuteJavaScript(const std::string& code,
                                              std::move(callback));
  }
-
+ 
 +void ServiceWorkerData::RegisterSharedMemoryPool(
 +    const std::string& id,
 +    base::UnsafeSharedMemoryRegion region,
@@ -6361,52 +6353,18 @@ index 8c5fd80555..f08ab62b80 100644
                                           TakeHeapSnapshotCallback callback) {
    renderer_util::TakeHeapSnapshot(isolate_, std::move(file),
 diff --git a/shell/renderer/service_worker_data.h b/shell/renderer/service_worker_data.h
-index 6c1a120892..8f0b575a71 100644
+index 23c1fd74dd..9c7828c869 100644
 --- a/shell/renderer/service_worker_data.h
 +++ b/shell/renderer/service_worker_data.h
-@@ -5,9 +5,11 @@
- #ifndef ELECTRON_SHELL_RENDERER_SERVICE_WORKER_DATA_H_
- #define ELECTRON_SHELL_RENDERER_SERVICE_WORKER_DATA_H_
-
-+#include <memory>
+@@ -9,6 +9,7 @@
  #include <string>
-
+ 
  #include "base/memory/raw_ptr.h"
 +#include "base/memory/unsafe_shared_memory_region.h"
  #include "base/memory/weak_ptr.h"
  #include "electron/shell/common/api/api.mojom.h"
  #include "mojo/public/cpp/bindings/associated_receiver.h"
-@@ -18,6 +20,10 @@
- #include "v8/include/v8-context.h"
- #include "v8/include/v8-forward.h"
-
-+namespace base {
-+class ProcessMetrics;
-+}
-+
- namespace electron {
-
- // Per ServiceWorker data in worker thread.
-@@ -33,11 +39,18 @@ class ServiceWorkerData : public mojom::ElectronRenderer {
-   ServiceWorkerData(const ServiceWorkerData&) = delete;
-   ServiceWorkerData& operator=(const ServiceWorkerData&) = delete;
-
-+  static ServiceWorkerData* GetCurrent();
-+
-   int64_t service_worker_version_id() const {
-     return service_worker_version_id_;
-   }
-
-   blink::WebServiceWorkerContextProxy* proxy() const { return proxy_; }
-+  base::ProcessMetrics* process_metrics() const {
-+    return process_metrics_.get();
-+  }
-+
-+  void MarkServiceWorkerPreloadRealmInitialized();
-
-   // mojom::ElectronRenderer
-   void Message(bool internal,
-@@ -47,6 +60,12 @@ class ServiceWorkerData : public mojom::ElectronRenderer {
+@@ -68,6 +69,12 @@ class ServiceWorkerData : public mojom::ElectronRenderer {
                            blink::TransferableMessage message) override;
    void ExecuteJavaScript(const std::string& code,
                           ExecuteJavaScriptCallback callback) override;
@@ -6418,24 +6376,15 @@ index 6c1a120892..8f0b575a71 100644
 +      RegisterSharedMemoryPoolCallback callback) override;
    void TakeHeapSnapshot(mojo::ScopedHandle file,
                          TakeHeapSnapshotCallback callback) override;
-
-@@ -60,6 +79,8 @@ class ServiceWorkerData : public mojom::ElectronRenderer {
-   // The v8 context the bindings are accessible to.
-   raw_ptr<v8::Isolate> isolate_;
-   v8::Global<v8::Context> v8_context_;
-+  std::unique_ptr<base::ProcessMetrics> process_metrics_;
-+  bool service_worker_preload_realm_initialized_ = false;
-
-   mojo::AssociatedReceiver<mojom::ElectronRenderer> receiver_{this};
-
+ 
 diff --git a/shell/renderer/worker_data.cc b/shell/renderer/worker_data.cc
 index 32f38ccac8..e6631cc7ef 100644
 --- a/shell/renderer/worker_data.cc
 +++ b/shell/renderer/worker_data.cc
 @@ -6,6 +6,7 @@
-
+ 
  #include <utility>
-
+ 
 +#include "shell/common/api/electron_api_shared_memory.h"
  #include "shell/renderer/electron_renderer_v8_util.h"
  #include "third_party/blink/public/common/thread_safe_browser_interface_broker_proxy.h"
@@ -6443,7 +6392,7 @@ index 32f38ccac8..e6631cc7ef 100644
 @@ -103,6 +104,16 @@ void WorkerData::ExecuteJavaScript(const std::string& code,
                                              std::move(callback));
  }
-
+ 
 +void WorkerData::RegisterSharedMemoryPool(
 +    const std::string& id,
 +    base::UnsafeSharedMemoryRegion region,
@@ -6458,28 +6407,28 @@ index 32f38ccac8..e6631cc7ef 100644
                                    TakeHeapSnapshotCallback callback) {
    renderer_util::TakeHeapSnapshot(isolate_, std::move(file),
 diff --git a/shell/renderer/worker_data.h b/shell/renderer/worker_data.h
-index 9704d4897b..7dce632174 100644
+index 7b30198793..805a33ef72 100644
 --- a/shell/renderer/worker_data.h
 +++ b/shell/renderer/worker_data.h
-@@ -9,6 +9,7 @@
- #include <string>
-
+@@ -10,6 +10,7 @@
+ #include <utility>
+ 
  #include "base/memory/raw_ptr.h"
 +#include "base/memory/unsafe_shared_memory_region.h"
  #include "base/process/process_metrics.h"
  #include "electron/shell/common/api/api.mojom.h"
  #include "mojo/public/cpp/bindings/receiver.h"
-@@ -44,8 +45,7 @@ class WorkerData : public mojom::ElectronRenderer {
-
+@@ -52,8 +53,7 @@ class WorkerData : public mojom::ElectronRenderer {
+ 
    void UpdateContext(v8::Local<v8::Context> context);
-
+ 
 -  void BindIPCReceiver(
 -      mojo::PendingReceiver<mojom::ElectronApiIPC> receiver);
 +  void BindIPCReceiver(mojo::PendingReceiver<mojom::ElectronApiIPC> receiver);
-
+ 
    // mojom::ElectronRenderer
    void Message(bool internal,
-@@ -55,6 +55,12 @@ class WorkerData : public mojom::ElectronRenderer {
+@@ -63,6 +63,12 @@ class WorkerData : public mojom::ElectronRenderer {
                            blink::TransferableMessage message) override;
    void ExecuteJavaScript(const std::string& code,
                           ExecuteJavaScriptCallback callback) override;
@@ -6491,7 +6440,7 @@ index 9704d4897b..7dce632174 100644
 +      RegisterSharedMemoryPoolCallback callback) override;
    void TakeHeapSnapshot(mojo::ScopedHandle file,
                          TakeHeapSnapshotCallback callback) override;
-
+ 
 diff --git a/spec/api-shared-memory-spec.ts b/spec/api-shared-memory-spec.ts
 new file mode 100644
 index 0000000000..e8f802145f
@@ -8859,15 +8808,15 @@ index 977c0d1af0..ce232eaaa6 100644
 +++ b/spec/ts-smoke/electron/main.ts
 @@ -1,5 +1,6 @@
  /* eslint-disable */
-
+ 
 +import { SharedMemory } from 'electron';
  import { clipboard, crashReporter, nativeImage, shell } from 'electron/common';
  import {
    app,
 @@ -26,6 +27,81 @@ import {
-
+ 
  import * as path from 'node:path';
-
+ 
 +const sharedMemoryPoolForTypeSmoke = {} as Electron.SharedMemoryPool;
 +const sharedMemoryDefaultPoolPromise: Promise<Electron.SharedMemoryPool> = SharedMemory.createPool({
 +  frame: {} as Electron.WebFrameMain
@@ -8945,45 +8894,25 @@ index 977c0d1af0..ce232eaaa6 100644
 +
  // Quick start
  // https://github.com/electron/electron/blob/main/docs/tutorial/quick-start.md
-
+ 
 diff --git a/typings/internal-ambient.d.ts b/typings/internal-ambient.d.ts
-index ac46756d1b..5d0ab24c21 100644
+index abe9ccecdb..5d0ab24c21 100644
 --- a/typings/internal-ambient.d.ts
 +++ b/typings/internal-ambient.d.ts
-@@ -4,9 +4,14 @@ declare const BUILDFLAG: (flag: boolean) => boolean;
-
- declare namespace NodeJS {
-   interface ModuleInternal extends NodeJS.Module {
--    new(id: string, parent?: NodeJS.Module | null): NodeJS.Module;
-+    new (id: string, parent?: NodeJS.Module | null): NodeJS.Module;
-     _load(request: string, parent?: NodeJS.Module | null, isMain?: boolean): any;
--    _resolveFilename(request: string, parent?: NodeJS.Module | null, isMain?: boolean, options?: { paths: string[] }): string;
-+    _resolveFilename(
-+      request: string,
-+      parent?: NodeJS.Module | null,
-+      isMain?: boolean,
-+      options?: { paths: string[] }
-+    ): string;
-     _preloadModules(requests: string[]): void;
-     _nodeModulePaths(from: string): string[];
-     _extensions: Record<string, (module: NodeJS.Module, filename: string) => any>;
-@@ -27,8 +32,11 @@ declare namespace NodeJS {
-     send(internal: boolean, channel: string, args: any[]): void;
-     sendSync(internal: boolean, channel: string, args: any[]): any;
+@@ -34,6 +34,9 @@ declare namespace NodeJS {
      sendToHost(channel: string, args: any[]): void;
--    invoke<T>(internal: boolean, channel: string, args: any[]): Promise<{ error: string, result: T }>;
-+    invoke<T>(internal: boolean, channel: string, args: any[]): Promise<{ error: string; result: T }>;
+     invoke<T>(internal: boolean, channel: string, args: any[]): Promise<{ error: string; result: T }>;
      postMessage(channel: string, message: any, transferables: MessagePort[]): void;
 +    sendSharedMemoryChannelMessage(channelId: number, payloadId: number, byteLength: number): void;
 +    sendSharedMemoryChannelTaggedMessage(channelId: number, payloadId: number, tag: number, byteLength: number): void;
 +    sendSharedMemoryChannelMessages(channelId: number, payloadIds: number[], tags: number[], byteLengths: number[]): void;
    }
-
+ 
    interface IpcRendererBinding {
-@@ -45,16 +53,86 @@ declare namespace NodeJS {
+@@ -50,6 +53,74 @@ declare namespace NodeJS {
      triggerFatalErrorForTesting(): void;
    }
-
+ 
 +  interface SharedMemoryNativeDescriptor {
 +    poolId: string;
 +    offset: number;
@@ -9053,134 +8982,9 @@ index ac46756d1b..5d0ab24c21 100644
 +  }
 +
    type CrashReporterBinding = Omit<Electron.CrashReporter, 'start'> & {
--    start(submitUrl: string,
-+    start(
-+      submitUrl: string,
-       uploadToServer: boolean,
-       ignoreSystemCrashHandler: boolean,
-       rateLimit: boolean,
-       compress: boolean,
-       globalExtra: Record<string, string>,
-       extra: Record<string, string>,
--      isNodeProcess: boolean): void;
--  }
-+      isNodeProcess: boolean
-+    ): void;
-+  };
-
-   interface EnvironmentBinding {
-     getVar(name: string): string | null;
-@@ -69,14 +147,14 @@ declare namespace NodeJS {
-     integrity?: {
-       algorithm: 'SHA256';
-       hash: string;
--    }
-+    };
-   };
-
-   type AsarFileStat = {
-     size: number;
-     offset: number;
-     type: number;
--  }
-+  };
-
-   interface AsarArchive {
-     getFileInfo(path: string): AsarFileInfo | false;
-@@ -88,14 +166,16 @@ declare namespace NodeJS {
-   }
-
-   interface AsarBinding {
--    Archive: { new(path: string): AsarArchive };
--    splitPath(path: string): {
--      isAsar: false;
--    } | {
--      isAsar: true;
--      asarPath: string;
--      filePath: string;
--    };
-+    Archive: { new (path: string): AsarArchive };
-+    splitPath(path: string):
-+      | {
-+          isAsar: false;
-+        }
-+      | {
-+          isAsar: true;
-+          asarPath: string;
-+          filePath: string;
-+        };
-   }
-
-   interface NetBinding {
-@@ -146,13 +226,18 @@ declare namespace NodeJS {
-   }
-
-   interface SessionBinding {
--    fromPartition: typeof Electron.Session.fromPartition,
--    fromPath: typeof Electron.Session.fromPath,
--    Session: typeof Electron.Session
-+    fromPartition: typeof Electron.Session.fromPartition;
-+    fromPath: typeof Electron.Session.fromPath;
-+    Session: typeof Electron.Session;
-   }
-
-   interface WebViewManagerBinding {
--    addGuest(guestInstanceId: number, embedder: Electron.WebContents, guest: Electron.WebContents, webPreferences: Electron.WebPreferences): void;
-+    addGuest(
-+      guestInstanceId: number,
-+      embedder: Electron.WebContents,
-+      guest: Electron.WebContents,
-+      webPreferences: Electron.WebPreferences
-+    ): void;
-     removeGuest(embedder: Electron.WebContents, guestInstanceId: number): void;
-   }
-
-@@ -211,8 +296,8 @@ declare namespace NodeJS {
-   type ResponseHead = {
-     statusCode: number;
-     statusMessage: string;
--    httpVersion: { major: number, minor: number };
--    rawHeaders: { key: string, value: string }[];
-+    httpVersion: { major: number; minor: number };
-+    rawHeaders: { key: string; value: string }[];
-     headers: Record<string, string[]>;
-   };
-
-@@ -224,16 +309,29 @@ declare namespace NodeJS {
-     newReferrer: string;
-     insecureSchemeWasUpgraded: boolean;
-     isSignedExchangeFallbackRedirect: boolean;
--  }
-+  };
-
-   interface URLLoader extends EventEmitter {
-     cancel(): void;
-     on(eventName: 'data', listener: (event: any, data: ArrayBuffer, resume: () => void) => void): this;
--    on(eventName: 'response-started', listener: (event: any, finalUrl: string, responseHead: ResponseHead) => void): this;
-+    on(
-+      eventName: 'response-started',
-+      listener: (event: any, finalUrl: string, responseHead: ResponseHead) => void
-+    ): this;
-     on(eventName: 'complete', listener: (event: any) => void): this;
-     on(eventName: 'error', listener: (event: any, netErrorString: string) => void): this;
--    on(eventName: 'login', listener: (event: any, authInfo: Electron.AuthInfo, callback: (username?: string, password?: string) => void) => void): this;
--    on(eventName: 'redirect', listener: (event: any, redirectInfo: RedirectInfo, headers: Record<string, string>) => void): this;
-+    on(
-+      eventName: 'login',
-+      listener: (
-+        event: any,
-+        authInfo: Electron.AuthInfo,
-+        callback: (username?: string, password?: string) => void
-+      ) => void
-+    ): this;
-+    on(
-+      eventName: 'redirect',
-+      listener: (event: any, redirectInfo: RedirectInfo, headers: Record<string, string>) => void
-+    ): this;
-     on(eventName: 'upload-progress', listener: (event: any, position: number, total: number) => void): this;
-     on(eventName: 'download-progress', listener: (event: any, current: number) => void): this;
-   }
-@@ -247,19 +345,25 @@ declare namespace NodeJS {
+     start(
+       submitUrl: string,
+@@ -274,6 +345,7 @@ declare namespace NodeJS {
      _linkedBinding(name: 'electron_common_environment'): EnvironmentBinding;
      _linkedBinding(name: 'electron_common_features'): FeaturesBinding;
      _linkedBinding(name: 'electron_common_native_image'): { nativeImage: typeof Electron.NativeImage };
@@ -9188,29 +8992,7 @@ index ac46756d1b..5d0ab24c21 100644
      _linkedBinding(name: 'electron_common_shared_texture'): Electron.SharedTextureSubtle;
      _linkedBinding(name: 'electron_common_net'): NetBinding;
      _linkedBinding(name: 'electron_common_shell'): Electron.Shell;
-     _linkedBinding(name: 'electron_common_v8_util'): V8UtilBinding;
--    _linkedBinding(name: 'electron_browser_app'): { app: Electron.App, App: Function };
-+    _linkedBinding(name: 'electron_browser_app'): { app: Electron.App; App: Function };
-     _linkedBinding(name: 'electron_browser_auto_updater'): { autoUpdater: Electron.AutoUpdater };
-     _linkedBinding(name: 'electron_browser_crash_reporter'): CrashReporterBinding;
--    _linkedBinding(name: 'electron_browser_desktop_capturer'): { createDesktopCapturer(): ElectronInternal.DesktopCapturer; isDisplayMediaSystemPickerAvailable(): boolean; };
--    _linkedBinding(name: 'electron_browser_event_emitter'): { setEventEmitterPrototype(prototype: Object): void; };
-+    _linkedBinding(name: 'electron_browser_desktop_capturer'): {
-+      createDesktopCapturer(): ElectronInternal.DesktopCapturer;
-+      isDisplayMediaSystemPickerAvailable(): boolean;
-+    };
-+    _linkedBinding(name: 'electron_browser_event_emitter'): { setEventEmitterPrototype(prototype: Object): void };
-     _linkedBinding(name: 'electron_browser_global_shortcut'): { globalShortcut: Electron.GlobalShortcut };
-     _linkedBinding(name: 'electron_browser_image_view'): { ImageView: any };
-     _linkedBinding(name: 'electron_browser_in_app_purchase'): { inAppPurchase: Electron.InAppPurchase };
--    _linkedBinding(name: 'electron_browser_message_port'): { createPair(): { port1: Electron.MessagePortMain, port2: Electron.MessagePortMain }; };
-+    _linkedBinding(name: 'electron_browser_message_port'): {
-+      createPair(): { port1: Electron.MessagePortMain; port2: Electron.MessagePortMain };
-+    };
-     _linkedBinding(name: 'electron_browser_native_theme'): { nativeTheme: Electron.NativeTheme };
-     _linkedBinding(name: 'electron_browser_notification'): NotificationBinding;
-     _linkedBinding(name: 'electron_browser_power_monitor'): PowerMonitorBinding;
-@@ -268,6 +372,7 @@ declare namespace NodeJS {
+@@ -300,6 +372,7 @@ declare namespace NodeJS {
      _linkedBinding(name: 'electron_browser_safe_storage'): { safeStorage: Electron.SafeStorage };
      _linkedBinding(name: 'electron_browser_session'): SessionBinding;
      _linkedBinding(name: 'electron_browser_screen'): { createScreen(): Electron.Screen };
@@ -9218,36 +9000,6 @@ index ac46756d1b..5d0ab24c21 100644
      _linkedBinding(name: 'electron_browser_service_worker_main'): ServiceWorkerMainBinding;
      _linkedBinding(name: 'electron_browser_dedicated_worker_main'): DedicatedWorkerMainBinding;
      _linkedBinding(name: 'electron_browser_shared_worker_main'): SharedWorkerMainBinding;
-@@ -320,19 +425,19 @@ declare interface Window {
-   ELECTRON_DISABLE_SECURITY_WARNINGS?: boolean;
-   ELECTRON_ENABLE_SECURITY_WARNINGS?: boolean;
-   InspectorFrontendHost?: {
--    showContextMenuAtPoint: (x: number, y: number, items: ContextMenuItem[]) => void
-+    showContextMenuAtPoint: (x: number, y: number, items: ContextMenuItem[]) => void;
-   };
-   DevToolsAPI?: {
-     contextMenuItemSelected: (id: number) => void;
--    contextMenuCleared: () => void
-+    contextMenuCleared: () => void;
-   };
-   UI?: {
--    createFileSelectorElement: (callback: () => void) => HTMLSpanElement
-+    createFileSelectorElement: (callback: () => void) => HTMLSpanElement;
-   };
-   Persistence?: {
-     FileSystemWorkspaceBinding: {
-       completeURL: (project: string, path: string) => string;
--    }
-+    };
-   };
-   WebView: typeof ElectronInternal.WebViewElement;
-   trustedTypes: TrustedTypePolicyFactory;
-@@ -371,7 +476,7 @@ interface TrustedTypePolicyOptions {
- // https://w3c.github.io/webappsec-trusted-types/dist/spec/#typedef-trustedtypepolicyfactory
+-- 
+2.53.0
 
- interface TrustedTypePolicyFactory {
--  createPolicy(policyName: string, policyOptions: TrustedTypePolicyOptions): TrustedTypePolicy
-+  createPolicy(policyName: string, policyOptions: TrustedTypePolicyOptions): TrustedTypePolicy;
-   isHTML(value: any): boolean;
-   isScript(value: any): boolean;
-   isScriptURL(value: any): boolean;

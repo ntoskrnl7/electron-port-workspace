@@ -2,6 +2,7 @@ schema_version=1
 name=picture-in-picture-handle-api
 target=42
 electronized_chromium_patches=true
+depends_on=javascript-dialog-handler
 electron_patch_stack_source=chromium-direct
 electron_patch_files=electron/*.patch
 chromium_direct_archive=chromium-direct

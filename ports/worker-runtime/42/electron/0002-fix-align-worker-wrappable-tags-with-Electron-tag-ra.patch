@@ -1,0 +1,82 @@
+From 8ba653b1f747036e7b3ec86408273c619e23a2bb Mon Sep 17 00:00:00 2001
+From: Jung-Kwang Lee <ntoskrnl7@gmail.com>
+Date: Mon, 8 Jun 2026 00:07:20 +0900
+Subject: [PATCH 2/2] fix: align worker wrappable tags with Electron tag range
+
+---
+ shell/browser/api/electron_api_dedicated_worker_context.cc | 6 +++---
+ shell/browser/api/electron_api_shared_worker_context.cc    | 6 +++---
+ shell/common/gin_helper/wrappable_pointer_tags.h           | 2 ++
+ 3 files changed, 8 insertions(+), 6 deletions(-)
+
+diff --git a/shell/browser/api/electron_api_dedicated_worker_context.cc b/shell/browser/api/electron_api_dedicated_worker_context.cc
+index fb033e9794..6e9a09d401 100644
+--- a/shell/browser/api/electron_api_dedicated_worker_context.cc
++++ b/shell/browser/api/electron_api_dedicated_worker_context.cc
+@@ -23,6 +23,7 @@
+ #include "shell/common/gin_converters/value_converter.h"
+ #include "shell/common/gin_helper/error_thrower.h"
+ #include "shell/common/gin_helper/handle.h"
++#include "shell/common/gin_helper/wrappable_pointer_tags.h"
+ #include "v8/include/cppgc/allocation.h"
+ 
+ namespace electron::api {
+@@ -120,9 +121,8 @@ v8::Local<v8::Value> DedicatedWorkerInfoToDict(
+ 
+ }  // namespace
+ 
+-const gin::WrapperInfo DedicatedWorkerContext::kWrapperInfo = {
+-    {gin::kEmbedderNativeGin},
+-    gin::kElectronDedicatedWorkerContext};
++const gin::WrapperInfo DedicatedWorkerContext::kWrapperInfo =
++    electron::MakeWrapperInfo(electron::kElectronDedicatedWorkerContext);
+ 
+ DedicatedWorkerContext::DedicatedWorkerContext(v8::Isolate* isolate,
+                                                WebContents* web_contents)
+diff --git a/shell/browser/api/electron_api_shared_worker_context.cc b/shell/browser/api/electron_api_shared_worker_context.cc
+index 914adcd7cd..f82db0eddc 100644
+--- a/shell/browser/api/electron_api_shared_worker_context.cc
++++ b/shell/browser/api/electron_api_shared_worker_context.cc
+@@ -24,6 +24,7 @@
+ #include "shell/common/gin_helper/dictionary.h"
+ #include "shell/common/gin_helper/error_thrower.h"
+ #include "shell/common/gin_helper/handle.h"
++#include "shell/common/gin_helper/wrappable_pointer_tags.h"
+ #include "v8/include/cppgc/allocation.h"
+ 
+ namespace electron::api {
+@@ -77,9 +78,8 @@ v8::Local<v8::Value> SharedWorkerInfoToDict(v8::Isolate* isolate,
+ 
+ }  // namespace
+ 
+-const gin::WrapperInfo SharedWorkerContext::kWrapperInfo = {
+-    {gin::kEmbedderNativeGin},
+-    gin::kElectronSharedWorkerContext};
++const gin::WrapperInfo SharedWorkerContext::kWrapperInfo =
++    electron::MakeWrapperInfo(electron::kElectronSharedWorkerContext);
+ 
+ SharedWorkerContext::SharedWorkerContext(
+     v8::Isolate* isolate,
+diff --git a/shell/common/gin_helper/wrappable_pointer_tags.h b/shell/common/gin_helper/wrappable_pointer_tags.h
+index 0c159272d6..0edfb3f0c9 100644
+--- a/shell/common/gin_helper/wrappable_pointer_tags.h
++++ b/shell/common/gin_helper/wrappable_pointer_tags.h
+@@ -14,6 +14,7 @@ namespace electron {
+ enum ElectronWrappablePointerTag : uint16_t {
+   kElectronApp = gin::kLastPointerTag + 1,  // electron::api::App
+   kElectronDataPipeHolder,                  // electron::api::DataPipeHolder
++  kElectronDedicatedWorkerContext,  // electron::api::DedicatedWorkerContext
+   kElectronDebugger,                        // electron::api::Debugger
+   kElectronEvent,                           // gin_helper::internal::Event
+   kElectronExtensions,                      // electron::api::Extensions
+@@ -26,6 +27,7 @@ enum ElectronWrappablePointerTag : uint16_t {
+   kElectronReplyChannel,          // gin_helper::internal::ReplyChannel
+   kElectronScreen,                // electron::api::Screen
+   kElectronServiceWorkerContext,  // electron::api::ServiceWorkerContext
++  kElectronSharedWorkerContext,   // electron::api::SharedWorkerContext
+   kElectronSession,               // electron::api::Session
+   kElectronTray,                  // electron::api::Tray
+   kElectronUtilityProcess,        // electron::api::UtilityProcessWrapper
+-- 
+2.53.0
+

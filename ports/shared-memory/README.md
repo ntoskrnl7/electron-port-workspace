@@ -1,13 +1,9 @@
 # shared-memory
 
-Reusable Electron shared-memory channel APIs.
-
-This port adds main-process shared-memory pool and channel APIs so Electron
-applications can move larger binary payloads through named shared memory rather
-than copying everything through regular IPC messages.
+Reusable Electron feature port.
 
 Target bundles live under:
 
-```text
+``text
 ports/shared-memory/<target>/
-```
+``

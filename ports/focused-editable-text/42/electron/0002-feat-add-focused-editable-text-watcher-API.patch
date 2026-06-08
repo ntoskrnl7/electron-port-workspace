@@ -1,4 +1,4 @@
-From 5e4e5fca8015d3f826530dc5eb331b3d91280da8 Mon Sep 17 00:00:00 2001
+From 07fea0b5fb8e593ad9fa45dcf699769d382037be Mon Sep 17 00:00:00 2001
 From: Jung-Kwang Lee <ntoskrnl7@gmail.com>
 Date: Wed, 3 Jun 2026 22:04:26 +0900
 Subject: [PATCH 2/4] feat: add focused editable text watcher API
@@ -8,11 +8,11 @@ Subject: [PATCH 2/4] feat: add focused editable text watcher API
  .../focused-editable-text-watcher.md          |  12 +
  docs/api/structures/focused-editable-text.md  |   3 +
  docs/api/web-contents.md                      |  34 +
- .../browser/api/electron_api_web_contents.cc  | 642 ++++++++++++++----
+ .../browser/api/electron_api_web_contents.cc  | 630 ++++++++++++++----
  shell/browser/api/electron_api_web_contents.h |   1 +
  .../gin_helper/wrappable_pointer_tags.h       |   1 +
  spec/api-web-contents-spec.ts                 | 257 +++++++
- 8 files changed, 826 insertions(+), 145 deletions(-)
+ 8 files changed, 819 insertions(+), 140 deletions(-)
  create mode 100644 docs/api/structures/focused-editable-text-watch-options.md
  create mode 100644 docs/api/structures/focused-editable-text-watcher.md
 
@@ -73,10 +73,10 @@ index 2ccb89cdd8..40d8773719 100644
 +This object is returned by `webContents.getFocusedEditableText()` and passed to
 +callbacks registered with `webContents.watchFocusedEditableText()`.
 diff --git a/docs/api/web-contents.md b/docs/api/web-contents.md
-index a1bfd0ac8c..0f391fc26c 100644
+index c4d94a658c..d39ea59a74 100644
 --- a/docs/api/web-contents.md
 +++ b/docs/api/web-contents.md
-@@ -1269,6 +1269,40 @@ Password inputs return `null`. Custom editors backed by DOM-editable content are
+@@ -1223,6 +1223,40 @@ Password inputs return `null`. Custom editors backed by DOM-editable content are
  handled on a best-effort basis. Editors backed by canvas, virtual documents, or
  application-internal models may only expose the focused DOM control.
  
@@ -118,7 +118,7 @@ index a1bfd0ac8c..0f391fc26c 100644
  
  Returns `boolean` - Whether web page is still loading resources.
 diff --git a/shell/browser/api/electron_api_web_contents.cc b/shell/browser/api/electron_api_web_contents.cc
-index c4b6e75c91..41903835c0 100644
+index 2b383e8e97..7388601329 100644
 --- a/shell/browser/api/electron_api_web_contents.cc
 +++ b/shell/browser/api/electron_api_web_contents.cc
 @@ -27,6 +27,7 @@
@@ -162,7 +162,7 @@ index c4b6e75c91..41903835c0 100644
  #include "shell/common/language_util.h"
  #include "shell/common/node_includes.h"
  #include "shell/common/node_util.h"
-@@ -185,6 +189,7 @@
+@@ -186,6 +190,7 @@
  #include "ui/base/ime/text_input_action.h"
  #include "ui/base/ime/text_input_mode.h"
  #include "ui/base/ime/text_input_type.h"
@@ -170,7 +170,7 @@ index c4b6e75c91..41903835c0 100644
  #include "ui/display/screen.h"
  #include "ui/events/base_event_utils.h"
  #include "ui/events/blink/web_input_event_traits.h"
-@@ -194,6 +199,8 @@
+@@ -195,6 +200,8 @@
  #include "ui/gfx/range/range.h"
  #include "ui/gfx/selection_bound.h"
  #include "ui/latency/latency_info.h"
@@ -179,7 +179,7 @@ index c4b6e75c91..41903835c0 100644
  
  #if BUILDFLAG(IS_MAC)
  #include "ui/base/cocoa/defaults_utils.h"
-@@ -2039,8 +2046,7 @@ v8::Local<v8::Value> CreateTextCaretInfo(
+@@ -2212,8 +2219,7 @@ v8::Local<v8::Value> CreateTextCaretInfo(
  
    const ui::mojom::TextInputState* text_input_state =
        text_input_manager->GetTextInputState();
@@ -189,7 +189,7 @@ index c4b6e75c91..41903835c0 100644
      return v8::Null(isolate);
    }
  
-@@ -2089,8 +2095,8 @@ v8::Local<v8::Value> CreateTextCaretInfo(
+@@ -2262,8 +2268,8 @@ v8::Local<v8::Value> CreateTextCaretInfo(
      details.Set("selection", selection);
    }
  
@@ -200,7 +200,7 @@ index c4b6e75c91..41903835c0 100644
    auto composition = gin_helper::Dictionary::CreateEmpty(isolate);
    composition.Set("isComposing", has_composition);
    if (has_composition) {
-@@ -2110,6 +2116,8 @@ v8::Local<v8::Value> CreateTextCaretInfo(
+@@ -2283,6 +2289,8 @@ v8::Local<v8::Value> CreateTextCaretInfo(
  
  constexpr uint32_t kDefaultFocusedEditableTextMaxLength = 100000;
  constexpr uint32_t kMaxFocusedEditableTextMaxLength = 1000000;
@@ -209,7 +209,7 @@ index c4b6e75c91..41903835c0 100644
  
  enum class FocusedEditableTextMode {
    kValue,
-@@ -2122,6 +2130,14 @@ struct FocusedEditableTextOptions {
+@@ -2295,6 +2303,14 @@ struct FocusedEditableTextOptions {
    uint32_t max_length = kDefaultFocusedEditableTextMaxLength;
  };
  
@@ -224,7 +224,7 @@ index c4b6e75c91..41903835c0 100644
  struct FocusedEditableTextInputState {
    ui::TextInputType type = ui::TEXT_INPUT_TYPE_NONE;
    ui::TextInputMode mode = ui::TEXT_INPUT_MODE_DEFAULT;
-@@ -2138,8 +2154,10 @@ struct FocusedEditableTextSnapshot {
+@@ -2311,8 +2327,10 @@ struct FocusedEditableTextSnapshot {
    bool is_partial = false;
  };
  
@@ -237,7 +237,7 @@ index c4b6e75c91..41903835c0 100644
    switch (mode) {
      case FocusedEditableTextMode::kValue:
        return "value";
-@@ -2219,8 +2237,8 @@ void ClampFocusedEditableTextSnapshot(FocusedEditableTextSnapshot* snapshot,
+@@ -2392,8 +2410,8 @@ void ClampFocusedEditableTextSnapshot(FocusedEditableTextSnapshot* snapshot,
  
    snapshot->text =
        snapshot->text.substr(window_start, window_end - window_start);
@@ -248,7 +248,7 @@ index c4b6e75c91..41903835c0 100644
    if (snapshot->composition && snapshot->composition->start() >= window_start &&
        snapshot->composition->end() <= window_end) {
      snapshot->composition =
-@@ -2260,8 +2278,10 @@ v8::Local<v8::Value> CreateFocusedEditableTextValue(
+@@ -2433,8 +2451,10 @@ v8::Local<v8::Value> CreateFocusedEditableTextValue(
    details.SetGetter("frame", render_frame_host);
    details.Set("url", render_frame_host->GetLastCommittedURL().spec());
    details.Set("isMainFrame", render_frame_host->GetParent() == nullptr);
@@ -261,7 +261,7 @@ index c4b6e75c91..41903835c0 100644
    details.Set("inputAction",
                std::string(TextInputActionToString(input_state.action)));
    details.Set("text", snapshot.text);
-@@ -2285,17 +2305,10 @@ v8::Local<v8::Value> CreateFocusedEditableTextValue(
+@@ -2458,17 +2478,10 @@ v8::Local<v8::Value> CreateFocusedEditableTextValue(
    return details.GetHandle();
  }
  
@@ -283,7 +283,7 @@ index c4b6e75c91..41903835c0 100644
    if (dict.Has("mode")) {
      std::string mode;
      if (!dict.Get("mode", &mode)) {
-@@ -2322,9 +2335,8 @@ bool ParseFocusedEditableTextOptions(gin::Arguments* args,
+@@ -2495,9 +2508,8 @@ bool ParseFocusedEditableTextOptions(gin::Arguments* args,
      }
      if (max_length < 1 ||
          static_cast<uint32_t>(max_length) > kMaxFocusedEditableTextMaxLength) {
@@ -295,7 +295,7 @@ index c4b6e75c91..41903835c0 100644
        return false;
      }
      options->max_length = static_cast<uint32_t>(max_length);
-@@ -2333,6 +2345,47 @@ bool ParseFocusedEditableTextOptions(gin::Arguments* args,
+@@ -2506,6 +2518,47 @@ bool ParseFocusedEditableTextOptions(gin::Arguments* args,
    return true;
  }
  
@@ -343,7 +343,7 @@ index c4b6e75c91..41903835c0 100644
  content::RenderFrameHost* GetFocusedEditableTextFrame(
      content::WebContents* contents,
      FocusedEditableTextInputState* input_state,
-@@ -2351,8 +2404,7 @@ content::RenderFrameHost* GetFocusedEditableTextFrame(
+@@ -2524,8 +2577,7 @@ content::RenderFrameHost* GetFocusedEditableTextFrame(
  
    const ui::mojom::TextInputState* text_input_state =
        text_input_manager->GetTextInputState();
@@ -353,7 +353,7 @@ index c4b6e75c91..41903835c0 100644
        IsPasswordTextInputType(text_input_state->type)) {
      return nullptr;
    }
-@@ -2368,16 +2420,15 @@ content::RenderFrameHost* GetFocusedEditableTextFrame(
+@@ -2541,16 +2593,15 @@ content::RenderFrameHost* GetFocusedEditableTextFrame(
    return render_frame_host;
  }
  
@@ -374,7 +374,7 @@ index c4b6e75c91..41903835c0 100644
      base::WeakPtr<content::WebContents> contents,
      content::GlobalRenderFrameHostId frame_id,
      FocusedEditableTextInputState input_state,
-@@ -2389,16 +2440,16 @@ void ResolveFocusedEditableTextSnapshot(
+@@ -2562,16 +2613,16 @@ void ResolveFocusedEditableTextSnapshot(
    auto* render_frame_host = content::RenderFrameHost::FromID(frame_id);
    if (!web_contents || !render_frame_host) {
      v8::Local<v8::Value> null_value = v8::Null(isolate);
@@ -394,7 +394,7 @@ index c4b6e75c91..41903835c0 100644
      base::WeakPtr<content::WebContents> contents,
      content::GlobalRenderFrameHostId frame_id,
      FocusedEditableTextInputState input_state,
-@@ -2408,7 +2459,7 @@ void OnFocusedEditableTextSurroundingSelection(
+@@ -2581,7 +2632,7 @@ void OnFocusedEditableTextSurroundingSelection(
      uint32_t start_offset,
      uint32_t end_offset) {
    if (text.empty()) {
@@ -403,7 +403,7 @@ index c4b6e75c91..41903835c0 100644
      return;
    }
  
-@@ -2421,9 +2472,9 @@ void OnFocusedEditableTextSurroundingSelection(
+@@ -2594,9 +2645,9 @@ void OnFocusedEditableTextSurroundingSelection(
    snapshot.source = "surrounding-selection";
    snapshot.is_partial = true;
    ClampFocusedEditableTextSnapshot(&snapshot, max_length);
@@ -416,7 +416,7 @@ index c4b6e75c91..41903835c0 100644
  }
  
  std::u16string CreateFocusedEditableTextDomScript(uint32_t max_length) {
-@@ -2539,24 +2590,24 @@ std::u16string CreateFocusedEditableTextDomScript(uint32_t max_length) {
+@@ -2712,24 +2763,24 @@ std::u16string CreateFocusedEditableTextDomScript(uint32_t max_length) {
    return clamp(text, beforeStart.toString().length, beforeEnd.toString().length);
  })()
  )JS",
@@ -445,7 +445,7 @@ index c4b6e75c91..41903835c0 100644
      return;
    }
  
-@@ -2565,107 +2616,381 @@ void OnFocusedEditableTextDomResult(
+@@ -2738,107 +2789,381 @@ void OnFocusedEditableTextDomResult(
    std::optional<int> selection_end = dict.FindInt("selectionEnd");
    if (!text || !selection_start || !selection_end || *selection_start < 0 ||
        *selection_end < 0) {
@@ -669,7 +669,7 @@ index c4b6e75c91..41903835c0 100644
 +
 +  void NotifyTextInputChanged() {
 +    if (closed_)
-+      return;
+       return;
 +    pending_change_ = true;
 +    ScheduleSnapshot();
 +  }
@@ -686,7 +686,7 @@ index c4b6e75c91..41903835c0 100644
 +
 +  void Close() {
 +    if (closed_)
-       return;
++      return;
 +    closed_ = true;
 +    timer_.Stop();
 +    weak_factory_.InvalidateWeakPtrs();
@@ -887,7 +887,7 @@ index c4b6e75c91..41903835c0 100644
  const char kRootName[] = "<root>";
  
  struct FileSystem {
-@@ -6042,48 +6367,72 @@ v8::Local<v8::Promise> WebContents::GetFocusedEditableText(
+@@ -6215,48 +6540,72 @@ v8::Local<v8::Promise> WebContents::GetFocusedEditableText(
      return handle;
    }
  
@@ -995,38 +995,7 @@ index c4b6e75c91..41903835c0 100644
  }
  
  void WebContents::SendInputEvent(v8::Isolate* isolate,
-@@ -6862,12 +7211,15 @@ void WebContents::RunBeforeUnloadDialog(content::WebContents* web_contents,
-                                         bool is_reload,
-                                         DialogClosedCallback callback) {
-   if (has_javascript_dialog_handler_) {
-+    const std::u16string message_text =
-+        l10n_util::GetStringUTF16(IDS_BEFOREUNLOAD_MESSAGEBOX_MESSAGE);
-+
-     auto* isolate = JavascriptEnvironment::GetIsolate();
-     v8::HandleScope scope(isolate);
-     auto info = gin::DataObjectBuilder(isolate)
-                     .Set("frame", rfh)
-                     .Set("dialogType", "beforeunload")
--                    .Set("messageText", std::u16string())
-+                    .Set("messageText", message_text)
-                     .Set("defaultPromptText", std::u16string())
-                     .Set("isReload", is_reload)
-                     .Build();
-@@ -6884,10 +7236,9 @@ void WebContents::RunBeforeUnloadDialog(content::WebContents* web_contents,
-                              std::u16string());
- }
- 
--void WebContents::OnBeforeUnloadDialogClosed(
--    DialogClosedCallback callback,
--    bool success,
--    const std::u16string& user_input) {
-+void WebContents::OnBeforeUnloadDialogClosed(DialogClosedCallback callback,
-+                                             bool success,
-+                                             const std::u16string& user_input) {
-   if (pending_unload_url_.has_value() && !success) {
-     Emit("did-fail-load", static_cast<int>(net::ERR_ABORTED),
-          net::ErrorToShortString(net::ERR_ABORTED),
-@@ -7486,8 +7837,9 @@ void WebContents::FillObjectTemplate(v8::Isolate* isolate,
+@@ -7631,8 +7980,9 @@ void WebContents::FillObjectTemplate(v8::Isolate* isolate,
        .SetMethod("focus", &WebContents::Focus)
        .SetMethod("isFocused", &WebContents::IsFocused)
        .SetMethod("getTextCaretInfo", &WebContents::GetTextCaretInfo)
@@ -1039,10 +1008,10 @@ index c4b6e75c91..41903835c0 100644
        .SetMethod("dispatchInputEvent", &WebContents::DispatchInputEvent)
        .SetMethod("beginFrameSubscription", &WebContents::BeginFrameSubscription)
 diff --git a/shell/browser/api/electron_api_web_contents.h b/shell/browser/api/electron_api_web_contents.h
-index 7633859022..a3e53d0ad7 100644
+index b2a0c1a2d4..749cddc48a 100644
 --- a/shell/browser/api/electron_api_web_contents.h
 +++ b/shell/browser/api/electron_api_web_contents.h
-@@ -310,6 +310,7 @@ class WebContents final : public ExclusiveAccessContext,
+@@ -307,6 +307,7 @@ class WebContents final : public ExclusiveAccessContext,
    bool IsFocused() const;
    v8::Local<v8::Value> GetTextCaretInfo(v8::Isolate* isolate);
    v8::Local<v8::Promise> GetFocusedEditableText(gin::Arguments* args);
@@ -1051,10 +1020,10 @@ index 7633859022..a3e53d0ad7 100644
    // Send WebInputEvent to the page.
    void SendInputEvent(v8::Isolate* isolate, v8::Local<v8::Value> input_event);
 diff --git a/shell/common/gin_helper/wrappable_pointer_tags.h b/shell/common/gin_helper/wrappable_pointer_tags.h
-index 6b66865956..b149a70e3a 100644
+index e7ba3d93c6..0c159272d6 100644
 --- a/shell/common/gin_helper/wrappable_pointer_tags.h
 +++ b/shell/common/gin_helper/wrappable_pointer_tags.h
-@@ -18,6 +18,7 @@ enum ElectronWrappablePointerTag : uint16_t {
+@@ -17,6 +17,7 @@ enum ElectronWrappablePointerTag : uint16_t {
    kElectronDebugger,                        // electron::api::Debugger
    kElectronEvent,                           // gin_helper::internal::Event
    kElectronExtensions,                      // electron::api::Extensions
@@ -1063,10 +1032,10 @@ index 6b66865956..b149a70e3a 100644
    kElectronNetLog,                          // electron::api::NetLog
    kElectronPowerMonitor,                    // electron::api::PowerMonitor
 diff --git a/spec/api-web-contents-spec.ts b/spec/api-web-contents-spec.ts
-index e9aedce770..ac114850b2 100644
+index ebc9e94d81..77aab840f4 100644
 --- a/spec/api-web-contents-spec.ts
 +++ b/spec/api-web-contents-spec.ts
-@@ -1572,6 +1572,263 @@ describe('webContents module', () => {
+@@ -1518,6 +1518,263 @@ describe('webContents module', () => {
      });
    });
  

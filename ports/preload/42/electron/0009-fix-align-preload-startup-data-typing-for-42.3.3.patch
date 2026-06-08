@@ -1,0 +1,47 @@
+From cd53e3db380d434f16fd5df2d034b41dd4f0a32e Mon Sep 17 00:00:00 2001
+From: Jung-Kwang Lee <ntoskrnl7@gmail.com>
+Date: Mon, 8 Jun 2026 00:23:09 +0900
+Subject: [PATCH 9/9] fix: align preload startup data typing for 42.3.3
+
+---
+ lib/sandboxed_renderer/init.ts | 1 +
+ typings/internal-electron.d.ts | 4 ++--
+ 2 files changed, 3 insertions(+), 2 deletions(-)
+
+diff --git a/lib/sandboxed_renderer/init.ts b/lib/sandboxed_renderer/init.ts
+index 8f263f05a9..092bb6182e 100644
+--- a/lib/sandboxed_renderer/init.ts
++++ b/lib/sandboxed_renderer/init.ts
+@@ -41,6 +41,7 @@ const loadableModules = new Map<string, Function>([
+ const preloadProcess = createPreloadProcessObject();
+ 
+ // InvokeEmitProcessEvent in ElectronSandboxedRendererClient will look for this
++const v8Util = process._linkedBinding('electron_common_v8_util');
+ v8Util.setHiddenValue(global, 'emit-process-event', (event: string) => {
+   (process as events.EventEmitter).emit(event);
+   (preloadProcess as events.EventEmitter).emit(event);
+diff --git a/typings/internal-electron.d.ts b/typings/internal-electron.d.ts
+index c9383a2918..bc318e7775 100644
+--- a/typings/internal-electron.d.ts
++++ b/typings/internal-electron.d.ts
+@@ -451,7 +451,7 @@ declare namespace ElectronInternal {
+     static create(opts?: Electron.WebPreferences): Electron.WebContents;
+   }
+ 
+-  interface PreloadScript extends Electron.PreloadScript {
++  type PreloadScript = Electron.PreloadScript & {
+     /**
+      * Whether the preload file's contents were read successfully. The actual
+      * contents stay on the C++ side (mojo-cached startup data) and are looked
+@@ -459,7 +459,7 @@ declare namespace ElectronInternal {
+      */
+     hasContents?: boolean;
+     error?: Error;
+-  }
++  };
+ }
+ 
+ declare namespace Chrome {
+-- 
+2.53.0
+

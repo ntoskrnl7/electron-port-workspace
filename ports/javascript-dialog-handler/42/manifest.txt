@@ -2,4 +2,5 @@ schema_version=1
 name=javascript-dialog-handler
 target=42
 electronized_chromium_patches=false
+depends_on=focused-editable-text
 electron_patch_files=electron/*.patch

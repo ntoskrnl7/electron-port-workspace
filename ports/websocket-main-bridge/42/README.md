@@ -2,6 +2,14 @@
 
 Reusable Electron 42 target bundle.
 
+Dependency:
+
+- `worker-runtime`
+
+The dependency is recorded in `manifest.txt` as `depends_on=worker-runtime`.
+Apply `worker-runtime/42` first. `port-bundle` validates this before applying
+the bundle.
+
 Patch directories:
 
 - `electron/*.patch`: Electron API, docs, TypeScript surface, and spec.
@@ -17,7 +25,9 @@ generated at apply time so it can coexist with other ports that also modify
 Export source refs:
 
 - Chromium: `e94e0cd13142c..239ca09aee366`
-- Electron: `acfbeffe0b..c95ae2a2c4`
+- Electron patch sequence:
+  - `electron/0001-feat-add-session-websocket-handler.patch`
+  - `electron/0002-fix-align-websocket-wrappable-tag-with-Electron-tag-.patch`
 
 Verification on Electron 42:
 

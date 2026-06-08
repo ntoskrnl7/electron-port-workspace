@@ -1,7 +1,7 @@
-From d698451603a68701e516796428a0fed87194a30f Mon Sep 17 00:00:00 2001
+From c02f297059ddd54f074495a63534551be2bf433b Mon Sep 17 00:00:00 2001
 From: Jung-Kwang Lee <ntoskrnl7@gmail.com>
 Date: Fri, 8 May 2026 14:27:19 +0900
-Subject: fix: merge worker preload renderer hook
+Subject: [PATCH 5/9] fix: merge worker preload renderer hook
 
 ---
  shell/renderer/renderer_client_base.cc | 12 ++++--------
@@ -9,13 +9,13 @@ Subject: fix: merge worker preload renderer hook
  2 files changed, 4 insertions(+), 10 deletions(-)
 
 diff --git a/shell/renderer/renderer_client_base.cc b/shell/renderer/renderer_client_base.cc
-index 9474811fde..529934f53b 100644
+index 6f4fa18e2f..371f9fdbf6 100644
 --- a/shell/renderer/renderer_client_base.cc
 +++ b/shell/renderer/renderer_client_base.cc
-@@ -253,13 +253,6 @@ RendererClientBase* RendererClientBase::Get() {
+@@ -254,13 +254,6 @@ RendererClientBase* RendererClientBase::Get() {
    return g_renderer_client_base;
  }
-
+ 
 -void RendererClientBase::WorkerScriptReadyForEvaluationOnWorkerThread(
 -    v8::Local<v8::Context> context) {
 -  auto* ec = blink::ExecutionContext::From(context);
@@ -26,8 +26,8 @@ index 9474811fde..529934f53b 100644
  void RendererClientBase::BindProcess(v8::Isolate* isolate,
                                       gin_helper::Dictionary* process,
                                       content::RenderFrame* render_frame) {
-@@ -620,12 +613,15 @@ void RendererClientBase::WillDestroyServiceWorkerContextOnWorkerThread(
-
+@@ -634,12 +627,15 @@ void RendererClientBase::WillDestroyServiceWorkerContextOnWorkerThread(
+ 
  void RendererClientBase::WorkerScriptReadyForEvaluationOnWorkerThread(
      v8::Local<v8::Context> context) {
 +  auto* ec = blink::ExecutionContext::From(context);
@@ -41,10 +41,10 @@ index 9474811fde..529934f53b 100644
 +  if (auto script_type = GetWorkerPreloadScriptType(ec))
 +    ExecutePlainPreloadScripts(context, *script_type);
  }
-
+ 
  void RendererClientBase::WillDestroyWorkerContextOnWorkerThread(
 diff --git a/shell/renderer/renderer_client_base.h b/shell/renderer/renderer_client_base.h
-index c8ddfba8b4..2731aca9ea 100644
+index e4b9f3d4aa..3d5f73ddec 100644
 --- a/shell/renderer/renderer_client_base.h
 +++ b/shell/renderer/renderer_client_base.h
 @@ -66,8 +66,6 @@ class RendererClientBase : public content::ContentRendererClient
@@ -53,6 +53,9 @@ index c8ddfba8b4..2731aca9ea 100644
                                         content::RenderFrame* render_frame);
 -  void WorkerScriptReadyForEvaluationOnWorkerThread(
 -      v8::Local<v8::Context> context) override;
-
+ 
    std::unique_ptr<blink::WebPrescientNetworking> CreatePrescientNetworking(
        content::RenderFrame* render_frame) override;
+-- 
+2.53.0
+

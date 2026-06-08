@@ -4,13 +4,14 @@ Electron 42 target bundle for `webContents.getFocusedEditableText()`,
 `webContents.watchFocusedEditableText()`, and
 `webContents.editFocusedEditableText()`.
 
-Dependency:
+Dependencies:
 
 - `text-caret-info`
+- `dispatch-input-event`
 
-The dependency is recorded in `manifest.txt` as `depends_on=text-caret-info`.
-Apply `text-caret-info/42` first. `port-bundle` validates this before applying
-the bundle.
+The dependencies are recorded in `manifest.txt` as
+`depends_on=text-caret-info,dispatch-input-event`. Apply those 42 target bundles
+first. `port-bundle` validates this before applying the bundle.
 
 This bundle contains:
 

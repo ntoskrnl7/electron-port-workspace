@@ -1,7 +1,7 @@
-From 644a1776588f3caf94b5d29b75813c00e4447a07 Mon Sep 17 00:00:00 2001
+From aaf25d3813c52ebfc4a7744f440606c087e5fb96 Mon Sep 17 00:00:00 2001
 From: Jung-Kwang Lee <ntoskrnl7@gmail.com>
 Date: Fri, 15 May 2026 22:04:26 +0900
-Subject: feat: add trusted webContents input dispatch API
+Subject: [PATCH 1/2] feat: add trusted webContents input dispatch API
 
 ---
  .../structures/dispatch-input-event-result.md |   14 +
@@ -12,14 +12,14 @@ Subject: feat: add trusted webContents input dispatch API
  .../dispatch-input-touch-event-params.md      |   11 +
  .../structures/dispatch-input-touch-point.md  |   17 +
  docs/api/web-contents.md                      |   19 +
- .../browser/api/electron_api_web_contents.cc  | 1537 +++++++++++++++-
+ .../browser/api/electron_api_web_contents.cc  | 1522 +++++++++++++++-
  shell/browser/api/electron_api_web_contents.h |    3 +
  spec/api-web-contents-spec.ts                 | 1541 ++++++++++++++++-
  .../dispatch-input-cross-frame-drag/main.js   |  301 ++++
  .../package.json                              |    4 +
  .../api/dispatch-input-drag-hang/main.js      |  186 ++
  .../api/dispatch-input-drag-hang/package.json |    4 +
- 15 files changed, 3694 insertions(+), 19 deletions(-)
+ 15 files changed, 3688 insertions(+), 10 deletions(-)
  create mode 100644 docs/api/structures/dispatch-input-event-result.md
  create mode 100644 docs/api/structures/dispatch-input-ime-set-composition-event-params.md
  create mode 100644 docs/api/structures/dispatch-input-insert-text-event-params.md
@@ -193,13 +193,13 @@ index 0000000000..91f1581d72
 +  range [-90, 90].
 +* `twist` Integer (optional) - Pointer twist in degrees, in the range [0, 359].
 diff --git a/docs/api/web-contents.md b/docs/api/web-contents.md
-index 7fec0a4908..6b5519d662 100644
+index c938475bcd..3ea4901d9a 100644
 --- a/docs/api/web-contents.md
 +++ b/docs/api/web-contents.md
-@@ -2220,6 +2220,25 @@ Sends an input `event` to the page.
+@@ -2226,6 +2226,25 @@ Sends an input `event` to the page.
  > The [`BrowserWindow`](browser-window.md) containing the contents needs to be focused for
  `sendInputEvent()` to work.
-
+ 
 +#### `contents.dispatchInputEvent(inputEvent)`
 +
 +* `inputEvent` [DispatchInputKeyEventParams](structures/dispatch-input-key-event-params.md) | [DispatchInputMouseEventParams](structures/dispatch-input-mouse-event-params.md) | [DispatchInputTouchEventParams](structures/dispatch-input-touch-event-params.md) | [DispatchInputInsertTextEventParams](structures/dispatch-input-insert-text-event-params.md) | [DispatchInputImeSetCompositionEventParams](structures/dispatch-input-ime-set-composition-event-params.md)
@@ -220,10 +220,10 @@ index 7fec0a4908..6b5519d662 100644
 +follow-up text insertion should be skipped.
 +
  #### `contents.beginFrameSubscription([onlyDirty ,]callback)`
-
+ 
  * `onlyDirty` boolean (optional) - Defaults to `false`.
 diff --git a/shell/browser/api/electron_api_web_contents.cc b/shell/browser/api/electron_api_web_contents.cc
-index 2aeda4af73..b1daae6b50 100644
+index 46e6ccd116..a5cd7edbc6 100644
 --- a/shell/browser/api/electron_api_web_contents.cc
 +++ b/shell/browser/api/electron_api_web_contents.cc
 @@ -8,6 +8,7 @@
@@ -234,9 +234,9 @@ index 2aeda4af73..b1daae6b50 100644
  #include <memory>
  #include <optional>
  #include <set>
-@@ -18,18 +19,24 @@
-
+@@ -19,18 +20,24 @@
  #include "base/base64.h"
+ #include "base/command_line.h"
  #include "base/containers/fixed_flat_map.h"
 +#include "base/containers/flat_map.h"
  #include "base/containers/flat_set.h"
@@ -259,7 +259,7 @@ index 2aeda4af73..b1daae6b50 100644
  #include "base/values.h"
  #include "chrome/browser/browser_process.h"
  #include "chrome/browser/devtools/devtools_eye_dropper.h"
-@@ -38,11 +45,13 @@
+@@ -39,11 +46,13 @@
  #include "chrome/browser/ui/views/eye_dropper/eye_dropper.h"
  #include "chrome/common/pref_names.h"
  #include "components/input/native_web_keyboard_event.h"
@@ -273,7 +273,7 @@ index 2aeda4af73..b1daae6b50 100644
  #include "content/browser/renderer_host/navigation_controller_impl.h"  // nogncheck
  #include "content/browser/renderer_host/render_frame_host_manager.h"  // nogncheck
  #include "content/browser/renderer_host/render_widget_host_impl.h"  // nogncheck
-@@ -54,6 +63,7 @@
+@@ -55,6 +64,7 @@
  #include "content/public/browser/desktop_media_id.h"
  #include "content/public/browser/desktop_streams_registry.h"
  #include "content/public/browser/devtools_agent_host.h"
@@ -281,7 +281,7 @@ index 2aeda4af73..b1daae6b50 100644
  #include "content/public/browser/download_request_utils.h"
  #include "content/public/browser/favicon_status.h"
  #include "content/public/browser/file_select_listener.h"
-@@ -160,6 +170,8 @@
+@@ -166,6 +176,8 @@
  #include "third_party/blink/public/mojom/devtools/console_message.mojom.h"
  #include "third_party/blink/public/mojom/frame/find_in_page.mojom.h"
  #include "third_party/blink/public/mojom/frame/fullscreen.mojom.h"
@@ -290,7 +290,7 @@ index 2aeda4af73..b1daae6b50 100644
  #include "third_party/blink/public/mojom/messaging/transferable_message.mojom.h"
  #include "third_party/blink/public/mojom/renderer_preferences.mojom.h"
  #include "ui/base/cursor/cursor.h"
-@@ -169,7 +181,13 @@
+@@ -175,7 +187,13 @@
  #include "ui/base/ime/text_input_type.h"
  #include "ui/display/screen.h"
  #include "ui/events/base_event_utils.h"
@@ -301,13 +301,13 @@ index 2aeda4af73..b1daae6b50 100644
 +#include "ui/gfx/range/range.h"
  #include "ui/gfx/selection_bound.h"
 +#include "ui/latency/latency_info.h"
-
+ 
  #if BUILDFLAG(IS_MAC)
  #include "ui/base/cocoa/defaults_utils.h"
-@@ -661,6 +679,1203 @@ std::optional<base::TimeDelta> GetCursorBlinkInterval() {
+@@ -667,6 +685,1203 @@ std::optional<base::TimeDelta> GetCursorBlinkInterval() {
    return std::nullopt;
  }
-
+ 
 +gfx::PointF CssPixelsToPointF(double x, double y, float scale_factor) {
 +  return gfx::PointF(x * scale_factor, y * scale_factor);
 +}
@@ -1508,20 +1508,20 @@ index 2aeda4af73..b1daae6b50 100644
  struct UserDataLink : public base::SupportsUserData::Data {
    explicit UserDataLink(base::WeakPtr<WebContents> contents)
        : web_contents(contents) {}
-@@ -773,8 +1988,7 @@ std::string_view TextInputActionToString(ui::TextInputAction action) {
+@@ -779,8 +1994,7 @@ std::string_view TextInputActionToString(ui::TextInputAction action) {
    return "unknown";
  }
-
+ 
 -void SetRangeDetails(gin_helper::Dictionary* target,
 -                     const gfx::Range& range) {
 +void SetRangeDetails(gin_helper::Dictionary* target, const gfx::Range& range) {
    target->Set("isCollapsed", range.is_empty());
    target->Set("start", static_cast<uint32_t>(range.start()));
    target->Set("end", static_cast<uint32_t>(range.end()));
-@@ -805,10 +2019,9 @@ class TextCaretFrameObserver : public base::SupportsUserData::Data,
+@@ -919,10 +2133,9 @@ class TextCaretFrameObserver : public base::SupportsUserData::Data,
        return;
      }
-
+ 
 -    web_contents->SetUserData(
 -        kTextCaretFrameObserverKey,
 -        std::make_unique<TextCaretFrameObserver>(web_contents,
@@ -1530,40 +1530,11 @@ index 2aeda4af73..b1daae6b50 100644
 +                              std::make_unique<TextCaretFrameObserver>(
 +                                  web_contents, api_web_contents));
    }
-
+ 
    using content::WebContentsObserver::OnTextSelectionChanged;
-@@ -853,9 +2066,8 @@ class TextCaretFrameObserver : public base::SupportsUserData::Data,
-
-     content::RenderWidgetHost* widget = view->GetRenderWidgetHost();
-     content::RenderFrameHost* focused_frame = contents->GetFocusedFrame();
--    if (focused_frame &&
--        (focused_frame->GetView() == view ||
--         focused_frame->GetRenderWidgetHost() == widget)) {
-+    if (focused_frame && (focused_frame->GetView() == view ||
-+                          focused_frame->GetRenderWidgetHost() == widget)) {
-       return focused_frame;
-     }
-
-@@ -940,12 +2152,10 @@ class TextCaretFrameObserver : public base::SupportsUserData::Data,
-     auto composition = gin_helper::Dictionary::CreateEmpty(isolate);
-     composition.Set("isComposing", has_composition);
-     if (has_composition) {
--      composition.Set("start",
--                      static_cast<uint32_t>(
--                          text_input_state->composition->start()));
--      composition.Set("end",
--                      static_cast<uint32_t>(
--                          text_input_state->composition->end()));
-+      composition.Set("start", static_cast<uint32_t>(
-+                                   text_input_state->composition->start()));
-+      composition.Set(
-+          "end", static_cast<uint32_t>(text_input_state->composition->end()));
-     }
-     details.Set("composition", composition);
-
-@@ -3693,9 +4903,8 @@ v8::Local<v8::Object> CreatePrintRequestHandle(
+@@ -3788,9 +5001,8 @@ v8::Local<v8::Object> CreatePrintRequestHandle(
  }
-
+ 
  struct PrintRequestHandlerState {
 -  explicit PrintRequestHandlerState(
 -      content::GlobalRenderFrameHostId frame_id,
@@ -1571,12 +1542,12 @@ index 2aeda4af73..b1daae6b50 100644
 +  explicit PrintRequestHandlerState(content::GlobalRenderFrameHostId frame_id,
 +                                    base::OnceCallback<void(bool)> callback)
        : frame_id(frame_id), callback(std::move(callback)) {}
-
+ 
    content::GlobalRenderFrameHostId frame_id;
-@@ -4294,6 +5503,296 @@ void WebContents::SendInputEvent(v8::Isolate* isolate,
+@@ -4404,6 +5616,296 @@ void WebContents::SendInputEvent(v8::Isolate* isolate,
        v8::Exception::Error(gin::StringToV8(isolate, "Invalid event object")));
  }
-
+ 
 +v8::Local<v8::Promise> WebContents::DispatchInputEvent(
 +    v8::Isolate* isolate,
 +    const gin_helper::Dictionary& input_event) {
@@ -1870,53 +1841,53 @@ index 2aeda4af73..b1daae6b50 100644
  void WebContents::BeginFrameSubscription(gin::Arguments* args) {
    bool only_dirty = false;
    FrameSubscriber::FrameCaptureCallback callback;
-@@ -5306,6 +6805,7 @@ void WebContents::FillObjectTemplate(v8::Isolate* isolate,
-       .SetMethod("focus", &WebContents::Focus)
+@@ -5417,6 +6919,7 @@ void WebContents::FillObjectTemplate(v8::Isolate* isolate,
        .SetMethod("isFocused", &WebContents::IsFocused)
+       .SetMethod("getTextCaretInfo", &WebContents::GetTextCaretInfo)
        .SetMethod("sendInputEvent", &WebContents::SendInputEvent)
 +      .SetMethod("dispatchInputEvent", &WebContents::DispatchInputEvent)
        .SetMethod("beginFrameSubscription", &WebContents::BeginFrameSubscription)
        .SetMethod("endFrameSubscription", &WebContents::EndFrameSubscription)
        .SetMethod("startDrag", &WebContents::StartDrag)
-@@ -5378,6 +6878,7 @@ const char* WebContents::GetTypeName() {
+@@ -5489,6 +6992,7 @@ const char* WebContents::GetTypeName() {
  }
-
+ 
  void WebContents::WillBeDestroyed() {
 +  ClearDispatchInputTouchPoints(this);
    ClearWeak();
  }
-
+ 
 diff --git a/shell/browser/api/electron_api_web_contents.h b/shell/browser/api/electron_api_web_contents.h
-index f384c39fda..5def18f9d4 100644
+index efb6aefd1c..71a68eb621 100644
 --- a/shell/browser/api/electron_api_web_contents.h
 +++ b/shell/browser/api/electron_api_web_contents.h
-@@ -308,6 +308,9 @@ class WebContents final : public ExclusiveAccessContext,
-
+@@ -309,6 +309,9 @@ class WebContents final : public ExclusiveAccessContext,
+ 
    // Send WebInputEvent to the page.
    void SendInputEvent(v8::Isolate* isolate, v8::Local<v8::Value> input_event);
 +  v8::Local<v8::Promise> DispatchInputEvent(
 +      v8::Isolate* isolate,
 +      const gin_helper::Dictionary& input_event);
-
+ 
    // Subscribe to the frame updates.
    void BeginFrameSubscription(gin::Arguments* args);
 diff --git a/spec/api-web-contents-spec.ts b/spec/api-web-contents-spec.ts
-index 50f86ffe54..77d3195ea4 100644
+index fb7e81b26b..506eb56751 100644
 --- a/spec/api-web-contents-spec.ts
 +++ b/spec/api-web-contents-spec.ts
 @@ -23,7 +23,7 @@ import { setTimeout } from 'node:timers/promises';
  import * as url from 'node:url';
-
+ 
  import { captureWithTabSourceId } from './lib/media-helpers';
 -import { ifdescribe, defer, waitUntil, listen, ifit } from './lib/spec-helpers';
 +import { ifdescribe, defer, waitUntil, listen, ifit, spawnAndWait } from './lib/spec-helpers';
  import { cleanupWebContents, closeAllWindows } from './lib/window-helpers';
-
+ 
  const fixturesPath = path.resolve(__dirname, 'fixtures');
-@@ -1712,6 +1712,1545 @@ describe('webContents module', () => {
+@@ -1763,6 +1763,1545 @@ describe('webContents module', () => {
      });
    });
-
+ 
 +  describe('dispatchInputEvent(inputEvent)', () => {
 +    afterEach(closeAllWindows);
 +
@@ -3978,3 +3949,6 @@ index 0000000000..c265e4b8e8
 +  "name": "electron-test-dispatch-input-drag-hang",
 +  "main": "main.js"
 +}
+-- 
+2.53.0
+

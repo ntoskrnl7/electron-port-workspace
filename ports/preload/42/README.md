@@ -25,6 +25,12 @@ Notes:
 - `0008` adds service worker preload targets so a service worker preload can run
   in Electron's existing shadow realm, the actual `ServiceWorkerGlobalScope`, or
   both.
+- `0009` aligns preload startup data typing with Electron 42.3.x renderer
+  startup data so the rebased bundle applies cleanly to `v42.3.3`.
+
+This target was regenerated against a clean `v42.3.3` Electron tree after
+`print-request-handler` and `widevine-cdm` were applied, matching the CI apply
+order used by `electron-port-release.yml`.
 
 Patch directories:
 
@@ -37,4 +43,12 @@ Use:
 ```bash
 scripts/port-bundle.sh apply preload --target 42 --src-root /path/to/src
 scripts/port-bundle.sh undo preload --target 42 --src-root /path/to/src
+```
+
+Verified apply sequence:
+
+```bash
+git -C <src>/electron am -3 ports/print-request-handler/42/electron/*.patch
+git -C <src>/electron am -3 ports/widevine-cdm/42/electron/*.patch
+git -C <src>/electron am -3 ports/preload/42/electron/*.patch
 ```

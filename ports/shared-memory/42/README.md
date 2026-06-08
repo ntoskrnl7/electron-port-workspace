@@ -1,13 +1,28 @@
 # shared-memory / 42
 
-Reusable Electron 42 target bundle for shared-memory channel APIs.
+Reusable Electron target bundle.
 
-Patch sequence:
+Dependencies:
 
-- `electron/0001-feat-add-shared-memory-channel-APIs.patch`
+- `websocket-main-bridge`
+- `worker-runtime`
+- `window-prompt-dialog`
+- `javascript-dialog-handler`
 
-This is an Electron-only bundle. It does not register Chromium patch-stack
-entries.
+The dependencies are recorded in `manifest.txt` as
+`depends_on=websocket-main-bridge,worker-runtime,window-prompt-dialog,javascript-dialog-handler`.
+Apply those 42 target bundles first. `port-bundle` validates this before
+applying the bundle.
+
+Patch directories:
+
+- `electron/*.patch`: primary patch sequence for `src/electron`
+- `chromium-direct/*.patch`: archived Chromium source patches for review/debugging
+- `chromium/*.patch`: direct Chromium `src` patches for explicit direct-only bundles
+
+For `electronized_chromium_patches=true`, apply registers the archived
+Chromium patches in Electron's `patches/chromium` stack, then materializes
+those Chromium patches into Chromium `src`.
 
 Use:
 
@@ -21,34 +36,18 @@ scripts/port-bundle.sh undo shared-memory --target 42 --src-root /path/to/src
 .\scripts\port-bundle.ps1 undo shared-memory -Target 42 -SrcRoot C:\path\to\src
 ```
 
-## Electron 42.3.3 import note
+## Electron 42.3.3 integration note
 
-This bundle carries the shared-memory implementation that was already working
-on Electron 42.3.0, with the import/rebase adjustment needed for Electron
-42.3.3. It has no dependency on `vaapi-hevc-wip`; include or omit that media
-port according to the target build. The shared-memory patch applies after:
+This bundle is rebased for the Electron 42.3.3 port stack with
+`vaapi-hevc-wip` excluded. The patch applies after:
 
 - `websocket-main-bridge`
 - `worker-runtime`
 - `window-prompt-dialog`
 - `javascript-dialog-handler`
 
-The dependency order is recorded in `manifest.txt`.
-
-During the 42.3.3 import the semantic conflict was in
+During the 42.3.x integration the main semantic conflict was in
 `shell/renderer/service_worker_data.h`. The stored patch keeps the
 `worker-runtime` service-worker helpers (`GetCurrent`, `process_metrics`, and
 `MarkServiceWorkerPreloadRealmInitialized`) and adds the shared-memory
 `RegisterSharedMemoryPool` override.
-
-Validation after the 42.3.3 import adjustment:
-
-```powershell
-.\scripts\port-bundle.ps1 apply shared-memory -Target 42 -SrcRoot <src-root> -Repos electron
-git diff --check HEAD~1..HEAD
-```
-
-The verified apply base was Electron commit
-`e9dc7dccbb8c34b0f9b153e0b1c9945c6ae50b13`, and the resulting tree matched
-the adjusted shared-memory commit
-`f5cd74174c44e91dc1d7879934548d7d793282bc`.

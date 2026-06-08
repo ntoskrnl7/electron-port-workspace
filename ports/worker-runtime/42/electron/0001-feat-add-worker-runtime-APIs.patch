@@ -1,7 +1,7 @@
-From dd0247591d3eb732b5d9a911ca7e614e24da8da2 Mon Sep 17 00:00:00 2001
+From 48dbd90fbfb6aba68574feb14a8fc4e29d19b220 Mon Sep 17 00:00:00 2001
 From: Jung-Kwang Lee <ntoskrnl7@gmail.com>
 Date: Mon, 18 May 2026 16:21:48 +0900
-Subject: feat: add worker runtime APIs
+Subject: [PATCH 1/2] feat: add worker runtime APIs
 
 ---
  default_app/default_app.ts                    |   1 +
@@ -33,7 +33,7 @@ Subject: feat: add worker runtime APIs
  docs/tutorial/custom-window-interactions.md   |   2 +
  docs/tutorial/message-ports.md                |   1 +
  docs/tutorial/security.md                     |   1 +
- filenames.auto.gni                            |  41 ++
+ filenames.auto.gni                            |  40 ++
  filenames.gni                                 |  16 +
  lib/browser/api/dedicated-worker-main.ts      |  31 ++
  lib/browser/api/module-list.ts                |   2 +
@@ -44,8 +44,6 @@ Subject: feat: add worker runtime APIs
  lib/browser/guest-view-manager.ts             |  12 +-
  lib/browser/ipc-dispatch.ts                   | 248 +++++++--
  lib/browser/ipc-main-impl.ts                  |   6 +-
- lib/browser/rpc-server.ts                     |  28 +-
- lib/preload_realm/init.ts                     |  10 +-
  lib/renderer/ipc-native-setup.ts              |  15 +-
  lib/renderer/ipc-renderer-bindings.ts         |   2 +
  lib/worker/init.ts                            |   1 +
@@ -68,22 +66,28 @@ Subject: feat: add worker runtime APIs
  shell/browser/api/electron_api_worker_util.h  |  24 +
  .../electron_api_worker_ipc_handler_impl.cc   | 446 ++++++++++++++++
  .../electron_api_worker_ipc_handler_impl.h    | 166 ++++++
- shell/browser/electron_browser_client.cc      |  33 +-
+ shell/browser/electron_browser_client.cc      |  57 +-
  shell/browser/preload_script.cc               |  36 ++
  shell/browser/preload_script.h                |  18 +
- shell/common/api/api.mojom                    |  25 +-
+ shell/browser/renderer_startup_data.cc        |  17 +-
+ shell/browser/renderer_startup_data.h         |   9 +-
+ shell/common/api/api.mojom                    |  39 +-
  .../api/electron_api_context_bridge.cc        |  12 +-
  .../renderer/api/electron_api_ipc_renderer.cc |  74 ++-
- shell/renderer/electron_api_service_impl.cc   |  72 +--
+ shell/renderer/electron_api_service_impl.cc   |  51 +-
  shell/renderer/electron_api_service_impl.h    |   2 +
  shell/renderer/electron_renderer_v8_util.cc   | 123 +++++
  shell/renderer/electron_renderer_v8_util.h    |  43 ++
- shell/renderer/renderer_client_base.cc        | 139 ++++-
+ .../electron_sandboxed_renderer_client.cc     |   3 +-
+ shell/renderer/preload_realm_context.cc       |   3 +-
+ shell/renderer/preload_utils.cc               |   8 +-
+ shell/renderer/preload_utils.h                |   2 +
+ shell/renderer/renderer_client_base.cc        | 183 ++++++-
  shell/renderer/renderer_client_base.h         |   2 +
- shell/renderer/service_worker_data.cc         |  75 ++-
+ shell/renderer/service_worker_data.cc         |  71 ++-
  shell/renderer/service_worker_data.h          |   2 +
  shell/renderer/worker_data.cc                 | 112 ++++
- shell/renderer/worker_data.h                  |  76 +++
+ shell/renderer/worker_data.h                  |  85 +++
  spec/api-browser-window-spec.ts               |  10 +-
  spec/api-service-worker-main-spec.ts          |  68 ++-
  spec/api-session-spec.ts                      |  24 +
@@ -94,7 +98,7 @@ Subject: feat: add worker runtime APIs
  spec/ts-smoke/electron/main.ts                | 141 ++++-
  typings/internal-ambient.d.ts                 |  11 +
  typings/internal-electron.d.ts                |  38 +-
- 90 files changed, 5232 insertions(+), 195 deletions(-)
+ 94 files changed, 5285 insertions(+), 211 deletions(-)
  create mode 100644 docs/api/dedicated-worker-main.md
  create mode 100644 docs/api/dedicated-workers.md
  create mode 100644 docs/api/ipc-main-dedicated-worker.md
@@ -136,12 +140,12 @@ index 3f4b60b06c..849e3a958d 100644
 +++ b/default_app/default_app.ts
 @@ -79,6 +79,7 @@ function isTrustedSender(webContents: Electron.WebContents) {
  }
-
+ 
  ipcMain.handle('bootstrap', (event) => {
 +  if (event.type !== 'frame') return null;
    return isTrustedSender(event.sender) ? electronPath : null;
  });
-
+ 
 diff --git a/docs/README.md b/docs/README.md
 index 02d5d1331c..a1a74684c0 100644
 --- a/docs/README.md
@@ -404,17 +408,17 @@ index 08a9d63a98..46b918ec84 100644
 +++ b/docs/api/ipc-main-service-worker.md
 @@ -5,7 +5,7 @@
  Process: [Main](../glossary.md#main-process)
-
+ 
  > [!NOTE]
 -> This API is a subtle variation of [`IpcMain`](ipc-main.md)—targeted for
 +> This API is a subtle variation of [`IpcMain`](ipc-main.md) targeted for
  > communicating with service workers. For communicating with web frames,
  > consult the `IpcMain` documentation.
-
+ 
 @@ -27,6 +27,16 @@ Process: [Main](../glossary.md#main-process)
  Listens to `channel`, when a new message arrives `listener` would be called with
  `listener(event, args...)`.
-
+ 
 +#### `ipcMainServiceWorker.off(channel, listener)`
 +
 +* `channel` string
@@ -426,12 +430,12 @@ index 08a9d63a98..46b918ec84 100644
 +`channel`.
 +
  #### `ipcMainServiceWorker.once(channel, listener)`
-
+ 
  * `channel` string
 @@ -37,14 +47,23 @@ Listens to `channel`, when a new message arrives `listener` would be called with
  Adds a one time `listener` function for the event. This `listener` is invoked
  only the next time a message is sent to `channel`, after which it is removed.
-
+ 
 +#### `ipcMainServiceWorker.addListener(channel, listener)`
 +
 +* `channel` string
@@ -442,18 +446,18 @@ index 08a9d63a98..46b918ec84 100644
 +Alias for `ipcMainServiceWorker.on`.
 +
  #### `ipcMainServiceWorker.removeListener(channel, listener)`
-
+ 
  * `channel` string
  * `listener` Function
 +  * `event` [IpcMainServiceWorkerEvent][ipc-main-service-worker-event]
    * `...args` any[]
-
+ 
 -Removes the specified `listener` from the listener array for the specified
 -`channel`.
 +Alias for `ipcMainServiceWorker.off`.
-
+ 
  #### `ipcMainServiceWorker.removeAllListeners([channel])`
-
+ 
 diff --git a/docs/api/ipc-main-session.md b/docs/api/ipc-main-session.md
 new file mode 100644
 index 0000000000..7f1937aaad
@@ -742,58 +746,58 @@ index b14b010f13..fb1f535a20 100644
 --- a/docs/api/ipc-main.md
 +++ b/docs/api/ipc-main.md
 @@ -38,7 +38,7 @@ The `ipcMain` module has the following methods to listen for events:
-
+ 
  * `channel` string
  * `listener` Function
 -  * `event` [IpcMainEvent][ipc-main-event]
 +  * `event` [IpcMainEvent][ipc-main-event] | [IpcMainDedicatedWorkerEvent][ipc-main-dedicated-worker-event] | [IpcMainServiceWorkerEvent][ipc-main-service-worker-event] | [IpcMainSharedWorkerEvent][ipc-main-shared-worker-event]
    * `...args` any[]
-
+ 
  Listens to `channel`, when a new message arrives `listener` would be called with
 @@ -55,7 +55,7 @@ added:
-
+ 
  * `channel` string
  * `listener` Function
 -  * `event` [IpcMainEvent][ipc-main-event]
 +  * `event` [IpcMainEvent][ipc-main-event] | [IpcMainDedicatedWorkerEvent][ipc-main-dedicated-worker-event] | [IpcMainServiceWorkerEvent][ipc-main-service-worker-event] | [IpcMainSharedWorkerEvent][ipc-main-shared-worker-event]
    * `...args` any[]
-
+ 
  Removes the specified `listener` from the listener array for the specified
 @@ -65,7 +65,7 @@ Removes the specified `listener` from the listener array for the specified
-
+ 
  * `channel` string
  * `listener` Function
 -  * `event` [IpcMainEvent][ipc-main-event]
 +  * `event` [IpcMainEvent][ipc-main-event] | [IpcMainDedicatedWorkerEvent][ipc-main-dedicated-worker-event] | [IpcMainServiceWorkerEvent][ipc-main-service-worker-event] | [IpcMainSharedWorkerEvent][ipc-main-shared-worker-event]
    * `...args` any[]
-
+ 
  Adds a one time `listener` function for the event. This `listener` is invoked
 @@ -75,7 +75,7 @@ only the next time a message is sent to `channel`, after which it is removed.
-
+ 
  * `channel` string
  * `listener` Function
 -  * `event` [IpcMainEvent][ipc-main-event]
 +  * `event` [IpcMainEvent][ipc-main-event] | [IpcMainDedicatedWorkerEvent][ipc-main-dedicated-worker-event] | [IpcMainServiceWorkerEvent][ipc-main-service-worker-event] | [IpcMainSharedWorkerEvent][ipc-main-shared-worker-event]
    * `...args` any[]
-
+ 
  Alias for [`ipcMain.on`](#ipcmainonchannel-listener).
 @@ -105,7 +105,7 @@ added:
-
+ 
  * `channel` string
  * `listener` Function\<Promise\<any\> | any\>
 -  * `event` [IpcMainInvokeEvent][ipc-main-invoke-event]
 +  * `event` [IpcMainInvokeEvent][ipc-main-invoke-event] | [IpcMainDedicatedWorkerInvokeEvent][ipc-main-dedicated-worker-invoke-event] | [IpcMainServiceWorkerInvokeEvent][ipc-main-service-worker-invoke-event] | [IpcMainSharedWorkerInvokeEvent][ipc-main-shared-worker-invoke-event]
    * `...args` any[]
-
+ 
  Adds a handler for an `invoke`able IPC. This handler will be called whenever a
 @@ -149,7 +149,7 @@ added:
-
+ 
  * `channel` string
  * `listener` Function\<Promise\<any\> | any\>
 -  * `event` [IpcMainInvokeEvent][ipc-main-invoke-event]
 +  * `event` [IpcMainInvokeEvent][ipc-main-invoke-event] | [IpcMainDedicatedWorkerInvokeEvent][ipc-main-dedicated-worker-invoke-event] | [IpcMainServiceWorkerInvokeEvent][ipc-main-service-worker-invoke-event] | [IpcMainSharedWorkerInvokeEvent][ipc-main-shared-worker-invoke-event]
    * `...args` any[]
-
+ 
  Handles a single `invoke`able IPC message, then removes the listener. See
 @@ -173,3 +173,9 @@ Removes any handler for `channel`, if present.
  [web-contents-send]: ../api/web-contents.md#contentssendchannel-args
@@ -812,7 +816,7 @@ index d51d65c9e3..b3f7100def 100644
 @@ -24,6 +24,17 @@ Sending Functions, Promises, Symbols, WeakMaps, or WeakSets will throw an except
  The service worker process can handle the message by listening to `channel` with the
  [`ipcRenderer`](ipc-renderer.md) module.
-
+ 
 +#### `serviceWorker.executeJavaScript(code)` _Experimental_
 +
 +- `code` string
@@ -825,7 +829,7 @@ index d51d65c9e3..b3f7100def 100644
 +stopped service worker.
 +
  #### `serviceWorker.startTask()` _Experimental_
-
+ 
  Returns `Object`:
 diff --git a/docs/api/session.md b/docs/api/session.md
 index b952b4c650..7a9e868bea 100644
@@ -841,13 +845,13 @@ index b952b4c650..7a9e868bea 100644
 +worker Web APIs have been initialized. Set `injectionPoint` to `context-created`
 +only when the preload must run before debugger wait-for-start evaluation; worker
 +Web APIs may still be incomplete at that point.
-
+ 
  For `service-worker` contexts, scripts run in Electron's isolated
  `ShadowRealmGlobalScope` by default to preserve existing behavior. Set `target`
 @@ -1744,6 +1748,15 @@ A [`Extensions`](extensions-api.md) object for this session.
-
+ 
  A [`ServiceWorkers`](service-workers.md) object for this session.
-
+ 
 +#### `ses.sharedWorkers` _Readonly_ _Experimental_
 +
 +A [`SharedWorkers`](shared-workers.md) object for this session.
@@ -858,7 +862,7 @@ index b952b4c650..7a9e868bea 100644
 +shared workers in this session.
 +
  #### `ses.webRequest` _Readonly_
-
+ 
  A [`WebRequest`](web-request.md) object for this session.
 diff --git a/docs/api/shared-worker-main.md b/docs/api/shared-worker-main.md
 new file mode 100644
@@ -1166,54 +1170,54 @@ index dac1b52bfd..ef817e7a0b 100644
 +++ b/docs/api/structures/shared-worker-info.md
 @@ -1,4 +1,7 @@
  # SharedWorkerInfo Object
-
+ 
  * `id` string - The unique id of the shared worker.
 +* `name` string - The name of the shared worker.
  * `url` string - The url of the shared worker.
 +* `scriptURL` string - The final response URL of the shared worker script.
 +* `renderProcessId` number - The virtual ID of the process that this shared worker is running in.
 diff --git a/docs/api/web-contents.md b/docs/api/web-contents.md
-index 40e41341a5..21880b2649 100644
+index 627efac45c..5552a4c519 100644
 --- a/docs/api/web-contents.md
 +++ b/docs/api/web-contents.md
 @@ -1061,25 +1061,27 @@ Emitted when the preload script `preloadPath` throws an unhandled exception `err
-
+ 
  Returns:
-
+ 
 -* `event` [IpcMainEvent](structures/ipc-main-event.md)
 +* `event` [IpcMainEvent](structures/ipc-main-event.md) | [IpcMainDedicatedWorkerEvent](structures/ipc-main-dedicated-worker-event.md)
  * `channel` string
  * `...args` any[]
-
+ 
 -Emitted when the renderer process sends an asynchronous message via `ipcRenderer.send()`.
 +Emitted when a frame or dedicated worker associated with this WebContents sends
 +an asynchronous message via `ipcRenderer.send()`.
-
+ 
 -See also [`webContents.ipc`](#contentsipc-readonly), which provides an [`IpcMain`](ipc-main.md)-like interface for responding to IPC messages specifically from this WebContents.
 +See also [`webContents.ipc`](#contentsipc-readonly), which provides an [`IpcMainWebContents`](ipc-main-web-contents.md)-like interface for responding to IPC messages specifically from this WebContents.
-
+ 
  #### Event: 'ipc-message-sync'
-
+ 
  Returns:
-
+ 
 -* `event` [IpcMainEvent](structures/ipc-main-event.md)
 +* `event` [IpcMainEvent](structures/ipc-main-event.md) | [IpcMainDedicatedWorkerEvent](structures/ipc-main-dedicated-worker-event.md)
  * `channel` string
  * `...args` any[]
-
+ 
 -Emitted when the renderer process sends a synchronous message via `ipcRenderer.sendSync()`.
 +Emitted when a frame or dedicated worker associated with this WebContents sends
 +a synchronous message via `ipcRenderer.sendSync()`.
-
+ 
 -See also [`webContents.ipc`](#contentsipc-readonly), which provides an [`IpcMain`](ipc-main.md)-like interface for responding to IPC messages specifically from this WebContents.
 +See also [`webContents.ipc`](#contentsipc-readonly), which provides an [`IpcMainWebContents`](ipc-main-web-contents.md)-like interface for responding to IPC messages specifically from this WebContents.
-
+ 
  #### Event: 'preferred-size-changed'
-
+ 
 @@ -1105,6 +1107,30 @@ Returns:
-
+ 
  Emitted when the [mainFrame](web-contents.md#contentsmainframe-readonly), an `<iframe>`, or a nested `<iframe>` is loaded within the page.
-
+ 
 +#### Event: 'dedicated-worker-created' _Experimental_
 +
 +Returns:
@@ -1239,19 +1243,19 @@ index 40e41341a5..21880b2649 100644
 +destroyed.
 +
  ### Instance Methods
-
+ 
  #### `contents.loadURL(url[, options])`
-@@ -1904,6 +1930,7 @@ frame that originally requested printing.
+@@ -2033,6 +2059,7 @@ frame that originally requested printing.
  const { BrowserWindow } = require('electron')
-
+ 
  const win = new BrowserWindow()
 +const decidePrintOptions = async (url, html) => ({})
-
+ 
  win.webContents.setPrintRequestHandler(async (details, request) => {
    const html = await details.frame.executeJavaScript(
-@@ -1923,6 +1950,11 @@ To decide asynchronously and then print without using the original native print
+@@ -2052,6 +2079,11 @@ To decide asynchronously and then print without using the original native print
  continuation, call `job.print(options)`:
-
+ 
  ```js
 +const { BrowserWindow } = require('electron')
 +
@@ -1260,8 +1264,8 @@ index 40e41341a5..21880b2649 100644
 +
  win.webContents.setPrintRequestHandler(async (details, request) => {
    const options = await getPrintOptions(details)
-
-@@ -2176,6 +2208,7 @@ You can also read `frameId` from all incoming IPC messages in the main process.
+ 
+@@ -2305,6 +2337,7 @@ You can also read `frameId` from all incoming IPC messages in the main process.
  ```js
  // In the main process
  ipcMain.on('ping', (event) => {
@@ -1269,10 +1273,10 @@ index 40e41341a5..21880b2649 100644
    console.info('Message came from frameId:', event.frameId)
  })
  ```
-@@ -2483,22 +2516,31 @@ This corresponds to the [animationPolicy][] accessibility feature in Chromium.
-
+@@ -2612,22 +2645,31 @@ This corresponds to the [animationPolicy][] accessibility feature in Chromium.
+ 
  #### `contents.ipc` _Readonly_
-
+ 
 -An [`IpcMain`](ipc-main.md) scoped to just IPC messages sent from this
 -WebContents.
 +An [`IpcMainWebContents`](ipc-main-web-contents.md) scoped to IPC messages sent from frames and
@@ -1281,7 +1285,7 @@ index 40e41341a5..21880b2649 100644
 +IPC messages sent from a frame with `ipcRenderer.send`,
 +`ipcRenderer.sendSync` or `ipcRenderer.postMessage` will be delivered in the
 +following order:
-
+ 
 -IPC messages sent with `ipcRenderer.send`, `ipcRenderer.sendSync` or
 -`ipcRenderer.postMessage` will be delivered in the following order:
 +1. `contents.on('ipc-message')`
@@ -1291,43 +1295,43 @@ index 40e41341a5..21880b2649 100644
 +
 +IPC messages sent from a dedicated worker will be delivered in the following
 +order:
-
+ 
  1. `contents.on('ipc-message')`
 -2. `contents.mainFrame.on(channel)`
 +2. `dedicatedWorker.ipc.on(channel)`
  3. `contents.ipc.on(channel)`
  4. `ipcMain.on(channel)`
-
+ 
  Handlers registered with `invoke` will be checked in the following order. The
  first one that is defined will be called, the rest will be ignored.
-
+ 
 -1. `contents.mainFrame.handle(channel)`
 -2. `contents.handle(channel)`
 +1. `frame.ipc.handle(channel)` or `dedicatedWorker.ipc.handle(channel)`
 +2. `contents.ipc.handle(channel)`
  3. `ipcMain.handle(channel)`
-
+ 
  A handler or event listener registered on the WebContents will receive IPC
-@@ -2509,6 +2551,8 @@ In that case, handlers should check the `senderFrame` property of the IPC event
+@@ -2638,6 +2680,8 @@ In that case, handlers should check the `senderFrame` property of the IPC event
  to ensure that the message is coming from the expected frame. Alternatively,
  register handlers on the appropriate frame directly using the
  [`WebFrameMain.ipc`](web-frame-main.md#frameipc-readonly) interface.
 +Dedicated worker messages can be scoped using
 +[`DedicatedWorkerMain.ipc`](dedicated-worker-main.md#dedicatedworkeripc-readonly-experimental).
-
+ 
  #### `contents.audioMuted`
-
-@@ -2584,6 +2628,11 @@ when the page becomes backgrounded. This also affects the Page Visibility API.
-
+ 
+@@ -2713,6 +2757,11 @@ when the page becomes backgrounded. This also affects the Page Visibility API.
+ 
  A [`WebFrameMain`](web-frame-main.md) property that represents the top frame of the page's frame hierarchy.
-
+ 
 +#### `contents.dedicatedWorkers` _Readonly_ _Experimental_
 +
 +A [`DedicatedWorkers`](dedicated-workers.md) object for dedicated workers
 +associated with this WebContents.
 +
  #### `contents.opener` _Readonly_
-
+ 
  A [`WebFrameMain | null`](web-frame-main.md) property that represents the frame that opened this WebContents, either
 diff --git a/docs/tutorial/custom-window-interactions.md b/docs/tutorial/custom-window-interactions.md
 index 2d9a656e58..d77dba47b3 100644
@@ -1335,7 +1339,7 @@ index 2d9a656e58..d77dba47b3 100644
 +++ b/docs/tutorial/custom-window-interactions.md
 @@ -86,7 +86,9 @@ const win = new BrowserWindow({
  })
-
+ 
  ipcMain.on('set-ignore-mouse-events', (event, ignore, options) => {
 +  if (event.type !== 'frame') return
    const win = BrowserWindow.fromWebContents(event.sender)
@@ -1360,7 +1364,7 @@ index 80ca501e94..34edc7243b 100644
 --- a/docs/tutorial/security.md
 +++ b/docs/tutorial/security.md
 @@ -766,6 +766,7 @@ ipcMain.handle('get-secrets', () => {
-
+ 
  // Good
  ipcMain.handle('get-secrets', (e) => {
 +  if (e.type !== 'frame' || !e.senderFrame) return null
@@ -1368,7 +1372,7 @@ index 80ca501e94..34edc7243b 100644
    return getSecrets()
  })
 diff --git a/filenames.auto.gni b/filenames.auto.gni
-index 75e6706520..2696858633 100644
+index 2a77299399..79b001a358 100644
 --- a/filenames.auto.gni
 +++ b/filenames.auto.gni
 @@ -16,9 +16,12 @@ auto_filenames = {
@@ -1521,15 +1525,7 @@ index 75e6706520..2696858633 100644
      "lib/browser/api/system-preferences.ts",
      "lib/browser/api/touch-bar.ts",
      "lib/browser/api/tray.ts",
-@@ -282,6 +320,7 @@ auto_filenames = {
-     "lib/browser/api/web-contents.ts",
-     "lib/browser/api/web-frame-main.ts",
-     "lib/browser/default-menu.ts",
-+    "lib/browser/desktop-name.ts",
-     "lib/browser/devtools.ts",
-     "lib/browser/guest-view-manager.ts",
-     "lib/browser/guest-window-manager.ts",
-@@ -292,6 +331,7 @@ auto_filenames = {
+@@ -293,6 +331,7 @@ auto_filenames = {
      "lib/browser/ipc-main-internal.ts",
      "lib/browser/message-port-main.ts",
      "lib/browser/parse-features-string.ts",
@@ -1537,7 +1533,7 @@ index 75e6706520..2696858633 100644
      "lib/browser/rpc-server.ts",
      "lib/browser/web-view-events.ts",
      "lib/common/api/module-list.ts",
-@@ -371,6 +411,7 @@ auto_filenames = {
+@@ -372,6 +411,7 @@ auto_filenames = {
      "lib/renderer/api/shared-texture.ts",
      "lib/renderer/api/web-frame.ts",
      "lib/renderer/api/web-utils.ts",
@@ -1546,7 +1542,7 @@ index 75e6706520..2696858633 100644
      "lib/renderer/ipc-renderer-internal-utils.ts",
      "lib/renderer/ipc-renderer-internal.ts",
 diff --git a/filenames.gni b/filenames.gni
-index f1abc2d7ff..af90176840 100644
+index 9b7e74f5c5..a8e2c68a68 100644
 --- a/filenames.gni
 +++ b/filenames.gni
 @@ -271,6 +271,10 @@ filenames = {
@@ -1589,7 +1585,7 @@ index f1abc2d7ff..af90176840 100644
      "shell/browser/electron_autofill_driver.cc",
      "shell/browser/electron_autofill_driver.h",
      "shell/browser/electron_autofill_driver_factory.cc",
-@@ -742,6 +754,8 @@ filenames = {
+@@ -751,6 +763,8 @@ filenames = {
      "shell/renderer/electron_render_frame_observer.h",
      "shell/renderer/electron_renderer_client.cc",
      "shell/renderer/electron_renderer_client.h",
@@ -1598,7 +1594,7 @@ index f1abc2d7ff..af90176840 100644
      "shell/renderer/electron_sandboxed_renderer_client.cc",
      "shell/renderer/electron_sandboxed_renderer_client.h",
      "shell/renderer/electron_smooth_round_rect.cc",
-@@ -758,6 +772,8 @@ filenames = {
+@@ -767,6 +781,8 @@ filenames = {
      "shell/renderer/service_worker_data.h",
      "shell/renderer/web_worker_observer.cc",
      "shell/renderer/web_worker_observer.h",
@@ -1673,12 +1669,12 @@ index 39c098d695..2f4bd3739e 100644
  import { addIpcDispatchListeners } from '@electron/internal/browser/ipc-dispatch';
 +import { IpcMainImpl } from '@electron/internal/browser/ipc-main-impl';
  import * as deprecate from '@electron/internal/common/deprecate';
-
+ 
  import { net } from 'electron/main';
 @@ -7,6 +8,73 @@ import { net } from 'electron/main';
  const { fromPartition, fromPath, Session } = process._linkedBinding('electron_browser_session');
  const { isDisplayMediaSystemPickerAvailable } = process._linkedBinding('electron_browser_desktop_capturer');
-
+ 
 +const getPrototypePropertyDescriptor = (prototype: object, property: string) => {
 +  for (let current: object | null = prototype; current; current = Object.getPrototypeOf(current)) {
 +    const descriptor = Object.getOwnPropertyDescriptor(current, property);
@@ -1752,7 +1748,7 @@ index 39c098d695..2f4bd3739e 100644
 @@ -25,6 +93,14 @@ Object.freeze(systemPickerVideoSource);
  Session.prototype._init = function () {
    addIpcDispatchListeners(this);
-
+ 
 +  const ipc = new IpcMainImpl();
 +  Object.defineProperty(this, 'ipc', {
 +    get() {
@@ -1769,7 +1765,7 @@ index 94ff1627c6..3616430840 100644
 --- a/lib/browser/api/shared-texture.ts
 +++ b/lib/browser/api/shared-texture.ts
 @@ -19,7 +19,8 @@ type SharedTextureImportedWrapper = {
-
+ 
  ipcMain.handle(
    IPC_MESSAGES.IMPORT_SHARED_TEXTURE_RELEASE_RENDERER_TO_MAIN,
 -  (event: Electron.IpcMainInvokeEvent, textureId: string) => {
@@ -1816,13 +1812,13 @@ index 0000000000..6132532e7a
 +
 +module.exports = SharedWorkerMain;
 diff --git a/lib/browser/api/web-contents.ts b/lib/browser/api/web-contents.ts
-index 58e882be30..45fcfa63f0 100644
+index 7e50ebf3b8..bcdcac4b38 100644
 --- a/lib/browser/api/web-contents.ts
 +++ b/lib/browser/api/web-contents.ts
 @@ -123,11 +123,78 @@ const binding = process._linkedBinding('electron_browser_web_contents');
  const printing = process._linkedBinding('electron_browser_printing');
  const { WebContents } = binding as { WebContents: { prototype: Electron.WebContents } };
-
+ 
 +const getPrototypePropertyDescriptor = (prototype: object, property: string) => {
 +  for (let current: object | null = prototype; current; current = Object.getPrototypeOf(current)) {
 +    const descriptor = Object.getOwnPropertyDescriptor(current, property);
@@ -1872,7 +1868,7 @@ index 58e882be30..45fcfa63f0 100644
  WebContents.prototype.emit = function (eventName: string, ...args: any[]) {
    return webContentsEmit.call(this, eventName, ...wrapPictureInPictureEvent(app, eventName, args));
  };
-
+ 
 +const dedicatedWorkersDescriptor = getPrototypePropertyDescriptor(WebContents.prototype, 'dedicatedWorkers');
 +if (dedicatedWorkersDescriptor?.get) {
 +  Object.defineProperty(WebContents.prototype, 'dedicatedWorkers', {
@@ -1898,28 +1894,28 @@ index 58e882be30..45fcfa63f0 100644
  WebContents.prototype.postMessage = function (...args) {
    return this.mainFrame.postMessage(...args);
  };
-@@ -698,6 +765,8 @@ WebContents.prototype._init = function () {
+@@ -869,6 +936,8 @@ WebContents.prototype._init = function () {
      enumerable: true
    });
-
+ 
 +  Reflect.get(this, 'dedicatedWorkers');
 +
    // Add navigationHistory property which handles session history,
    // maintaining a list of navigation entries for backward and forward navigation.
    Object.defineProperty(this, 'navigationHistory', {
-@@ -788,7 +857,7 @@ WebContents.prototype._init = function () {
+@@ -959,7 +1028,7 @@ WebContents.prototype._init = function () {
          disposition
        };
-
+ 
 -      let result: ReturnType<typeof this._callWindowOpenHandler>;
 +      let result: ReturnType<Electron.WebContents['_callWindowOpenHandler']>;
        try {
          result = this._callWindowOpenHandler(event, details);
        } catch (err) {
-@@ -831,7 +900,7 @@ WebContents.prototype._init = function () {
+@@ -1002,7 +1071,7 @@ WebContents.prototype._init = function () {
          postBody
        };
-
+ 
 -      let result: ReturnType<typeof this._callWindowOpenHandler>;
 +      let result: ReturnType<Electron.WebContents['_callWindowOpenHandler']>;
        try {
@@ -1931,7 +1927,7 @@ index 8a73db2c76..81618df518 100644
 +++ b/lib/browser/guest-view-manager.ts
 @@ -163,7 +163,12 @@ const createGuest = function (
    }
-
+ 
    // Dispatch guest's IPC messages to embedder.
 -  guest.on('-ipc-message-host' as any, function (event: Electron.IpcMainEvent, channel: string, args: any[]) {
 +  guest.on('-ipc-message-host' as any, function (
@@ -1963,12 +1959,12 @@ index c5a7d062eb..669b06a88a 100644
  import { ipcMainInternal } from '@electron/internal/browser/ipc-main-internal';
 +import { IpcMainImpl } from '@electron/internal/browser/ipc-main-impl';
  import { MessagePortMain } from '@electron/internal/browser/message-port-main';
-
+ 
  import type { ServiceWorkerMain } from 'electron/main';
 @@ -14,11 +15,99 @@ const addReplyToEvent = (event: Electron.IpcMainEvent) => {
    };
  };
-
+ 
 -const addReturnValueToEvent = (event: Electron.IpcMainEvent | Electron.IpcMainServiceWorkerEvent) => {
 +type WorkerIpcMainEvent =
 +  | Electron.IpcMainDedicatedWorkerEvent
@@ -2065,7 +2061,7 @@ index c5a7d062eb..669b06a88a 100644
 +    get: () => isReturnValueSet
 +  });
  };
-
+ 
  const getServiceWorkerFromEvent = (
 @@ -29,42 +118,108 @@ const getServiceWorkerFromEvent = (
  const addServiceWorkerPropertyToEvent = (
@@ -2080,7 +2076,7 @@ index c5a7d062eb..669b06a88a 100644
 +    });
 +  }
  };
-
+ 
  /**
   * Cached IPC emitters sorted by dispatch priority.
   * Caching is used to avoid frequent array allocations.
@@ -2098,7 +2094,7 @@ index c5a7d062eb..669b06a88a 100644
 +  undefined, // WebContents ipc
 +  ipcMainEmitter
  ];
-
+ 
  // Get list of relevant IPC emitters for dispatch.
  const getIpcEmittersForFrameEvent = (
    event: Electron.IpcMainEvent | Electron.IpcMainInvokeEvent
@@ -2115,7 +2111,7 @@ index c5a7d062eb..669b06a88a 100644
 +  cachedIpcEmitters[1] = asIpcEmitter(event.sender.ipc);
    return cachedIpcEmitters;
  };
-
+ 
 +const getIpcEmittersForDedicatedWorkerEvent = (
 +  event: Electron.IpcMainDedicatedWorkerEvent | Electron.IpcMainDedicatedWorkerInvokeEvent
 +): IpcEmitter[] => {
@@ -2183,7 +2179,7 @@ index c5a7d062eb..669b06a88a 100644
 -    function (event: Electron.IpcMainEvent | Electron.IpcMainServiceWorkerEvent, channel: string, args: any[]) {
 +    function (event: IpcEvent, channel: string, args: any[]) {
        const internal = v8Util.getHiddenValue<boolean>(event, 'internal');
-
+ 
        if (internal) {
 @@ -72,12 +227,14 @@ export function addIpcDispatchListeners(api: NodeJS.EventEmitter) {
        } else if (event.type === 'frame') {
@@ -2218,10 +2214,10 @@ index c5a7d062eb..669b06a88a 100644
 @@ -97,21 +254,17 @@ export function addIpcDispatchListeners(api: NodeJS.EventEmitter) {
          event._replyChannel.sendReply({ error: error.toString() });
        };
-
+ 
 -      const targets: (Electron.IpcMainServiceWorker | ElectronInternal.IpcMainInternal | undefined)[] = [];
 +      const targets: IpcEmitter[] = [];
-
+ 
        if (internal) {
 -        targets.push(ipcMainInternal);
 -      } else if (event.type === 'frame') {
@@ -2234,7 +2230,7 @@ index c5a7d062eb..669b06a88a 100644
 +      } else {
 +        targets.push(...getIpcEmittersForEvent(event));
        }
-
+ 
 -      const target = targets.find((target) => (target as any)?._invokeHandlers.has(channel));
 -      if (target) {
 -        const handler = (target as any)._invokeHandlers.get(channel);
@@ -2245,7 +2241,7 @@ index c5a7d062eb..669b06a88a 100644
            replyWithResult(await Promise.resolve(handler(event, ...args)));
          } catch (err) {
 @@ -125,7 +278,7 @@ export function addIpcDispatchListeners(api: NodeJS.EventEmitter) {
-
+ 
    api.on(
      '-ipc-message-sync' as any,
 -    function (event: Electron.IpcMainEvent | Electron.IpcMainServiceWorkerEvent, channel: string, args: any[]) {
@@ -2316,98 +2312,15 @@ index 0a385f4cda..edcbc8ca3e 100644
 -import { IpcMainInvokeEvent } from 'electron/main';
 -
  import { EventEmitter } from 'events';
-
+ 
 +export type IpcMainInvokeHandler = Parameters<Electron.IpcMain['handle']>[1];
 +
  export class IpcMainImpl extends EventEmitter implements Electron.IpcMain {
 -  private _invokeHandlers: Map<string, (e: IpcMainInvokeEvent, ...args: any[]) => void> = new Map();
 +  readonly _invokeHandlers: Map<string, IpcMainInvokeHandler> = new Map();
-
+ 
    constructor() {
      super();
-diff --git a/lib/browser/rpc-server.ts b/lib/browser/rpc-server.ts
-index ec2f62aaa4..8807416f27 100644
---- a/lib/browser/rpc-server.ts
-+++ b/lib/browser/rpc-server.ts
-@@ -50,13 +50,18 @@ ipcMainUtils.handleSync(IPC_MESSAGES.BROWSER_CLIPBOARD_SYNC, function (event, me
- });
-
- type ServiceWorkerPreloadTarget = 'service-worker-global-scope' | 'shadow-realm-global-scope';
-+type DedicatedWorkerPreloadInjectionPoint = 'worker-script-ready' | 'context-created';
-
- const getPreloadScriptsFromEvent = (
-   event: ElectronInternal.IpcMainInternalEvent,
-   isInitialEmptyDocument = false,
--  serviceWorkerPreloadTarget?: ServiceWorkerPreloadTarget
-+  serviceWorkerPreloadTarget?: ServiceWorkerPreloadTarget,
-+  workerPreloadInjectionPoint: DedicatedWorkerPreloadInjectionPoint = 'worker-script-ready'
- ) => {
--  const session: Electron.Session = event.type === 'service-worker' ? event.session : event.sender.session;
-+  const session: Electron.Session =
-+    event.type === 'service-worker' || event.type === 'shared-worker'
-+      ? event.session
-+      : event.sender.session;
-   let preloadScripts = session.getPreloadScripts();
-
-   if (event.type === 'frame') {
-@@ -99,6 +104,15 @@ const getPreloadScriptsFromEvent = (
-       (script): script is Extract<Electron.PreloadScript, { type: 'service-worker' }> =>
-         script.type === 'service-worker' && matchesServiceWorkerTarget(script)
-     );
-+  } else if (event.type === 'dedicated-worker') {
-+    const matchesDedicatedWorkerInjectionPoint = (script: Extract<Electron.PreloadScript, { type: 'dedicated-worker' }>) =>
-+      (script.injectionPoint ?? 'worker-script-ready') === workerPreloadInjectionPoint;
-+    preloadScripts = preloadScripts.filter(
-+      (script): script is Extract<Electron.PreloadScript, { type: 'dedicated-worker' }> =>
-+        script.type === 'dedicated-worker' && matchesDedicatedWorkerInjectionPoint(script)
-+    );
-+  } else if (event.type === 'shared-worker') {
-+    preloadScripts = preloadScripts.filter((script) => script.type === 'shared-worker');
-   } else {
-     throw new Error(`getPreloadScriptsFromEvent: event.type is invalid (${(event as any).type})`);
-   }
-@@ -128,9 +142,15 @@ const readPreloadScript = async function (script: Electron.PreloadScript): Promi
- ipcMainUtils.handleSync(IPC_MESSAGES.BROWSER_SANDBOX_LOAD, async function (
-   event,
-   isInitialEmptyDocument = false,
--  serviceWorkerPreloadTarget?: ServiceWorkerPreloadTarget
-+  serviceWorkerPreloadTarget?: ServiceWorkerPreloadTarget,
-+  workerPreloadInjectionPoint?: DedicatedWorkerPreloadInjectionPoint
- ) {
--  const preloadScripts = getPreloadScriptsFromEvent(event, isInitialEmptyDocument, serviceWorkerPreloadTarget);
-+  const preloadScripts = getPreloadScriptsFromEvent(
-+    event,
-+    isInitialEmptyDocument,
-+    serviceWorkerPreloadTarget,
-+    workerPreloadInjectionPoint
-+  );
-   return {
-     preloadScripts: await Promise.all(preloadScripts.map(readPreloadScript)),
-     process: {
-diff --git a/lib/preload_realm/init.ts b/lib/preload_realm/init.ts
-index 2ca1d93ac0..f9e227f7f2 100644
---- a/lib/preload_realm/init.ts
-+++ b/lib/preload_realm/init.ts
-@@ -22,10 +22,18 @@ const isInitialEmptyDocument = Boolean(v8Util.getHiddenValue(globalThis, 'isInit
- const serviceWorkerPreloadTarget = process.type === 'service-worker'
-   ? v8Util.getHiddenValue(globalThis, 'serviceWorkerPreloadTarget')
-   : undefined;
-+const workerPreloadInjectionPoint = process.type === 'worker'
-+  ? v8Util.getHiddenValue(globalThis, 'workerPreloadInjectionPoint')
-+  : undefined;
- const { preloadScripts, process: processProps } = ipcRendererUtils.invokeSync<{
-   preloadScripts: ElectronInternal.PreloadScript[];
-   process: NodeJS.Process;
--}>(IPC_MESSAGES.BROWSER_SANDBOX_LOAD, isInitialEmptyDocument, serviceWorkerPreloadTarget);
-+}>(
-+  IPC_MESSAGES.BROWSER_SANDBOX_LOAD,
-+  isInitialEmptyDocument,
-+  serviceWorkerPreloadTarget,
-+  workerPreloadInjectionPoint
-+);
-
- const electron = require('electron');
-
 diff --git a/lib/renderer/ipc-native-setup.ts b/lib/renderer/ipc-native-setup.ts
 index c3553881ec..83a8a4ffa2 100644
 --- a/lib/renderer/ipc-native-setup.ts
@@ -2415,11 +2328,11 @@ index c3553881ec..83a8a4ffa2 100644
 @@ -1,14 +1,21 @@
 -import { ipcRendererInternal } from '@electron/internal/renderer/ipc-renderer-internal';
 +const v8Util = process._linkedBinding('electron_common_v8_util');
-
+ 
 -import { ipcRenderer } from 'electron/renderer';
 +let ipcRendererInternal: typeof import('@electron/internal/renderer/ipc-renderer-internal').ipcRendererInternal;
 +let ipcRenderer: typeof import('electron/renderer').ipcRenderer;
-
+ 
 -const v8Util = process._linkedBinding('electron_common_v8_util');
 +const getIpcRendererInternal = () => {
 +  return ipcRendererInternal ??= require('@electron/internal/renderer/ipc-renderer-internal').ipcRendererInternal;
@@ -2428,7 +2341,7 @@ index c3553881ec..83a8a4ffa2 100644
 +const getIpcRenderer = () => {
 +  return ipcRenderer ??= require('electron').ipcRenderer;
 +};
-
+ 
  // ElectronApiServiceImpl will look for the "ipcNative" hidden object when
  // invoking the 'onMessage' callback.
  v8Util.setHiddenValue(globalThis, 'ipcNative', {
@@ -2456,11 +2369,11 @@ index cd77d77053..4c231a24f1 100644
 --- a/lib/worker/init.ts
 +++ b/lib/worker/init.ts
 @@ -8,6 +8,7 @@ process.argv.splice(1, 1);
-
+ 
  // Import common settings.
  require('@electron/internal/common/init');
 +require('@electron/internal/renderer/ipc-native-setup');
-
+ 
  // Process command line arguments.
  const { hasSwitch, getSwitchValue } = process._linkedBinding('electron_common_command_line');
 diff --git a/script/fix-preload-typescript-definitions.mjs b/script/fix-preload-typescript-definitions.mjs
@@ -2469,17 +2382,17 @@ index 2392c8cc53..ed044ab5dd 100644
 +++ b/script/fix-preload-typescript-definitions.mjs
 @@ -5,7 +5,7 @@ const definitionsPath = path.resolve('electron.d.ts');
  let definitions = fs.readFileSync(definitionsPath, 'utf8');
-
+ 
  const frameScope = "('main' | 'sub-frames' | 'all')";
 -const workerType = "('dedicated-worker' | 'shared-worker')";
 +const dedicatedWorkerInjectionPoint = "('worker-script-ready' | 'context-created')";
  const serviceWorkerTarget = "('shadow-realm-global-scope' | 'service-worker-global-scope' | 'both')";
-
+ 
  const preloadScript = `  type PreloadScript = ({
 @@ -38,6 +38,27 @@ const preloadScript = `  type PreloadScript = ({
-
+ 
      // Docs: https://electronjs.org/docs/api/structures/preload-script
-
+ 
 +    /**
 +     * Path of the script file. Must be an absolute path.
 +     */
@@ -2511,12 +2424,12 @@ index 2392c8cc53..ed044ab5dd 100644
 -    type: ${workerType};
 +    type: 'shared-worker';
    } | {
-
+ 
      // Docs: https://electronjs.org/docs/api/structures/preload-script
 @@ -105,6 +126,29 @@ const preloadScriptRegistration = `  type PreloadScriptRegistration = ({
-
+ 
      // Docs: https://electronjs.org/docs/api/structures/preload-script-registration
-
+ 
 +    /**
 +     * Path of the script file. Must be an absolute path.
 +     */
@@ -2550,12 +2463,12 @@ index 2392c8cc53..ed044ab5dd 100644
 -    type: ${workerType};
 +    type: 'shared-worker';
    } | {
-
+ 
      // Docs: https://electronjs.org/docs/api/structures/preload-script-registration
 @@ -140,8 +184,81 @@ const preloadScriptRegistration = `  type PreloadScriptRegistration = ({
      type: 'service-worker';
    });`;
-
+ 
 +const ipcMain = `  type IpcMainMessageEvent = ((IpcMainEvent) | (IpcMainDedicatedWorkerEvent) | (IpcMainServiceWorkerEvent) | (IpcMainSharedWorkerEvent)) & {
 +    frameId: number;
 +    sender: WebContents;
@@ -2636,11 +2549,11 @@ index 2392c8cc53..ed044ab5dd 100644
      return source.replace(pattern, replacement);
    }
 @@ -156,5 +273,6 @@ function replaceGeneratedInterface(source, name, replacement) {
-
+ 
  definitions = replaceGeneratedInterface(definitions, 'PreloadScript', preloadScript);
  definitions = replaceGeneratedInterface(definitions, 'PreloadScriptRegistration', preloadScriptRegistration);
 +definitions = replaceGeneratedInterface(definitions, 'IpcMain', ipcMain);
-
+ 
  fs.writeFileSync(definitionsPath, definitions);
 diff --git a/shell/browser/api/electron_api_dedicated_worker_context.cc b/shell/browser/api/electron_api_dedicated_worker_context.cc
 new file mode 100644
@@ -2648,7 +2561,7 @@ index 0000000000..fb033e9794
 --- /dev/null
 +++ b/shell/browser/api/electron_api_dedicated_worker_context.cc
 @@ -0,0 +1,273 @@
-+// Copyright (c) 2026 Electron Port Workspace contributors
++// Copyright (c) 2026 Electron Port Workspace contributors Co., LTD
 +// Use of this source code is governed by the MIT license that can be
 +// found in the LICENSE file.
 +
@@ -2927,7 +2840,7 @@ index 0000000000..20ff4e2046
 --- /dev/null
 +++ b/shell/browser/api/electron_api_dedicated_worker_context.h
 @@ -0,0 +1,74 @@
-+// Copyright (c) 2026 Electron Port Workspace contributors
++// Copyright (c) 2026 Electron Port Workspace contributors Co., LTD
 +// Use of this source code is governed by the MIT license that can be
 +// found in the LICENSE file.
 +
@@ -3007,7 +2920,7 @@ index 0000000000..8b9886cd8f
 --- /dev/null
 +++ b/shell/browser/api/electron_api_dedicated_worker_main.cc
 @@ -0,0 +1,287 @@
-+// Copyright (c) 2026 Electron Port Workspace contributors
++// Copyright (c) 2026 Electron Port Workspace contributors Co., LTD
 +// Use of this source code is governed by the MIT license that can be
 +// found in the LICENSE file.
 +
@@ -3300,7 +3213,7 @@ index 0000000000..4f517f3776
 --- /dev/null
 +++ b/shell/browser/api/electron_api_dedicated_worker_main.h
 @@ -0,0 +1,94 @@
-+// Copyright (c) 2026 Electron Port Workspace contributors
++// Copyright (c) 2026 Electron Port Workspace contributors Co., LTD
 +// Use of this source code is governed by the MIT license that can be
 +// found in the LICENSE file.
 +
@@ -3399,13 +3312,13 @@ index d04e02f32c..d1fa685d8d 100644
 --- a/shell/browser/api/electron_api_service_worker_main.cc
 +++ b/shell/browser/api/electron_api_service_worker_main.cc
 @@ -4,6 +4,7 @@
-
+ 
  #include "shell/browser/api/electron_api_service_worker_main.h"
-
+ 
 +#include <memory>
  #include <string>
  #include <utility>
-
+ 
 @@ -15,6 +16,7 @@
  #include "content/browser/service_worker/service_worker_info.h"     // nogncheck
  #include "content/browser/service_worker/service_worker_version.h"  // nogncheck
@@ -3415,9 +3328,9 @@ index d04e02f32c..d1fa685d8d 100644
  #include "shell/browser/api/message_port.h"
  #include "shell/browser/browser.h"
 @@ -32,6 +34,22 @@
-
+ 
  namespace {
-
+ 
 +std::string StartExternalRequestErrorToString(
 +    content::ServiceWorkerExternalRequestResult result) {
 +  switch (result) {
@@ -3440,7 +3353,7 @@ index d04e02f32c..d1fa685d8d 100644
 @@ -144,6 +162,57 @@ void ServiceWorkerMain::Send(v8::Isolate* isolate,
    renderer_api_remote->Message(internal, channel, std::move(message));
  }
-
+ 
 +v8::Local<v8::Promise> ServiceWorkerMain::ExecuteJavaScript(
 +    v8::Isolate* isolate,
 +    const std::string& code) {
@@ -3509,12 +3422,12 @@ index f0b69ea8e8..ab82e1b3dc 100644
 +++ b/shell/browser/api/electron_api_service_worker_main.h
 @@ -6,9 +6,13 @@
  #define ELECTRON_SHELL_BROWSER_API_ELECTRON_API_SERVICE_WORKER_MAIN_H_
-
+ 
  #include <compare>
 +#include <memory>
 +#include <optional>
  #include <string>
-
+ 
  #include "base/memory/raw_ptr.h"
 +#include "base/values.h"
 +#include "base/uuid.h"
@@ -3532,14 +3445,14 @@ index f0b69ea8e8..ab82e1b3dc 100644
 +      base::Uuid request_uuid,
 +      base::Value result,
 +      const std::optional<std::string>& error);
-
+ 
    void InvalidateVersionInfo();
    const content::ServiceWorkerVersionBaseInfo* version_info() const {
 diff --git a/shell/browser/api/electron_api_session.cc b/shell/browser/api/electron_api_session.cc
-index df2e0c7c84..2676bc162c 100644
+index 74050b9a24..cbc03c612d 100644
 --- a/shell/browser/api/electron_api_session.cc
 +++ b/shell/browser/api/electron_api_session.cc
-@@ -67,6 +67,7 @@
+@@ -68,6 +68,7 @@
  #include "shell/browser/api/electron_api_net_log.h"
  #include "shell/browser/api/electron_api_protocol.h"
  #include "shell/browser/api/electron_api_service_worker_context.h"
@@ -3547,10 +3460,10 @@ index df2e0c7c84..2676bc162c 100644
  #include "shell/browser/api/electron_api_web_frame_main.h"
  #include "shell/browser/api/electron_api_web_request.h"
  #include "shell/browser/browser.h"
-@@ -1186,6 +1187,15 @@ std::string Session::RegisterPreloadScript(
+@@ -1188,6 +1189,15 @@ std::string Session::RegisterPreloadScript(
      return "";
    }
-
+ 
 +  if (new_preload_script.has_dedicated_worker_injection_point &&
 +      new_preload_script.script_type !=
 +          PreloadScript::ScriptType::kDedicatedWorker) {
@@ -3561,12 +3474,12 @@ index df2e0c7c84..2676bc162c 100644
 +  }
 +
    preload_scripts.push_back(new_preload_script);
-   return new_preload_script.id;
- }
-@@ -1420,6 +1430,14 @@ api::ServiceWorkerContext* Session::ServiceWorkerContext() {
+   // A service worker that starts after this point picks up the new preload
+   // automatically — GetServiceWorkerStartupData() rebuilds from
+@@ -1425,6 +1435,14 @@ api::ServiceWorkerContext* Session::ServiceWorkerContext() {
    return service_worker_context_.Get();
  }
-
+ 
 +api::SharedWorkerContext* Session::SharedWorkerContext() {
 +  if (!shared_worker_context_) {
 +    shared_worker_context_ = SharedWorkerContext::Create(
@@ -3578,7 +3491,7 @@ index df2e0c7c84..2676bc162c 100644
  WebRequest* Session::WebRequest(v8::Isolate* isolate) {
    if (!web_request_)
      web_request_ = WebRequest::Create(isolate, base::PassKey<Session>{});
-@@ -1905,6 +1923,7 @@ void Session::FillObjectTemplate(v8::Isolate* isolate,
+@@ -1910,6 +1928,7 @@ void Session::FillObjectTemplate(v8::Isolate* isolate,
        .SetProperty("netLog", &Session::NetLog)
        .SetProperty("protocol", &Session::Protocol)
        .SetProperty("serviceWorkers", &Session::ServiceWorkerContext)
@@ -3586,7 +3499,7 @@ index df2e0c7c84..2676bc162c 100644
        .SetProperty("webRequest", &Session::WebRequest)
        .SetProperty("storagePath", &Session::GetPath)
        .Build();
-@@ -1917,6 +1936,7 @@ void Session::Trace(cppgc::Visitor* visitor) const {
+@@ -1922,6 +1941,7 @@ void Session::Trace(cppgc::Visitor* visitor) const {
    visitor->Trace(protocol_);
    visitor->Trace(net_log_);
    visitor->Trace(service_worker_context_);
@@ -3604,7 +3517,7 @@ index 8e167a15e7..022ccaa0c6 100644
  class ServiceWorkerContext;
 +class SharedWorkerContext;
  class WebRequest;
-
+ 
  class Session final : public gin::Wrappable<Session>,
 @@ -173,6 +174,7 @@ class Session final : public gin::Wrappable<Session>,
    api::Extensions* Extensions(v8::Isolate* isolate);
@@ -3620,7 +3533,7 @@ index 8e167a15e7..022ccaa0c6 100644
    cppgc::Member<api::ServiceWorkerContext> service_worker_context_;
 +  cppgc::Member<api::SharedWorkerContext> shared_worker_context_;
    cppgc::Member<api::WebRequest> web_request_;
-
+ 
    raw_ptr<v8::Isolate> isolate_;
 diff --git a/shell/browser/api/electron_api_shared_worker_context.cc b/shell/browser/api/electron_api_shared_worker_context.cc
 new file mode 100644
@@ -3628,7 +3541,7 @@ index 0000000000..914adcd7cd
 --- /dev/null
 +++ b/shell/browser/api/electron_api_shared_worker_context.cc
 @@ -0,0 +1,218 @@
-+// Copyright (c) 2026 Electron Port Workspace contributors
++// Copyright (c) 2026 Electron Port Workspace contributors Co., LTD
 +// Use of this source code is governed by the MIT license that can be
 +// found in the LICENSE file.
 +
@@ -3852,7 +3765,7 @@ index 0000000000..930e33b252
 --- /dev/null
 +++ b/shell/browser/api/electron_api_shared_worker_context.h
 @@ -0,0 +1,83 @@
-+// Copyright (c) 2026 Electron Port Workspace contributors
++// Copyright (c) 2026 Electron Port Workspace contributors Co., LTD
 +// Use of this source code is governed by the MIT license that can be
 +// found in the LICENSE file.
 +
@@ -3941,7 +3854,7 @@ index 0000000000..6faa8e3f06
 --- /dev/null
 +++ b/shell/browser/api/electron_api_shared_worker_main.cc
 @@ -0,0 +1,278 @@
-+// Copyright (c) 2026 Electron Port Workspace contributors
++// Copyright (c) 2026 Electron Port Workspace contributors Co., LTD
 +// Use of this source code is governed by the MIT license that can be
 +// found in the LICENSE file.
 +
@@ -4225,7 +4138,7 @@ index 0000000000..b055e600e6
 --- /dev/null
 +++ b/shell/browser/api/electron_api_shared_worker_main.h
 @@ -0,0 +1,89 @@
-+// Copyright (c) 2026 Electron Port Workspace contributors
++// Copyright (c) 2026 Electron Port Workspace contributors Co., LTD
 +// Use of this source code is governed by the MIT license that can be
 +// found in the LICENSE file.
 +
@@ -4315,13 +4228,13 @@ index 0000000000..b055e600e6
 +
 +#endif  // ELECTRON_SHELL_BROWSER_API_ELECTRON_API_SHARED_WORKER_MAIN_H_
 diff --git a/shell/browser/api/electron_api_web_contents.cc b/shell/browser/api/electron_api_web_contents.cc
-index b1daae6b50..0397fc1a2f 100644
+index d7b43df6f4..0b1138754f 100644
 --- a/shell/browser/api/electron_api_web_contents.cc
 +++ b/shell/browser/api/electron_api_web_contents.cc
-@@ -6139,6 +6139,13 @@ content::RenderFrameHost* WebContents::FocusedFrame() {
+@@ -7669,6 +7669,13 @@ content::RenderFrameHost* WebContents::FocusedFrame() {
    return web_contents()->GetFocusedFrame();
  }
-
+ 
 +api::DedicatedWorkerContext* WebContents::DedicatedWorkers(
 +    v8::Isolate* isolate) {
 +  if (!dedicated_worker_context_)
@@ -4332,7 +4245,7 @@ index b1daae6b50..0397fc1a2f 100644
  void WebContents::NotifyUserActivation() {
    content::RenderFrameHost* frame = web_contents()->GetPrimaryMainFrame();
    if (frame)
-@@ -6869,6 +6876,7 @@ void WebContents::FillObjectTemplate(v8::Isolate* isolate,
+@@ -8450,6 +8457,7 @@ void WebContents::FillObjectTemplate(v8::Isolate* isolate,
        .SetProperty("mainFrame", &WebContents::MainFrame)
        .SetProperty("opener", &WebContents::Opener)
        .SetProperty("focusedFrame", &WebContents::FocusedFrame)
@@ -4341,7 +4254,7 @@ index b1daae6b50..0397fc1a2f 100644
        .Build();
  }
 diff --git a/shell/browser/api/electron_api_web_contents.h b/shell/browser/api/electron_api_web_contents.h
-index 5def18f9d4..91ce86ec93 100644
+index 0afebf6e5e..2f26cae543 100644
 --- a/shell/browser/api/electron_api_web_contents.h
 +++ b/shell/browser/api/electron_api_web_contents.h
 @@ -34,6 +34,7 @@
@@ -4352,20 +4265,20 @@ index 5def18f9d4..91ce86ec93 100644
  #include "shell/browser/api/electron_api_session.h"
  #include "shell/browser/api/save_page_handler.h"
  #include "shell/browser/background_throttling_source.h"
-@@ -391,6 +392,7 @@ class WebContents final : public ExclusiveAccessContext,
+@@ -397,6 +398,7 @@ class WebContents final : public ExclusiveAccessContext,
    content::RenderFrameHost* MainFrame();
    content::RenderFrameHost* Opener();
    content::RenderFrameHost* FocusedFrame();
 +  api::DedicatedWorkerContext* DedicatedWorkers(v8::Isolate* isolate);
-
+ 
    [[nodiscard]] WebContentsZoomController* GetZoomController() const;
-
-@@ -801,6 +803,7 @@ class WebContents final : public ExclusiveAccessContext,
+ 
+@@ -815,6 +817,7 @@ class WebContents final : public ExclusiveAccessContext,
    cppgc::Persistent<api::Session> session_;
    v8::Global<v8::Value> devtools_web_contents_;
    cppgc::Persistent<api::Debugger> debugger_;
 +  cppgc::Persistent<api::DedicatedWorkerContext> dedicated_worker_context_;
-
+ 
    std::unique_ptr<WebViewGuestDelegate> guest_delegate_;
    std::unique_ptr<FrameSubscriber> frame_subscriber_;
 diff --git a/shell/browser/api/electron_api_worker_util.cc b/shell/browser/api/electron_api_worker_util.cc
@@ -4374,7 +4287,7 @@ index 0000000000..4479e0cb0e
 --- /dev/null
 +++ b/shell/browser/api/electron_api_worker_util.cc
 @@ -0,0 +1,27 @@
-+// Copyright (c) 2026 Electron Port Workspace contributors
++// Copyright (c) 2026 Electron Port Workspace contributors Co., LTD
 +// Use of this source code is governed by the MIT license that can be
 +// found in the LICENSE file.
 +
@@ -4407,7 +4320,7 @@ index 0000000000..e192296ec5
 --- /dev/null
 +++ b/shell/browser/api/electron_api_worker_util.h
 @@ -0,0 +1,24 @@
-+// Copyright (c) 2026 Electron Port Workspace contributors
++// Copyright (c) 2026 Electron Port Workspace contributors Co., LTD
 +// Use of this source code is governed by the MIT license that can be
 +// found in the LICENSE file.
 +
@@ -4437,7 +4350,7 @@ index 0000000000..bc31b283ff
 --- /dev/null
 +++ b/shell/browser/electron_api_worker_ipc_handler_impl.cc
 @@ -0,0 +1,446 @@
-+// Copyright (c) 2026 Electron Port Workspace contributors
++// Copyright (c) 2026 Electron Port Workspace contributors Co., LTD
 +// Use of this source code is governed by the MIT license that can be
 +// found in the LICENSE file.
 +
@@ -4889,7 +4802,7 @@ index 0000000000..8be296385b
 --- /dev/null
 +++ b/shell/browser/electron_api_worker_ipc_handler_impl.h
 @@ -0,0 +1,166 @@
-+// Copyright (c) 2026 Electron Port Workspace contributors
++// Copyright (c) 2026 Electron Port Workspace contributors Co., LTD
 +// Use of this source code is governed by the MIT license that can be
 +// found in the LICENSE file.
 +
@@ -5056,7 +4969,7 @@ index 0000000000..8be296385b
 +
 +#endif  // ELECTRON_SHELL_BROWSER_ELECTRON_API_WORKER_IPC_HANDLER_IMPL_H_
 diff --git a/shell/browser/electron_browser_client.cc b/shell/browser/electron_browser_client.cc
-index d0cc767bbe..f6a63460a7 100644
+index 77b6515495..2c2a78bc9b 100644
 --- a/shell/browser/electron_browser_client.cc
 +++ b/shell/browser/electron_browser_client.cc
 @@ -89,6 +89,7 @@
@@ -5067,10 +4980,10 @@ index d0cc767bbe..f6a63460a7 100644
  #include "shell/browser/electron_autofill_driver_factory.h"
  #include "shell/browser/electron_browser_context.h"
  #include "shell/browser/electron_browser_main_parts.h"
-@@ -275,6 +276,15 @@ std::optional<PreloadScript::ScriptType> ParsePreloadScriptType(
+@@ -279,6 +280,15 @@ std::optional<PreloadScript::ScriptType> ParsePreloadScriptType(
    return std::nullopt;
  }
-
+ 
 +std::optional<PreloadScript::DedicatedWorkerInjectionPoint>
 +ParseDedicatedWorkerInjectionPoint(const std::string& injection_point) {
 +  if (injection_point == "worker-script-ready")
@@ -5083,13 +4996,17 @@ index d0cc767bbe..f6a63460a7 100644
  class ElectronPreloadScriptLoader : public mojom::ElectronPreloadScriptLoader {
   public:
    explicit ElectronPreloadScriptLoader(content::BrowserContext* browser_context)
-@@ -285,12 +295,18 @@ class ElectronPreloadScriptLoader : public mojom::ElectronPreloadScriptLoader {
+@@ -289,35 +299,36 @@ class ElectronPreloadScriptLoader : public mojom::ElectronPreloadScriptLoader {
        delete;
-
+ 
    void LoadPreloadScripts(const std::string& type,
 +                          const std::string& injection_point,
                            LoadPreloadScriptsCallback callback) override {
-     std::vector<mojom::PreloadScriptSourcePtr> sources;
+-    std::vector<mojom::PreloadScriptSourcePtr> sources;
++    auto empty_data = [] {
++      auto data = mojom::RendererStartupData::New();
++      return data;
++    };
      std::optional<PreloadScript::ScriptType> script_type =
          ParsePreloadScriptType(type);
 +    std::optional<PreloadScript::DedicatedWorkerInjectionPoint>
@@ -5097,32 +5014,49 @@ index d0cc767bbe..f6a63460a7 100644
 +            ParseDedicatedWorkerInjectionPoint(injection_point);
      auto* prefs = SessionPreferences::FromBrowserContext(browser_context_);
 -    if (!script_type || !prefs) {
+-      std::move(callback).Run(std::move(sources));
 +    if (!script_type || !prefs ||
 +        (*script_type == PreloadScript::ScriptType::kDedicatedWorker &&
 +         !dedicated_worker_injection_point)) {
-       std::move(callback).Run(std::move(sources));
++      std::move(callback).Run(empty_data());
        return;
      }
-@@ -298,6 +314,15 @@ class ElectronPreloadScriptLoader : public mojom::ElectronPreloadScriptLoader {
-     for (const auto& script : prefs->preload_scripts()) {
-       if (script.script_type != *script_type)
-         continue;
-+      if (*script_type == PreloadScript::ScriptType::kDedicatedWorker) {
-+        const auto expected =
-+            script.has_dedicated_worker_injection_point
-+                ? script.dedicated_worker_injection_point
-+                : PreloadScript::DedicatedWorkerInjectionPoint::
-+                      kWorkerScriptReady;
-+        if (expected != *dedicated_worker_injection_point)
-+          continue;
-+      }
-
-       auto source = mojom::PreloadScriptSource::New();
-       source->file_path = script.file_path.AsUTF8Unsafe();
-@@ -1800,6 +1825,12 @@ void ElectronBrowserClient::BindHostReceiverForRenderer(
+ 
+-    for (const auto& script : prefs->preload_scripts()) {
+-      if (script.script_type != *script_type)
+-        continue;
+-
+-      auto source = mojom::PreloadScriptSource::New();
+-      source->file_path = script.file_path.AsUTF8Unsafe();
+-
+-      if (!script.file_path.IsAbsolute()) {
+-        source->error = "Preload script must have absolute path";
+-      } else {
+-        ScopedAllowBlockingForElectron allow_blocking;
+-        if (!base::ReadFileToString(script.file_path, &source->contents))
+-          source->error = "Unable to read preload script";
+-      }
+-
+-      sources.push_back(std::move(source));
++    mojom::RendererStartupDataPtr data;
++    {
++      ScopedAllowBlockingForElectron allow_blocking;
++      data = renderer_startup_data::Build(
++          browser_context_, *script_type,
++          *script_type == PreloadScript::ScriptType::kDedicatedWorker
++              ? dedicated_worker_injection_point
++              : std::nullopt);
+     }
+ 
+-    std::move(callback).Run(std::move(sources));
++    std::move(callback).Run(std::move(data));
+   }
+ 
+  private:
+@@ -1879,6 +1890,12 @@ void ElectronBrowserClient::BindHostReceiverForRenderer(
      return;
    }
-
+ 
 +  if (auto host_receiver = receiver.As<mojom::ElectronWorkerAPI>()) {
 +    ElectronWorkerAPIImpl::Create(render_process_host,
 +                                  std::move(host_receiver));
@@ -5139,7 +5073,7 @@ index 722c949891..fee09534ef 100644
 @@ -116,6 +116,32 @@ bool Converter<PreloadScript::ServiceWorkerTarget>::FromV8(
    return FromV8WithLookup(isolate, val, Lookup, out);
  }
-
+ 
 +// static
 +v8::Local<v8::Value>
 +Converter<PreloadScript::DedicatedWorkerInjectionPoint>::ToV8(
@@ -5179,7 +5113,7 @@ index 722c949891..fee09534ef 100644
 +  }
    return ConvertToV8(isolate, dict).As<v8::Object>();
  }
-
+ 
 @@ -172,6 +202,12 @@ bool Converter<PreloadScript>::FromV8(v8::Isolate* isolate,
        !options.Get("target", &out->service_worker_target)) {
      return false;
@@ -5200,7 +5134,7 @@ index 69bbcc4c10..4e24d4bdbe 100644
 @@ -29,6 +29,11 @@ struct PreloadScript {
      kBoth
    };
-
+ 
 +  enum class DedicatedWorkerInjectionPoint {
 +    kWorkerScriptReady,
 +    kContextCreated,
@@ -5216,13 +5150,13 @@ index 69bbcc4c10..4e24d4bdbe 100644
 +  DedicatedWorkerInjectionPoint dedicated_worker_injection_point =
 +      DedicatedWorkerInjectionPoint::kWorkerScriptReady;
 +  bool has_dedicated_worker_injection_point = false;
-
+ 
    // If set, use the deprecated validation behavior of Session.setPreloads
    bool deprecated = false;
 @@ -86,6 +94,16 @@ struct Converter<PreloadScript::ServiceWorkerTarget> {
                       PreloadScript::ServiceWorkerTarget* out);
  };
-
+ 
 +template <>
 +struct Converter<PreloadScript::DedicatedWorkerInjectionPoint> {
 +  static v8::Local<v8::Value> ToV8(
@@ -5236,38 +5170,114 @@ index 69bbcc4c10..4e24d4bdbe 100644
  template <>
  struct Converter<PreloadScript> {
    static v8::Local<v8::Value> ToV8(v8::Isolate* isolate,
+diff --git a/shell/browser/renderer_startup_data.cc b/shell/browser/renderer_startup_data.cc
+index e190a13ba4..3968c0904f 100644
+--- a/shell/browser/renderer_startup_data.cc
++++ b/shell/browser/renderer_startup_data.cc
+@@ -80,8 +80,11 @@ std::optional<std::string> ServiceWorkerTargetToString(
+ 
+ }  // namespace
+ 
+-mojom::RendererStartupDataPtr Build(content::BrowserContext* browser_context,
+-                                    PreloadScript::ScriptType type) {
++mojom::RendererStartupDataPtr Build(
++    content::BrowserContext* browser_context,
++    PreloadScript::ScriptType type,
++    std::optional<PreloadScript::DedicatedWorkerInjectionPoint>
++        dedicated_worker_injection_point) {
+   auto data = mojom::RendererStartupData::New();
+ 
+   auto* session_prefs = SessionPreferences::FromBrowserContext(browser_context);
+@@ -89,6 +92,16 @@ mojom::RendererStartupDataPtr Build(content::BrowserContext* browser_context,
+     for (const auto& script : session_prefs->preload_scripts()) {
+       if (script.script_type != type)
+         continue;
++      if (type == PreloadScript::ScriptType::kDedicatedWorker &&
++          dedicated_worker_injection_point) {
++        const auto expected =
++            script.has_dedicated_worker_injection_point
++                ? script.dedicated_worker_injection_point
++                : PreloadScript::DedicatedWorkerInjectionPoint::
++                      kWorkerScriptReady;
++        if (expected != *dedicated_worker_injection_point)
++          continue;
++      }
+       if (!script.file_path.IsAbsolute())
+         continue;
+       auto ps = mojom::PreloadScriptData::New();
+diff --git a/shell/browser/renderer_startup_data.h b/shell/browser/renderer_startup_data.h
+index 4ef2bc887b..95d25e087e 100644
+--- a/shell/browser/renderer_startup_data.h
++++ b/shell/browser/renderer_startup_data.h
+@@ -5,6 +5,8 @@
+ #ifndef ELECTRON_SHELL_BROWSER_RENDERER_STARTUP_DATA_H_
+ #define ELECTRON_SHELL_BROWSER_RENDERER_STARTUP_DATA_H_
+ 
++#include <optional>
++
+ #include "shell/browser/preload_script.h"
+ #include "shell/common/api/api.mojom.h"
+ 
+@@ -19,8 +21,11 @@ namespace electron::renderer_startup_data {
+ // push, or kServiceWorker for the GetServiceWorkerStartupData blob), the
+ // browser env snapshot, and process.helperExecPath. Reads preload contents
+ // synchronously — call behind a ScopedAllowBlockingForElectron.
+-mojom::RendererStartupDataPtr Build(content::BrowserContext* browser_context,
+-                                    PreloadScript::ScriptType type);
++mojom::RendererStartupDataPtr Build(
++    content::BrowserContext* browser_context,
++    PreloadScript::ScriptType type,
++    std::optional<PreloadScript::DedicatedWorkerInjectionPoint>
++        dedicated_worker_injection_point = std::nullopt);
+ 
+ }  // namespace electron::renderer_startup_data
+ 
 diff --git a/shell/common/api/api.mojom b/shell/common/api/api.mojom
-index 7df121993d..835d4070d9 100644
+index b5c20f9d89..a4a3d88aa8 100644
 --- a/shell/common/api/api.mojom
 +++ b/shell/common/api/api.mojom
-@@ -4,6 +4,7 @@ import "mojo/public/mojom/base/string16.mojom";
+@@ -4,17 +4,7 @@ import "mojo/public/mojom/base/string16.mojom";
  import "ui/gfx/geometry/mojom/geometry.mojom";
  import "third_party/blink/public/mojom/messaging/cloneable_message.mojom";
  import "third_party/blink/public/mojom/messaging/transferable_message.mojom";
-+import "third_party/blink/public/mojom/tokens/tokens.mojom";
-
- struct PreloadScriptSource {
-   string file_path;
-@@ -13,7 +14,8 @@ struct PreloadScriptSource {
-
- interface ElectronPreloadScriptLoader {
-   [Sync]
+-
+-struct PreloadScriptSource {
+-  string file_path;
+-  string contents;
+-  string error;
+-};
+-
+-interface ElectronPreloadScriptLoader {
+-  [Sync]
 -  LoadPreloadScripts(string type) => (array<PreloadScriptSource> scripts);
-+  LoadPreloadScripts(string type, string injection_point)
-+      => (array<PreloadScriptSource> scripts);
+-};
++import "third_party/blink/public/mojom/tokens/tokens.mojom";
+ 
+ // A preload script and its contents, pushed to the renderer ahead of the
+ // document that needs it.
+@@ -45,6 +35,12 @@ struct RendererStartupData {
+   string helper_exec_path;
  };
-
- interface ElectronRenderer {
-@@ -24,9 +26,30 @@ interface ElectronRenderer {
-
+ 
++interface ElectronPreloadScriptLoader {
++  [Sync]
++  LoadPreloadScripts(string type, string injection_point)
++      => (RendererStartupData data);
++};
++
+ // Per-frame associated interface ordered against content.mojom.Frame, so
+ // SetStartupData() arrives before the CommitNavigation that follows it.
+ interface ElectronFrameStartup {
+@@ -59,9 +55,30 @@ interface ElectronRenderer {
+ 
    ReceivePostMessage(string channel, blink.mojom.TransferableMessage message);
-
+ 
 +  ExecuteJavaScript(string code)
 +      => (blink.mojom.CloneableMessage result, string error);
 +
    TakeHeapSnapshot(handle file) => (bool success);
  };
-
+ 
 +interface ElectronWorkerAPI {
 +  RegisterDedicatedWorker(
 +      blink.mojom.DedicatedWorkerToken token,
@@ -5334,7 +5344,7 @@ index a0ae866a52..1484b4058e 100644
 @@ -54,7 +55,9 @@ bool IsWorkerThread() {
    return content::WorkerThread::GetCurrentId() != kMainThreadId;
  }
-
+ 
 -template <typename T>
 +template <typename T,
 +          typename RemoteType =
@@ -5344,19 +5354,19 @@ index a0ae866a52..1484b4058e 100644
    static gin::DeprecatedWrapperInfo kWrapperInfo;
 @@ -193,7 +196,7 @@ class IPCBase : public gin_helper::DeprecatedWrappable<T> {
    }
-
+ 
   protected:
 -  mojo::AssociatedRemote<electron::mojom::ElectronApiIPC> electron_ipc_remote_;
 +  RemoteType electron_ipc_remote_;
  };
-
+ 
  class IPCRenderFrame : public IPCBase<IPCRenderFrame>,
 @@ -244,7 +247,6 @@ class IPCServiceWorker : public IPCBase<IPCServiceWorker>,
   public:
    explicit IPCServiceWorker(v8::Isolate* isolate) {
      DCHECK(IsWorkerThread());
 -    content::WorkerThread::AddObserver(this);
-
+ 
      electron::ServiceWorkerData* service_worker_data =
          electron::preload_realm::GetServiceWorkerData(
 @@ -252,19 +254,82 @@ class IPCServiceWorker : public IPCBase<IPCServiceWorker>,
@@ -5371,7 +5381,7 @@ index a0ae866a52..1484b4058e 100644
      service_worker_data->proxy()->GetRemoteAssociatedInterface(
          electron_ipc_remote_.BindNewEndpointAndPassReceiver());
    }
-
+ 
 -  void WillStopCurrentWorkerThread() override { electron_ipc_remote_.reset(); }
 +  ~IPCServiceWorker() override {
 +    if (observing_worker_thread_)
@@ -5385,17 +5395,17 @@ index a0ae866a52..1484b4058e 100644
 +      observing_worker_thread_ = false;
 +    }
 +  }
-
+ 
    const char* GetTypeName() override { return "IPCServiceWorker"; }
 +
 + private:
 +  bool observing_worker_thread_ = false;
  };
-
+ 
  template <>
  gin::DeprecatedWrapperInfo IPCBase<IPCServiceWorker>::kWrapperInfo = {
      gin::kEmbedderNativeGin};
-
+ 
 +class IPCWorker
 +    : public IPCBase<IPCWorker, mojo::Remote<electron::mojom::ElectronApiIPC>>,
 +      public content::WorkerThread::Observer {
@@ -5449,48 +5459,23 @@ index a0ae866a52..1484b4058e 100644
    dict.SetMethod("createForServiceWorker", &IPCServiceWorker::Create);
 +  dict.SetMethod("createForWorker", &IPCWorker::Create);
  }
-
+ 
  }  // namespace
 diff --git a/shell/renderer/electron_api_service_impl.cc b/shell/renderer/electron_api_service_impl.cc
-index 19c9bce33a..6984133e91 100644
+index 3017a88aab..4a3ce7ece6 100644
 --- a/shell/renderer/electron_api_service_impl.cc
 +++ b/shell/renderer/electron_api_service_impl.cc
-@@ -4,29 +4,13 @@
-
- #include "electron/shell/renderer/electron_api_service_impl.h"
-
--#include <string_view>
- #include <utility>
--#include <vector>
--
--#include "base/trace_event/trace_event.h"
--#include "gin/data_object_builder.h"
--#include "mojo/public/cpp/system/platform_handle.h"
--#include "shell/common/electron_constants.h"
--#include "shell/common/gin_converters/blink_converter.h"
--#include "shell/common/gin_converters/value_converter.h"
--#include "shell/common/heap_snapshot.h"
--#include "shell/common/node_includes.h"
--#include "shell/common/options_switches.h"
--#include "shell/common/thread_restrictions.h"
--#include "shell/common/v8_util.h"
--#include "shell/renderer/electron_ipc_native.h"
--#include "shell/renderer/electron_render_frame_observer.h"
-+
-+#include "base/functional/bind.h"
+@@ -20,6 +20,7 @@
+ #include "shell/common/thread_restrictions.h"
+ #include "shell/common/v8_util.h"
+ #include "shell/renderer/electron_ipc_native.h"
 +#include "shell/renderer/electron_renderer_v8_util.h"
- #include "shell/renderer/renderer_client_base.h"
--#include "third_party/blink/public/mojom/frame/user_activation_notification_type.mojom-shared.h"
- #include "third_party/blink/public/platform/scheduler/web_agent_group_scheduler.h"
--#include "third_party/blink/public/web/blink.h"
- #include "third_party/blink/public/web/web_local_frame.h"
--#include "third_party/blink/public/web/web_message_port_converter.h"
-
- namespace electron {
-
-@@ -94,11 +78,8 @@ void ElectronApiServiceImpl::Message(bool internal,
+ 
+ #include "base/no_destructor.h"
+ #include "content/public/renderer/render_thread.h"
+@@ -143,11 +144,8 @@ void ElectronApiServiceImpl::Message(bool internal,
    v8::HandleScope handle_scope(isolate);
-
+ 
    v8::Local<v8::Context> context = renderer_client_->GetContext(frame, isolate);
 -  v8::Context::Scope context_scope(context);
 -
@@ -5500,11 +5485,11 @@ index 19c9bce33a..6984133e91 100644
 +  renderer_util::EmitIPCMessageInContext(isolate, context, internal, channel,
 +                                         std::move(arguments));
  }
-
+ 
  void ElectronApiServiceImpl::ReceivePostMessage(
-@@ -112,45 +93,38 @@ void ElectronApiServiceImpl::ReceivePostMessage(
+@@ -161,45 +159,38 @@ void ElectronApiServiceImpl::ReceivePostMessage(
    v8::HandleScope handle_scope(isolate);
-
+ 
    v8::Local<v8::Context> context = renderer_client_->GetContext(frame, isolate);
 -  v8::Context::Scope context_scope(context);
 -
@@ -5512,7 +5497,7 @@ index 19c9bce33a..6984133e91 100644
 +  renderer_util::EmitIPCPostMessageInContext(isolate, context, channel,
 +                                             std::move(message));
 +}
-
+ 
 -  std::vector<v8::Local<v8::Value>> ports;
 -  for (auto& port : message.ports) {
 -    ports.emplace_back(
@@ -5526,7 +5511,7 @@ index 19c9bce33a..6984133e91 100644
 +    std::move(callback).Run({}, "Render frame was released");
 +    return;
    }
-
+ 
 -  std::vector<v8::Local<v8::Value>> args = {message_value};
 -
 -  ipc_native::EmitIPCEvent(isolate, context, false, channel, ports,
@@ -5537,7 +5522,7 @@ index 19c9bce33a..6984133e91 100644
 +  renderer_util::ExecuteJavaScriptInContext(isolate, context, code,
 +                                            std::move(callback));
  }
-
+ 
  void ElectronApiServiceImpl::TakeHeapSnapshot(
      mojo::ScopedHandle file,
      TakeHeapSnapshotCallback callback) {
@@ -5556,7 +5541,7 @@ index 19c9bce33a..6984133e91 100644
      return;
    }
 -  base::File base_file(std::move(platform_file));
-
+ 
    v8::Isolate* isolate = frame->GetAgentGroupScheduler()->Isolate();
 -  bool success = electron::TakeHeapSnapshot(isolate, &base_file);
 -
@@ -5564,13 +5549,13 @@ index 19c9bce33a..6984133e91 100644
 +  renderer_util::TakeHeapSnapshot(isolate, std::move(file),
 +                                  std::move(callback));
  }
-
+ 
  }  // namespace electron
 diff --git a/shell/renderer/electron_api_service_impl.h b/shell/renderer/electron_api_service_impl.h
-index 8c6820f020..6f36493891 100644
+index 24dbecac1f..f45eca8530 100644
 --- a/shell/renderer/electron_api_service_impl.h
 +++ b/shell/renderer/electron_api_service_impl.h
-@@ -37,6 +37,8 @@ class ElectronApiServiceImpl : public mojom::ElectronRenderer,
+@@ -45,6 +45,8 @@ class ElectronApiServiceImpl
                 blink::CloneableMessage arguments) override;
    void ReceivePostMessage(const std::string& channel,
                            blink::TransferableMessage message) override;
@@ -5585,7 +5570,7 @@ index 0000000000..3913cebe77
 --- /dev/null
 +++ b/shell/renderer/electron_renderer_v8_util.cc
 @@ -0,0 +1,123 @@
-+// Copyright (c) 2026 Electron Port Workspace contributors
++// Copyright (c) 2026 Electron Port Workspace contributors Co., LTD
 +// Use of this source code is governed by the MIT license that can be
 +// found in the LICENSE file.
 +
@@ -5714,7 +5699,7 @@ index 0000000000..bb9a5f6bc8
 --- /dev/null
 +++ b/shell/renderer/electron_renderer_v8_util.h
 @@ -0,0 +1,43 @@
-+// Copyright (c) 2026 Electron Port Workspace contributors
++// Copyright (c) 2026 Electron Port Workspace contributors Co., LTD
 +// Use of this source code is governed by the MIT license that can be
 +// found in the LICENSE file.
 +
@@ -5757,19 +5742,117 @@ index 0000000000..bb9a5f6bc8
 +}  // namespace electron::renderer_util
 +
 +#endif  // ELECTRON_SHELL_RENDERER_ELECTRON_RENDERER_V8_UTIL_H_
+diff --git a/shell/renderer/electron_sandboxed_renderer_client.cc b/shell/renderer/electron_sandboxed_renderer_client.cc
+index 51255922da..d89bddf439 100644
+--- a/shell/renderer/electron_sandboxed_renderer_client.cc
++++ b/shell/renderer/electron_sandboxed_renderer_client.cc
+@@ -85,7 +85,8 @@ void ElectronSandboxedRendererClient::InitializeBindings(
+   b.SetMethod("createPreloadScript",
+               base::BindRepeating(&preload_utils::CreatePreloadScript,
+                                   base::Unretained(render_frame),
+-                                  /*service_worker_data=*/nullptr));
++                                  /*service_worker_data=*/nullptr,
++                                  /*worker_data=*/nullptr));
+ 
+   auto process = gin_helper::Dictionary::CreateEmpty(isolate);
+   b.Set("process", process);
+diff --git a/shell/renderer/preload_realm_context.cc b/shell/renderer/preload_realm_context.cc
+index 1f5112551f..dd3f081c6b 100644
+--- a/shell/renderer/preload_realm_context.cc
++++ b/shell/renderer/preload_realm_context.cc
+@@ -75,7 +75,8 @@ void RunServiceWorkerPreloadInitScript(
+   b.SetMethod(
+       "createPreloadScript",
+       base::BindRepeating(&preload_utils::CreatePreloadScript, nullptr,
+-                          base::Unretained(service_worker_data)));
++                          base::Unretained(service_worker_data),
++                          /*worker_data=*/nullptr));
+   b.Set("serviceWorkerPreloadTarget", std::string{service_worker_target});
+ 
+   gin_helper::Dictionary process = gin::Dictionary::CreateEmpty(isolate);
+diff --git a/shell/renderer/preload_utils.cc b/shell/renderer/preload_utils.cc
+index e17b51d409..272bab1ad4 100644
+--- a/shell/renderer/preload_utils.cc
++++ b/shell/renderer/preload_utils.cc
+@@ -24,6 +24,7 @@
+ #include "shell/common/web_contents_utility.mojom.h"
+ #include "shell/renderer/electron_api_service_impl.h"
+ #include "shell/renderer/service_worker_data.h"
++#include "shell/renderer/worker_data.h"
+ #include "third_party/blink/public/common/associated_interfaces/associated_interface_provider.h"
+ #include "third_party/electron_node/src/node_metadata.h"
+ #include "third_party/icu/source/common/unicode/uvernum.h"
+@@ -88,6 +89,7 @@ namespace {
+ const mojom::PreloadScriptData* LookupPreloadScript(
+     content::RenderFrame* render_frame,
+     ServiceWorkerData* service_worker_data,
++    WorkerData* worker_data,
+     const std::string& script_id) {
+   const mojom::RendererStartupDataPtr* data = nullptr;
+   if (render_frame) {
+@@ -95,6 +97,8 @@ const mojom::PreloadScriptData* LookupPreloadScript(
+       data = &api_service->startup_data();
+   } else if (service_worker_data) {
+     data = &service_worker_data->worker_startup_data();
++  } else if (worker_data) {
++    data = &worker_data->worker_startup_data();
+   }
+   if (!data || !*data)
+     return nullptr;
+@@ -110,6 +114,7 @@ const mojom::PreloadScriptData* LookupPreloadScript(
+ v8::Local<v8::Value> CreatePreloadScript(
+     content::RenderFrame* render_frame,
+     ServiceWorkerData* service_worker_data,
++    WorkerData* worker_data,
+     v8::Isolate* isolate,
+     const std::string& script_id,
+     const std::vector<std::string>& param_name_strings) {
+@@ -118,7 +123,8 @@ v8::Local<v8::Value> CreatePreloadScript(
+   // Contents/cache stay in native buffers; only the single NewFromUtf8 copy
+   // for the compile touches V8.
+   const mojom::PreloadScriptData* ps =
+-      LookupPreloadScript(render_frame, service_worker_data, script_id);
++      LookupPreloadScript(render_frame, service_worker_data, worker_data,
++                          script_id);
+   if (!ps)
+     return {};
+ 
+diff --git a/shell/renderer/preload_utils.h b/shell/renderer/preload_utils.h
+index 3f6a6478f1..1d7c673a45 100644
+--- a/shell/renderer/preload_utils.h
++++ b/shell/renderer/preload_utils.h
+@@ -17,6 +17,7 @@ class RenderFrame;
+ 
+ namespace electron {
+ class ServiceWorkerData;
++class WorkerData;
+ }
+ 
+ namespace electron::preload_utils {
+@@ -36,6 +37,7 @@ v8::Local<v8::Value> GetBinding(v8::Isolate* isolate,
+ v8::Local<v8::Value> CreatePreloadScript(
+     content::RenderFrame* render_frame,
+     ServiceWorkerData* service_worker_data,
++    WorkerData* worker_data,
+     v8::Isolate* isolate,
+     const std::string& script_id,
+     const std::vector<std::string>& param_names);
 diff --git a/shell/renderer/renderer_client_base.cc b/shell/renderer/renderer_client_base.cc
-index 21c1396e03..4f6bb25212 100644
+index 504eb9dc0c..b310c61a14 100644
 --- a/shell/renderer/renderer_client_base.cc
 +++ b/shell/renderer/renderer_client_base.cc
-@@ -14,6 +14,7 @@
+@@ -12,8 +12,10 @@
+ #include <vector>
+ 
  #include "base/command_line.h"
++#include "base/containers/span.h"
  #include "base/functional/callback_helpers.h"
  #include "base/logging.h"
 +#include "base/process/process.h"
  #include "base/strings/string_split.h"
  #include "components/network_hints/renderer/web_prescient_networking_impl.h"
  #include "content/common/buildflags.h"
-@@ -28,6 +29,7 @@
+@@ -28,6 +30,7 @@
  #include "printing/buildflags/buildflags.h"
  #include "shell/browser/api/electron_api_protocol.h"
  #include "shell/common/api/api.mojom.h"
@@ -5777,7 +5860,7 @@ index 21c1396e03..4f6bb25212 100644
  #include "shell/common/api/electron_api_native_image.h"
  #include "shell/common/color_util.h"
  #include "shell/common/gin_helper/dictionary.h"
-@@ -43,6 +45,8 @@
+@@ -44,6 +47,8 @@
  #include "shell/renderer/electron_api_service_impl.h"
  #include "shell/renderer/electron_autofill_agent.h"
  #include "shell/renderer/oom_stack_trace.h"
@@ -5786,7 +5869,7 @@ index 21c1396e03..4f6bb25212 100644
  #include "third_party/abseil-cpp/absl/strings/str_format.h"
  #include "third_party/blink/public/common/associated_interfaces/associated_interface_provider.h"
  #include "third_party/blink/public/common/associated_interfaces/associated_interface_registry.h"
-@@ -58,6 +62,8 @@
+@@ -59,6 +64,8 @@
  #include "third_party/blink/public/web/web_script_source.h"
  #include "third_party/blink/public/web/web_security_policy.h"
  #include "third_party/blink/public/web/web_view.h"
@@ -5795,10 +5878,10 @@ index 21c1396e03..4f6bb25212 100644
  #include "third_party/blink/renderer/core/execution_context/execution_context.h"  // nogncheck
  #include "third_party/blink/renderer/platform/media/multi_buffer_data_source.h"  // nogncheck
  #include "third_party/blink/renderer/platform/weborigin/scheme_registry.h"  // nogncheck
-@@ -120,6 +126,10 @@ content::RenderFrame* GetRenderFrame(v8::Isolate* const isolate,
-
+@@ -121,6 +128,10 @@ content::RenderFrame* GetRenderFrame(v8::Isolate* const isolate,
+ 
  namespace {
-
+ 
 +constexpr std::string_view kWorkerScriptReadyInjectionPoint =
 +    "worker-script-ready";
 +constexpr std::string_view kContextCreatedInjectionPoint = "context-created";
@@ -5806,10 +5889,10 @@ index 21c1396e03..4f6bb25212 100644
  void SetIsWebView(v8::Isolate* isolate, v8::Local<v8::Object> object) {
    gin_helper::Dictionary dict(isolate, object);
    dict.SetHidden("isWebView", true);
-@@ -144,8 +154,59 @@ std::optional<std::string_view> GetWorkerPreloadScriptType(
+@@ -145,8 +156,86 @@ std::optional<std::string_view> GetWorkerPreloadScriptType(
    return std::nullopt;
  }
-
+ 
 +bool HasNodeProcess(v8::Local<v8::Context> context) {
 +  v8::Isolate* isolate = v8::Isolate::GetCurrent();
 +  return context->Global()
@@ -5818,10 +5901,25 @@ index 21c1396e03..4f6bb25212 100644
 +}
 +
 +void ExecuteSandboxedWorkerPreloadScripts(v8::Local<v8::Context> context,
++                                          std::string_view type,
 +                                          std::string_view injection_point) {
 +  auto* worker_data = WorkerData::GetCurrent();
 +  if (!worker_data)
 +    return;
++
++  mojo::Remote<mojom::ElectronPreloadScriptLoader> loader;
++  blink::Platform::Current()->GetBrowserInterfaceBroker()->GetInterface(
++      loader.BindNewPipeAndPassReceiver());
++
++  mojom::RendererStartupDataPtr startup_data;
++  if (!loader->LoadPreloadScripts(std::string{type},
++                                  std::string{injection_point},
++                                  &startup_data)) {
++    return;
++  }
++  if (!startup_data || startup_data->preload_scripts.empty())
++    return;
++  worker_data->SetWorkerStartupData(std::move(startup_data));
 +
 +  v8::Isolate* isolate = v8::Isolate::GetCurrent();
 +  v8::HandleScope handle_scope(isolate);
@@ -5837,7 +5935,11 @@ index 21c1396e03..4f6bb25212 100644
 +  v8::Local<v8::Object> binding = v8::Object::New(isolate);
 +  gin_helper::Dictionary b(isolate, binding);
 +  b.SetMethod("get", preload_utils::GetBinding);
-+  b.SetMethod("createPreloadScript", preload_utils::CreatePreloadScript);
++  b.SetMethod(
++      "createPreloadScript",
++      base::BindRepeating(&preload_utils::CreatePreloadScript, nullptr,
++                          /*service_worker_data=*/nullptr,
++                          base::Unretained(worker_data)));
 +
 +  gin_helper::Dictionary process = gin::Dictionary::CreateEmpty(isolate);
 +  b.Set("process", process);
@@ -5850,6 +5952,14 @@ index 21c1396e03..4f6bb25212 100644
 +  process.SetReadOnly("sandboxed", true);
 +  process.SetReadOnly("type", "worker");
 +  process.SetReadOnly("contextIsolated", false);
++
++  v8::Local<v8::Value> startup_data_value;
++  if (!preload_utils::BuildStartupData(isolate,
++                                       worker_data->worker_startup_data())
++           .ToLocal(&startup_data_value)) {
++    startup_data_value = v8::Null(isolate);
++  }
++  b.Set("startupData", startup_data_value);
 +
 +  v8::LocalVector<v8::String> preload_bundle_params(
 +      isolate, {node::FIXED_ONE_BYTE_STRING(isolate, "binding")});
@@ -5867,20 +5977,48 @@ index 21c1396e03..4f6bb25212 100644
    auto* ec = blink::ExecutionContext::From(context);
    if (!ec)
      return;
-@@ -155,7 +216,8 @@ void ExecutePlainPreloadScripts(v8::Local<v8::Context> context,
+@@ -155,24 +244,31 @@ void ExecutePlainPreloadScripts(v8::Local<v8::Context> context,
+   blink::Platform::Current()->GetBrowserInterfaceBroker()->GetInterface(
        loader.BindNewPipeAndPassReceiver());
-
-   std::vector<mojom::PreloadScriptSourcePtr> scripts;
+ 
+-  std::vector<mojom::PreloadScriptSourcePtr> scripts;
 -  if (!loader->LoadPreloadScripts(std::string{type}, &scripts))
++  mojom::RendererStartupDataPtr data;
 +  if (!loader->LoadPreloadScripts(std::string{type},
-+                                  std::string{injection_point}, &scripts))
++                                  std::string{injection_point}, &data))
++    return;
++  if (!data)
      return;
-
+ 
    v8::Isolate* isolate = v8::Isolate::GetCurrent();
-@@ -187,6 +249,48 @@ void ExecutePlainPreloadScripts(v8::Local<v8::Context> context,
+   v8::HandleScope handle_scope(isolate);
+   v8::Context::Scope context_scope(context);
+ 
+-  for (const auto& script_source : scripts) {
+-    if (!script_source->error.empty()) {
++  for (const auto& script_source : data->preload_scripts) {
++    if (script_source->error) {
+       LOG(ERROR) << "Unable to load preload script: "
+-                 << script_source->file_path << ": " << script_source->error;
++                 << script_source->file_path << ": " << *script_source->error;
+       continue;
+     }
+ 
+     v8::TryCatch try_catch(isolate);
++    base::span<const uint8_t> bytes = script_source->contents;
+     v8::Local<v8::String> source =
+-        gin::StringToV8(isolate, script_source->contents);
++        gin::StringToV8(
++            isolate,
++            std::string_view(reinterpret_cast<const char*>(bytes.data()),
++                             bytes.size()));
+     v8::Local<v8::Script> script;
+     if (!v8::Script::Compile(context, source).ToLocal(&script)) {
+       LOG(ERROR) << "Unable to compile preload script: "
+@@ -188,6 +284,48 @@ void ExecutePlainPreloadScripts(v8::Local<v8::Context> context,
    }
  }
-
+ 
 +void EnsureWorkerData(v8::Local<v8::Context> context,
 +                      blink::ExecutionContext* ec) {
 +  if (auto* worker_data = WorkerData::GetCurrent()) {
@@ -5907,10 +6045,10 @@ index 21c1396e03..4f6bb25212 100644
 +  blink::Platform::Current()->GetBrowserInterfaceBroker()->GetInterface(
 +      loader.BindNewPipeAndPassReceiver());
 +
-+  std::vector<mojom::PreloadScriptSourcePtr> scripts;
++  mojom::RendererStartupDataPtr data;
 +  return loader->LoadPreloadScripts(std::string{type},
-+                                    std::string{injection_point}, &scripts) &&
-+         !scripts.empty();
++                                    std::string{injection_point}, &data) &&
++         data && !data->preload_scripts.empty();
 +}
 +
 +void ExecuteWorkerPreloadScripts(v8::Local<v8::Context> context,
@@ -5919,17 +6057,17 @@ index 21c1396e03..4f6bb25212 100644
 +  if (HasNodeProcess(context)) {
 +    ExecutePlainPreloadScripts(context, type, injection_point);
 +  } else {
-+    ExecuteSandboxedWorkerPreloadScripts(context, injection_point);
++    ExecuteSandboxedWorkerPreloadScripts(context, type, injection_point);
 +  }
 +}
 +
  // static
  RendererClientBase* g_renderer_client_base = nullptr;
-
-@@ -629,6 +733,21 @@ void RendererClientBase::WillDestroyServiceWorkerContextOnWorkerThread(
+ 
+@@ -643,6 +781,21 @@ void RendererClientBase::WillDestroyServiceWorkerContextOnWorkerThread(
  #endif
  }
-
+ 
 +void RendererClientBase::DidInitializeWorkerContextOnWorkerThread(
 +    v8::Local<v8::Context> context) {
 +  auto* ec = blink::ExecutionContext::From(context);
@@ -5948,7 +6086,7 @@ index 21c1396e03..4f6bb25212 100644
  void RendererClientBase::WorkerScriptReadyForEvaluationOnWorkerThread(
      v8::Local<v8::Context> context) {
    auto* ec = blink::ExecutionContext::From(context);
-@@ -638,14 +757,24 @@ void RendererClientBase::WorkerScriptReadyForEvaluationOnWorkerThread(
+@@ -652,14 +805,24 @@ void RendererClientBase::WorkerScriptReadyForEvaluationOnWorkerThread(
    if (!ec || ec->IsWorkletGlobalScope())
      return;
    RegisterOomStackTraceCallback(v8::Isolate::GetCurrent());
@@ -5964,7 +6102,7 @@ index 21c1396e03..4f6bb25212 100644
 +                                kWorkerScriptReadyInjectionPoint);
 +  }
  }
-
+ 
  void RendererClientBase::WillDestroyWorkerContextOnWorkerThread(
      v8::Local<v8::Context> context) {
 -  if (blink::ExecutionContext::From(context)->IsWorkletGlobalScope())
@@ -5975,12 +6113,12 @@ index 21c1396e03..4f6bb25212 100644
 +    delete WorkerData::GetCurrent();
    UnregisterOomStackTraceCallback(v8::Isolate::GetCurrent());
  }
-
+ 
 diff --git a/shell/renderer/renderer_client_base.h b/shell/renderer/renderer_client_base.h
-index fe69b2473d..52637b6806 100644
+index 9dfa34b58c..5207e8a6e4 100644
 --- a/shell/renderer/renderer_client_base.h
 +++ b/shell/renderer/renderer_client_base.h
-@@ -142,6 +142,8 @@ class RendererClientBase : public content::ContentRendererClient
+@@ -143,6 +143,8 @@ class RendererClientBase : public content::ContentRendererClient
        const GURL& service_worker_scope,
        const GURL& script_url,
        const blink::ServiceWorkerToken& service_worker_token) override;
@@ -5990,13 +6128,13 @@ index fe69b2473d..52637b6806 100644
        v8::Local<v8::Context> context) override;
    void WillDestroyWorkerContextOnWorkerThread(
 diff --git a/shell/renderer/service_worker_data.cc b/shell/renderer/service_worker_data.cc
-index c16d7075e5..5f4c44a53f 100644
+index 73c6e42647..8fd5a9a8e0 100644
 --- a/shell/renderer/service_worker_data.cc
 +++ b/shell/renderer/service_worker_data.cc
 @@ -4,13 +4,10 @@
-
+ 
  #include "electron/shell/renderer/service_worker_data.h"
-
+ 
 -#include "base/check.h"
 -#include "base/notimplemented.h"
 +#include <utility>
@@ -6009,11 +6147,11 @@ index c16d7075e5..5f4c44a53f 100644
 +#include "shell/renderer/electron_renderer_v8_util.h"
  #include "shell/renderer/preload_realm_context.h"
  #include "third_party/blink/public/common/associated_interfaces/associated_interface_registry.h"
-
+ 
 @@ -20,16 +17,6 @@ namespace {
-
+ 
  constinit thread_local ServiceWorkerData* current_service_worker_data = nullptr;
-
+ 
 -void EmitIPCMessageInContext(v8::Isolate* isolate,
 -                             v8::Local<v8::Context> context,
 -                             bool internal,
@@ -6025,32 +6163,32 @@ index c16d7075e5..5f4c44a53f 100644
 -}
 -
  }  // namespace
-
+ 
  ServiceWorkerData::~ServiceWorkerData() {
-@@ -86,26 +73,66 @@ void ServiceWorkerData::Message(bool internal,
-     if (!service_worker_preload_realm_initialized_)
-       return;
-
--    EmitIPCMessageInContext(isolate, context, internal, channel, arguments);
-+    renderer_util::EmitIPCMessageInContext(isolate, context, internal, channel,
-+                                           arguments);
+@@ -84,28 +71,66 @@ void ServiceWorkerData::Message(bool internal,
+ 
+   if (maybe_preload_context.IsEmpty()) {
+     if (service_worker_preload_realm_initialized_) {
+-      EmitIPCMessageInContext(isolate, context, internal, channel, arguments);
++      renderer_util::EmitIPCMessageInContext(isolate, context, internal,
++                                             channel, arguments);
+     }
      return;
    }
-
+ 
 -  EmitIPCMessageInContext(isolate, maybe_preload_context.ToLocalChecked(),
 -                          internal, channel, arguments);
 +  renderer_util::EmitIPCMessageInContext(
 +      isolate, maybe_preload_context.ToLocalChecked(), internal, channel,
 +      arguments);
-
--  if (service_worker_preload_realm_initialized_)
+ 
+   if (service_worker_preload_realm_initialized_) {
 -    EmitIPCMessageInContext(isolate, context, internal, channel, arguments);
-+  if (service_worker_preload_realm_initialized_) {
 +    renderer_util::EmitIPCMessageInContext(isolate, context, internal, channel,
 +                                           arguments);
-+  }
+   }
  }
-
+ 
  void ServiceWorkerData::ReceivePostMessage(const std::string& channel,
                                             blink::TransferableMessage message) {
 -  NOTIMPLEMENTED();
@@ -6075,7 +6213,6 @@ index c16d7075e5..5f4c44a53f 100644
 +  renderer_util::EmitIPCPostMessageInContext(
 +      isolate, maybe_preload_context.ToLocalChecked(), channel,
 +      std::move(message));
-+
 +}
 +
 +void ServiceWorkerData::ExecuteJavaScript(const std::string& code,
@@ -6092,7 +6229,7 @@ index c16d7075e5..5f4c44a53f 100644
 +  renderer_util::ExecuteJavaScriptInContext(isolate, context, code,
 +                                            std::move(callback));
  }
-
+ 
  void ServiceWorkerData::TakeHeapSnapshot(mojo::ScopedHandle file,
                                           TakeHeapSnapshotCallback callback) {
 -  NOTIMPLEMENTED();
@@ -6100,13 +6237,13 @@ index c16d7075e5..5f4c44a53f 100644
 +  renderer_util::TakeHeapSnapshot(isolate_, std::move(file),
 +                                  std::move(callback));
  }
-
+ 
  }  // namespace electron
 diff --git a/shell/renderer/service_worker_data.h b/shell/renderer/service_worker_data.h
-index a214d0c2cd..d3ae85de94 100644
+index 844fdae9fc..23c1fd74dd 100644
 --- a/shell/renderer/service_worker_data.h
 +++ b/shell/renderer/service_worker_data.h
-@@ -55,6 +55,8 @@ class ServiceWorkerData : public mojom::ElectronRenderer {
+@@ -66,6 +66,8 @@ class ServiceWorkerData : public mojom::ElectronRenderer {
                 blink::CloneableMessage arguments) override;
    void ReceivePostMessage(const std::string& channel,
                            blink::TransferableMessage message) override;
@@ -6114,14 +6251,14 @@ index a214d0c2cd..d3ae85de94 100644
 +                         ExecuteJavaScriptCallback callback) override;
    void TakeHeapSnapshot(mojo::ScopedHandle file,
                          TakeHeapSnapshotCallback callback) override;
-
+ 
 diff --git a/shell/renderer/worker_data.cc b/shell/renderer/worker_data.cc
 new file mode 100644
 index 0000000000..32f38ccac8
 --- /dev/null
 +++ b/shell/renderer/worker_data.cc
 @@ -0,0 +1,112 @@
-+// Copyright (c) 2026 Electron Port Workspace contributors
++// Copyright (c) 2026 Electron Port Workspace contributors Co., LTD
 +// Use of this source code is governed by the MIT license that can be
 +// found in the LICENSE file.
 +
@@ -6235,11 +6372,11 @@ index 0000000000..32f38ccac8
 +}  // namespace electron
 diff --git a/shell/renderer/worker_data.h b/shell/renderer/worker_data.h
 new file mode 100644
-index 0000000000..9704d4897b
+index 0000000000..7b30198793
 --- /dev/null
 +++ b/shell/renderer/worker_data.h
-@@ -0,0 +1,76 @@
-+// Copyright (c) 2026 Electron Port Workspace contributors
+@@ -0,0 +1,85 @@
++// Copyright (c) 2026 Electron Port Workspace contributors Co., LTD
 +// Use of this source code is governed by the MIT license that can be
 +// found in the LICENSE file.
 +
@@ -6248,6 +6385,7 @@ index 0000000000..9704d4897b
 +
 +#include <memory>
 +#include <string>
++#include <utility>
 +
 +#include "base/memory/raw_ptr.h"
 +#include "base/process/process_metrics.h"
@@ -6283,6 +6421,13 @@ index 0000000000..9704d4897b
 +  const blink::WorkerToken& token() const { return token_; }
 +  base::ProcessMetrics* process_metrics() const { return metrics_.get(); }
 +
++  void SetWorkerStartupData(mojom::RendererStartupDataPtr data) {
++    worker_startup_data_ = std::move(data);
++  }
++  const mojom::RendererStartupDataPtr& worker_startup_data() const {
++    return worker_startup_data_;
++  }
++
 +  void UpdateContext(v8::Local<v8::Context> context);
 +
 +  void BindIPCReceiver(
@@ -6307,6 +6452,7 @@ index 0000000000..9704d4897b
 +  blink::WorkerToken token_;
 +
 +  std::unique_ptr<base::ProcessMetrics> metrics_;
++  mojom::RendererStartupDataPtr worker_startup_data_;
 +
 +  mojo::Remote<mojom::ElectronWorkerAPI> worker_api_;
 +  mojo::Receiver<mojom::ElectronRenderer> receiver_{this};
@@ -6316,12 +6462,12 @@ index 0000000000..9704d4897b
 +
 +#endif  // ELECTRON_SHELL_RENDERER_WORKER_DATA_H_
 diff --git a/spec/api-browser-window-spec.ts b/spec/api-browser-window-spec.ts
-index 5dea7a80e3..a13eaddbc5 100755
+index 42a08f767e..1f36ed842e 100755
 --- a/spec/api-browser-window-spec.ts
 +++ b/spec/api-browser-window-spec.ts
-@@ -4302,13 +4302,15 @@ describe('BrowserWindow module', () => {
+@@ -4496,13 +4496,15 @@ describe('BrowserWindow module', () => {
          });
-
+ 
          ipcMain.once('parent-ready', function (event) {
 -          expect(event.sender).to.equal(w.webContents, 'sender should be the parent');
 -          event.sender.send('verified');
@@ -6337,16 +6483,16 @@ index 5dea7a80e3..a13eaddbc5 100755
 +          expect(frameEvent.sender).to.equal(childWc, 'sender should be the child');
 +          frameEvent.sender.send('verified');
          });
-
+ 
          const done = Promise.all(['parent-answer', 'child-answer'].map((name) => once(ipcMain, name)));
 diff --git a/spec/api-service-worker-main-spec.ts b/spec/api-service-worker-main-spec.ts
-index 61a4ab790f..ba1632c63c 100644
+index c498265a2e..32e99db2ec 100644
 --- a/spec/api-service-worker-main-spec.ts
 +++ b/spec/api-service-worker-main-spec.ts
 @@ -362,6 +362,26 @@ describe('ServiceWorkerMain module', () => {
      });
    });
-
+ 
 +  describe('executeJavaScript()', () => {
 +    it('evaluates code in a running service worker', async () => {
 +      loadWorkerScript();
@@ -6373,7 +6519,7 @@ index 61a4ab790f..ba1632c63c 100644
 @@ -384,21 +404,47 @@ describe('ServiceWorkerMain module', () => {
          await pingPromise;
        });
-
+ 
 -      it('does not receive message on ipcMain', async () => {
 +      it('dispatches messages through serviceWorker.ipc, session.ipc, and ipcMain', async () => {
          loadWorkerScript();
@@ -6430,13 +6576,13 @@ index 61a4ab790f..ba1632c63c 100644
        });
      });
 diff --git a/spec/api-session-spec.ts b/spec/api-session-spec.ts
-index 18e72e9ba4..cbd418acb5 100644
+index a5ac9d1125..1455ddfd90 100644
 --- a/spec/api-session-spec.ts
 +++ b/spec/api-session-spec.ts
-@@ -2917,6 +2917,30 @@ describe('session module', () => {
+@@ -2921,6 +2921,30 @@ describe('session module', () => {
        });
      });
-
+ 
 +    it('rejects injectionPoint for non-dedicated-worker preload scripts', () => {
 +      const ses = session.fromPartition(`shared-worker-preload-injection-point-${crypto.randomUUID()}`);
 +      expect(() => {
@@ -6465,10 +6611,10 @@ index 18e72e9ba4..cbd418acb5 100644
        const ses = session.fromPartition(`worker-preload-${crypto.randomUUID()}`);
        ses.registerPreloadScript({
 diff --git a/spec/api-web-contents-spec.ts b/spec/api-web-contents-spec.ts
-index 77d3195ea4..63a071af6d 100644
+index 9136f725b4..c3e7b29a45 100644
 --- a/spec/api-web-contents-spec.ts
 +++ b/spec/api-web-contents-spec.ts
-@@ -4324,6 +4324,31 @@ describe('webContents module', () => {
+@@ -5475,6 +5475,31 @@ describe('webContents module', () => {
        expect(message).to.equal('Hello World!');
        expect(result).to.equal('foobar');
      });
@@ -6498,7 +6644,7 @@ index 77d3195ea4..63a071af6d 100644
 +      expect(observed).to.deep.equal([false, true, true, true]);
 +    });
    });
-
+ 
    describe('referrer', () => {
 diff --git a/spec/api-worker-main-spec.ts b/spec/api-worker-main-spec.ts
 new file mode 100644
@@ -7050,11 +7196,11 @@ index 0000000000..20ccf99d50
 +  }
 +});
 diff --git a/spec/ts-smoke/electron/main.ts b/spec/ts-smoke/electron/main.ts
-index adb675e2e3..228d9ae31b 100644
+index c5c32a4349..977c0d1af0 100644
 --- a/spec/ts-smoke/electron/main.ts
 +++ b/spec/ts-smoke/electron/main.ts
-@@ -648,12 +648,146 @@ ipcMain.handle('ping-pong', (event, arg: any) => {
-
+@@ -672,12 +672,146 @@ ipcMain.handle('ping-pong', (event, arg: any) => {
+ 
  ipcMain.on('asynchronous-message', (event, arg: any) => {
    console.log(arg); // prints "ping"
 -  event.sender.send('asynchronous-reply', 'pong');
@@ -7062,7 +7208,7 @@ index adb675e2e3..228d9ae31b 100644
 +    event.sender.send('asynchronous-reply', 'pong');
 +  }
  });
-
+ 
  ipcMain.on('synchronous-message', (event, arg: any) => {
    console.log(arg); // prints "ping"
 +  console.log(event.isReturnValueSet);
@@ -7199,9 +7345,9 @@ index adb675e2e3..228d9ae31b 100644
 +  // @ts-expect-error Dedicated worker IPC off listener events are strongly typed.
 +  console.log(event.notARealProperty);
  });
-
+ 
  const winWindows = new BrowserWindow({
-@@ -1270,11 +1404,14 @@ session.defaultSession.registerPreloadScript({
+@@ -1294,11 +1428,14 @@ session.defaultSession.registerPreloadScript({
    filePath: '/tmp/preload.js'
  });
  session.defaultSession.registerPreloadScript({ type: 'dedicated-worker', filePath: '/tmp/worker-preload.js' });
@@ -7216,7 +7362,7 @@ index adb675e2e3..228d9ae31b 100644
  session.defaultSession.registerPreloadScript({
    type: 'service-worker',
    // @ts-expect-error runInInitialEmptyDocument is supported only for frame preload scripts
-@@ -1294,6 +1431,8 @@ if (preloadScript.type === 'frame') {
+@@ -1318,6 +1455,8 @@ if (preloadScript.type === 'frame') {
    console.log(preloadScript.runInInitialEmptyDocument);
  } else if (preloadScript.type === 'service-worker') {
    console.log(preloadScript.target);
@@ -7226,21 +7372,21 @@ index adb675e2e3..228d9ae31b 100644
    // @ts-expect-error worker preload script results do not have a frame scope
    console.log(preloadScript.scope);
 diff --git a/typings/internal-ambient.d.ts b/typings/internal-ambient.d.ts
-index ef371b342e..a51152a986 100644
+index 566d5f743c..abe9ccecdb 100644
 --- a/typings/internal-ambient.d.ts
 +++ b/typings/internal-ambient.d.ts
-@@ -34,6 +34,7 @@ declare namespace NodeJS {
+@@ -39,6 +39,7 @@ declare namespace NodeJS {
    interface IpcRendererBinding {
      createForRenderFrame(): IpcRendererImpl;
      createForServiceWorker(): IpcRendererImpl;
 +    createForWorker(): IpcRendererImpl;
    }
-
+ 
    interface V8UtilBinding {
-@@ -133,6 +134,14 @@ declare namespace NodeJS {
+@@ -145,6 +146,14 @@ declare namespace NodeJS {
      ServiceWorkerMain: typeof Electron.ServiceWorkerMain;
    }
-
+ 
 +  interface DedicatedWorkerMainBinding {
 +    DedicatedWorkerMain: typeof Electron.DedicatedWorkerMain;
 +  }
@@ -7250,9 +7396,9 @@ index ef371b342e..a51152a986 100644
 +  }
 +
    interface SessionBinding {
-     fromPartition: typeof Electron.Session.fromPartition,
-     fromPath: typeof Electron.Session.fromPath,
-@@ -257,6 +266,8 @@ declare namespace NodeJS {
+     fromPartition: typeof Electron.Session.fromPartition;
+     fromPath: typeof Electron.Session.fromPath;
+@@ -292,6 +301,8 @@ declare namespace NodeJS {
      _linkedBinding(name: 'electron_browser_session'): SessionBinding;
      _linkedBinding(name: 'electron_browser_screen'): { createScreen(): Electron.Screen };
      _linkedBinding(name: 'electron_browser_service_worker_main'): ServiceWorkerMainBinding;
@@ -7262,13 +7408,13 @@ index ef371b342e..a51152a986 100644
      _linkedBinding(name: 'electron_browser_tray'): { Tray: Electron.Tray };
      _linkedBinding(name: 'electron_browser_view'): { View: Electron.View };
 diff --git a/typings/internal-electron.d.ts b/typings/internal-electron.d.ts
-index ff197fec56..505529056c 100644
+index 7b814cc00c..153f21f33b 100644
 --- a/typings/internal-electron.d.ts
 +++ b/typings/internal-electron.d.ts
-@@ -85,6 +85,14 @@ declare namespace Electron {
+@@ -94,6 +94,14 @@ declare namespace Electron {
      _stopAllWorkers(): Promise<void>;
    }
-
+ 
 +  interface DedicatedWorkerMain {
 +    _send(internal: boolean, channel: string, args: any): void;
 +  }
@@ -7279,20 +7425,20 @@ index ff197fec56..505529056c 100644
 +
    interface ServiceWorkerMain {
      _send(internal: boolean, channel: string, args: any): void;
-     _startExternalRequest(hasTimeout: boolean): { id: string, ok: boolean };
-@@ -206,7 +214,7 @@ declare namespace Electron {
+     _startExternalRequest(hasTimeout: boolean): { id: string; ok: boolean };
+@@ -234,7 +242,7 @@ declare namespace Electron {
    }
-
+ 
    interface ReplyChannel {
 -    sendReply(value: any): void;
 +    sendReply(value: any): boolean;
    }
-
+ 
    interface IpcMainEvent {
-@@ -227,6 +235,22 @@ declare namespace Electron {
+@@ -255,6 +263,22 @@ declare namespace Electron {
      _replyChannel: ReplyChannel;
    }
-
+ 
 +  interface IpcMainDedicatedWorkerEvent {
 +    _replyChannel: ReplyChannel;
 +  }
@@ -7312,10 +7458,10 @@ index ff197fec56..505529056c 100644
    // Deprecated / undocumented BrowserWindow methods
    interface BrowserWindow {
      getURL(): string;
-@@ -302,8 +326,16 @@ declare namespace ElectronInternal {
+@@ -397,8 +421,16 @@ declare namespace ElectronInternal {
      invoke<T>(channel: string, ...args: any[]): Promise<T>;
    }
-
+ 
 -  type IpcMainInternalEvent = Omit<Electron.IpcMainEvent, 'reply'> | Omit<Electron.IpcMainServiceWorkerEvent, 'reply'>;
 -  type IpcMainInternalInvokeEvent = Electron.IpcMainInvokeEvent | Electron.IpcMainServiceWorkerInvokeEvent;
 +  type IpcMainInternalEvent =
@@ -7328,6 +7474,9 @@ index ff197fec56..505529056c 100644
 +    | Electron.IpcMainDedicatedWorkerInvokeEvent
 +    | Electron.IpcMainServiceWorkerInvokeEvent
 +    | Electron.IpcMainSharedWorkerInvokeEvent;
-
+ 
    interface IpcMainInternal extends NodeJS.EventEmitter {
      handle(channel: string, listener: (event: IpcMainInternalInvokeEvent, ...args: any[]) => Promise<any> | any): void;
+-- 
+2.53.0
+

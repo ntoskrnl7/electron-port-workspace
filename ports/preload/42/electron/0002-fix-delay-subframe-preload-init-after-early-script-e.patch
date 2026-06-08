@@ -1,7 +1,8 @@
-From e4a2f62c11a7ef0d5db7bf0a9f6e003891f24bac Mon Sep 17 00:00:00 2001
+From 5e613fca2f7dc1f90a8a4bc34d2baef08194def3 Mon Sep 17 00:00:00 2001
 From: Jung-Kwang Lee <ntoskrnl7@gmail.com>
 Date: Wed, 6 May 2026 00:28:22 +0900
-Subject: fix: delay subframe preload init after early script execution
+Subject: [PATCH 2/9] fix: delay subframe preload init after early script
+ execution
 
 Avoid consuming Electron's subframe Node or preload initialization on the initial empty document when browser-side frame handlers synchronously execute JavaScript in a newly-created same-origin subframe. This lets DidClearWindowObject retry initialization after the real document commits.
 ---
@@ -41,7 +42,7 @@ index e9f9cfd397..f13ad4ce5c 100644
 @@ -121,17 +139,12 @@ void ElectronRenderFrameObserver::DidInstallConditionalFeatures(
    if (ShouldNotifyClient(world_id))
      renderer_client_->DidCreateScriptContext(isolate, context, render_frame_);
-
+ 
 -  auto prefs = render_frame_->GetBlinkPreferences();
    bool use_context_isolation = prefs.context_isolation;
    // This logic matches the EXPLAINED logic in electron_renderer_client.cc
@@ -53,7 +54,7 @@ index e9f9cfd397..f13ad4ce5c 100644
 -  bool allow_preload_in_sub_frames =
 -      base::CommandLine::ForCurrentProcess()->HasSwitch(
 -          switches::kFramePreloadInSubFrames);
-
+ 
    bool should_create_isolated_context =
        use_context_isolation && is_main_world &&
 diff --git a/spec/api-session-spec.ts b/spec/api-session-spec.ts
@@ -61,7 +62,7 @@ index 1ac92dc0b6..2105d02bdc 100644
 --- a/spec/api-session-spec.ts
 +++ b/spec/api-session-spec.ts
 @@ -2146,7 +2146,8 @@ describe('session module', () => {
-
+ 
      const collectFramePreloadEvents = async (
        scope?: 'main' | 'sub-frames' | 'all',
 -      nodeIntegrationInSubFrames = false
@@ -101,7 +102,7 @@ index 1ac92dc0b6..2105d02bdc 100644
        }
        return details;
      };
-
+ 
 +    const expectRealSubframePreload = (details: Array<{ isMainFrame: boolean; href: string }>) => {
 +      const subframeHrefs = details.filter(({ isMainFrame }) => !isMainFrame).map(({ href }) => href);
 +      expect(subframeHrefs).to.have.lengthOf(1);
@@ -117,7 +118,7 @@ index 1ac92dc0b6..2105d02bdc 100644
        expect(details.map(({ isMainFrame }) => isMainFrame)).to.deep.equal([false]);
 +      expectRealSubframePreload(details);
      });
-
+ 
      it('runs frame preload scripts in main frames and subframes with all scope', async () => {
        const details = await collectFramePreloadEvents('all');
        expect(details.map(({ isMainFrame }) => isMainFrame).sort())
@@ -159,5 +160,8 @@ index 1ac92dc0b6..2105d02bdc 100644
 +        .to.deep.equal([false, true]);
 +      expectRealSubframePreload(details);
      });
-
+ 
      it('rejects scope for worker preload scripts', () => {
+-- 
+2.53.0
+

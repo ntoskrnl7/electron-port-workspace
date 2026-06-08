@@ -15,6 +15,14 @@ This target patch is Electron-only. It changes:
 - Specs covering `alert`, `confirm`, `prompt`, async `beforeunload`, and legacy
   `will-prevent-unload` behavior.
 
+Dependency:
+
+- `focused-editable-text`
+
+The dependency is recorded in `manifest.txt` as
+`depends_on=focused-editable-text`. Apply `focused-editable-text/42` first.
+`port-bundle` validates this before applying the bundle.
+
 Patch sequence:
 
 - `electron/0001-feat-add-JavaScript-dialog-handler.patch`
@@ -37,7 +45,7 @@ cd /path/to/workspace/42/src/electron
 env -u ELECTRON_RUN_AS_NODE npm run test -- --skipYarnInstall --runners=main --grep "synchronous prompts|will-prevent-unload event"
 env -u ELECTRON_RUN_AS_NODE npm run test -- --skipYarnInstall --runners=main --grep "setJavaScriptDialogHandler"
 env -u ELECTRON_RUN_AS_NODE npm run test -- --skipYarnInstall --runners=main --grep "setJavaScriptDialogHandler|synchronous prompts"
-cd /path/to/electron-port-workspace
+cd /path/to/workspace
 scripts/build-dev-electron-npm.sh --target 42 --include-widevine-cdm --widevine-license-ack
 ```
 

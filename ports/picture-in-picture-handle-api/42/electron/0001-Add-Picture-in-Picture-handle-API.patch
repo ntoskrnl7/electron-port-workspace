@@ -1,7 +1,7 @@
-From 2cf89420a367507ed18feb0e2838cdd1688de3ff Mon Sep 17 00:00:00 2001
+From 9f7c3b68a5a13e05510321d47f9708e9ccc37837 Mon Sep 17 00:00:00 2001
 From: Jung-Kwang Lee <ntoskrnl7@gmail.com>
 Date: Sat, 16 May 2026 06:05:02 +0900
-Subject: Add Picture-in-Picture handle API
+Subject: [PATCH] Add Picture-in-Picture handle API
 
 ---
  docs/api/app.md                               |  36 ++++
@@ -24,13 +24,13 @@ Subject: Add Picture-in-Picture handle API
  create mode 100644 lib/browser/picture-in-picture.ts
 
 diff --git a/docs/api/app.md b/docs/api/app.md
-index 6e5496d420..34d665c78f 100644
+index d90411de07..c861086264 100644
 --- a/docs/api/app.md
 +++ b/docs/api/app.md
 @@ -47,6 +47,32 @@ to get a Promise that is fulfilled when Electron is initialized.
  > tick of the event loop. If an Electron API needs to be called before the `ready` event, ensure
  > that it is called synchronously in the top-level context of the main process.
-
+ 
 +### Event: 'enter-picture-in-picture'
 +
 +Returns:
@@ -58,12 +58,12 @@ index 6e5496d420..34d665c78f 100644
 +Emitted when the active Picture-in-Picture window is closing.
 +
  ### Event: 'window-all-closed'
-
+ 
  Emitted when all windows have been closed.
 @@ -665,6 +691,16 @@ On _Windows_, there are 2 kinds of icons:
-
+ 
  On _Linux_ and _macOS_, icons depend on the application associated with file mime type.
-
+ 
 +### `app.getCurrentPictureInPicture()`
 +
 +Returns `VideoPictureInPicture | DocumentPictureInPicture | null` - A handle
@@ -75,7 +75,7 @@ index 6e5496d420..34d665c78f 100644
 +handle will not affect the new PiP window.
 +
  ### `app.setPath(name, path)`
-
+ 
  * `name` string
 diff --git a/docs/api/document-picture-in-picture.md b/docs/api/document-picture-in-picture.md
 new file mode 100644
@@ -231,13 +231,13 @@ index 0000000000..f2bdc345f3
 +[`pip.getSize()`](picture-in-picture.md#pipgetsize) to read the current PiP
 +window size.
 diff --git a/docs/api/web-contents.md b/docs/api/web-contents.md
-index 6b5519d662..40e41341a5 100644
+index b85050126b..627efac45c 100644
 --- a/docs/api/web-contents.md
 +++ b/docs/api/web-contents.md
 @@ -725,6 +725,26 @@ Emitted when media starts playing.
-
+ 
  Emitted when media is paused or done playing.
-
+ 
 +#### Event: 'enter-picture-in-picture'
 +
 +Returns:
@@ -259,7 +259,7 @@ index 6b5519d662..40e41341a5 100644
 +Picture-in-Picture window is closing.
 +
  #### Event: 'audio-state-changed'
-
+ 
  Returns:
 diff --git a/lib/browser/api/app.ts b/lib/browser/api/app.ts
 index b60a4e5a95..abb7e7f17e 100644
@@ -269,12 +269,12 @@ index b60a4e5a95..abb7e7f17e 100644
 +import { getCurrentPictureInPicture, wrapPictureInPictureEvent } from '@electron/internal/browser/picture-in-picture';
 +
  import { Menu } from 'electron/main';
-
+ 
  import { EventEmitter } from 'events';
 @@ -9,6 +11,11 @@ const { app } = bindings;
-
+ 
  Object.setPrototypeOf(app, EventEmitter.prototype);
-
+ 
 +const appEmit = app.emit;
 +app.emit = function (eventName: string, ...args: any[]) {
 +  return appEmit.call(this, eventName, ...wrapPictureInPictureEvent(app, eventName, args));
@@ -282,20 +282,20 @@ index b60a4e5a95..abb7e7f17e 100644
 +
  // Only one app object permitted.
  export default app;
-
+ 
 @@ -59,6 +66,10 @@ Object.defineProperty(app, 'applicationMenu', {
    }
  });
-
+ 
 +app.getCurrentPictureInPicture = function () {
 +  return getCurrentPictureInPicture(app);
 +};
 +
  // The native implementation is not provided on non-windows platforms
  app.setAppUserModelId = app.setAppUserModelId || (() => {});
-
+ 
 diff --git a/lib/browser/api/web-contents.ts b/lib/browser/api/web-contents.ts
-index 99660f60f4..58e882be30 100644
+index ed0d97a298..7e50ebf3b8 100644
 --- a/lib/browser/api/web-contents.ts
 +++ b/lib/browser/api/web-contents.ts
 @@ -6,6 +6,7 @@ import {
@@ -305,11 +305,11 @@ index 99660f60f4..58e882be30 100644
 +import { wrapPictureInPictureEvent } from '@electron/internal/browser/picture-in-picture';
  import * as deprecate from '@electron/internal/common/deprecate';
  import { IPC_MESSAGES } from '@electron/internal/common/ipc-messages';
-
+ 
 @@ -122,6 +123,11 @@ const binding = process._linkedBinding('electron_browser_web_contents');
  const printing = process._linkedBinding('electron_browser_printing');
  const { WebContents } = binding as { WebContents: { prototype: Electron.WebContents } };
-
+ 
 +const webContentsEmit = WebContents.prototype.emit;
 +WebContents.prototype.emit = function (eventName: string, ...args: any[]) {
 +  return webContentsEmit.call(this, eventName, ...wrapPictureInPictureEvent(app, eventName, args));
@@ -492,7 +492,7 @@ index 0000000000..39242471da
 +  return args;
 +};
 diff --git a/shell/browser/api/electron_api_app.cc b/shell/browser/api/electron_api_app.cc
-index baabc3123f..2a6bacc74a 100644
+index 5ae0d2f4b5..aec98bbfd4 100644
 --- a/shell/browser/api/electron_api_app.cc
 +++ b/shell/browser/api/electron_api_app.cc
 @@ -71,6 +71,7 @@
@@ -503,19 +503,19 @@ index baabc3123f..2a6bacc74a 100644
  #include "shell/common/gin_converters/image_converter.h"
  #include "shell/common/gin_converters/login_item_settings_converter.h"
  #include "shell/common/gin_converters/net_converter.h"
-@@ -559,6 +560,8 @@ App::App() {
+@@ -561,6 +562,8 @@ App::App() {
    static_cast<ElectronBrowserClient*>(ElectronBrowserClient::Get())
        ->set_delegate(this);
    Browser::Get()->AddObserver(this);
 +  picture_in_picture_observation_.Observe(
 +      PictureInPictureWindowManager::GetInstance());
-
+ 
    auto unsafe_pid = content::ChildProcessId::FromUnsafeValue(
        content::ChildProcessHost::kInvalidUniqueID);
-@@ -828,6 +831,44 @@ void App::BrowserChildProcessKilled(
+@@ -830,6 +833,44 @@ void App::BrowserChildProcessKilled(
    BrowserChildProcessCrashedOrKilled(data, info);
  }
-
+ 
 +void App::OnEnterPictureInPicture() {
 +  v8::Isolate* isolate = JavascriptEnvironment::GetIsolate();
 +  v8::HandleScope handle_scope(isolate);
@@ -557,10 +557,10 @@ index baabc3123f..2a6bacc74a 100644
  void App::BrowserChildProcessCrashedOrKilled(
      const content::ChildProcessData& data,
      const content::ChildProcessTerminationInfo& info) {
-@@ -1267,6 +1308,70 @@ void App::SetAccessibilitySupportFeatures(
+@@ -1269,6 +1310,70 @@ void App::SetAccessibilitySupportFeatures(
    Browser::Get()->OnAccessibilitySupportChanged();
  }
-
+ 
 +v8::Local<v8::Value> App::GetCurrentPictureInPictureDetails(
 +    v8::Isolate* isolate) {
 +  auto* manager = PictureInPictureWindowManager::GetInstance();
@@ -648,7 +648,7 @@ index 3aee766d9f..2dd3bdc835 100644
 +++ b/shell/browser/api/electron_api_app.h
 @@ -11,7 +11,9 @@
  #include <vector>
-
+ 
  #include "base/containers/flat_map.h"
 +#include "base/scoped_observation.h"
  #include "base/task/cancelable_task_tracker.h"
@@ -662,7 +662,7 @@ index 3aee766d9f..2dd3bdc835 100644
  #include "shell/browser/event_emitter_mixin.h"
 +#include "ui/gfx/geometry/rect.h"
  #include "v8/include/cppgc/persistent.h"
-
+ 
  #if BUILDFLAG(USE_NSS_CERTS)
 @@ -63,7 +66,8 @@ class App final : public gin::Wrappable<App>,
                    public gin_helper::EventEmitterMixin<App>,
@@ -677,14 +677,14 @@ index 3aee766d9f..2dd3bdc835 100644
 @@ -177,6 +181,10 @@ class App final : public gin::Wrappable<App>,
        const content::ChildProcessData& data,
        const content::ChildProcessTerminationInfo& info) override;
-
+ 
 +  // PictureInPictureWindowManager::Observer:
 +  void OnEnterPictureInPicture() override;
 +  void OnExitPictureInPicture() override;
 +
   private:
    [[nodiscard]] static base::FilePath GetDefaultAppLogPath();
-
+ 
 @@ -222,6 +230,14 @@ class App final : public gin::Wrappable<App>,
        const std::vector<std::string>& features);
    void SetAccessibilitySupportEnabled(gin_helper::ErrorThrower thrower,
@@ -707,14 +707,14 @@ index 3aee766d9f..2dd3bdc835 100644
 +  base::ScopedObservation<PictureInPictureWindowManager,
 +                          PictureInPictureWindowManager::Observer>
 +      picture_in_picture_observation_{this};
-
+ 
    bool disable_hw_acceleration_ = false;
    bool disable_domain_blocking_for_3DAPIs_ = false;
 diff --git a/typings/internal-electron.d.ts b/typings/internal-electron.d.ts
-index 7cd128eb74..132b14f70b 100644
+index 9436d6afb7..7b814cc00c 100644
 --- a/typings/internal-electron.d.ts
 +++ b/typings/internal-electron.d.ts
-@@ -18,9 +18,23 @@ declare namespace Electron {
+@@ -18,12 +18,26 @@ declare namespace Electron {
      setDesktopName(name: string): void;
      setAppPath(path: string | null): void;
      _clientCertRequestPasswordHandler: ((params: ClientCertRequestParams) => Promise<string>) | null;
@@ -722,9 +722,12 @@ index 7cd128eb74..132b14f70b 100644
 +    _setCurrentPictureInPictureBounds(id: number, bounds: Rectangle): Rectangle | null;
 +    _closeCurrentPictureInPicture(id: number): boolean;
 +    _isCurrentPictureInPicture(id: number): boolean;
-     on(event: '-client-certificate-request-password', listener: (event: Event<ClientCertRequestParams>, callback: (password: string) => void) => Promise<void>): this;
+     on(
+       event: '-client-certificate-request-password',
+       listener: (event: Event<ClientCertRequestParams>, callback: (password: string) => void) => Promise<void>
+     ): this;
    }
-
+ 
 +  interface PictureInPictureDetails {
 +    id: number;
 +    type: 'video' | 'document';
@@ -738,3 +741,6 @@ index 7cd128eb74..132b14f70b 100644
    interface AutoUpdater {
      isVersionAllowedForUpdate?(currentVersion: string, targetVersion: string): boolean;
    }
+-- 
+2.53.0
+

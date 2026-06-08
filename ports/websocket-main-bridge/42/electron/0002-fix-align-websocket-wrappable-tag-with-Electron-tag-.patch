@@ -1,0 +1,49 @@
+From 5b88e0b4080935b15d1ceabff77a44064109bf64 Mon Sep 17 00:00:00 2001
+From: Jung-Kwang Lee <ntoskrnl7@gmail.com>
+Date: Mon, 8 Jun 2026 00:10:00 +0900
+Subject: [PATCH 2/2] fix: align websocket wrappable tag with Electron tag
+ range
+
+---
+ shell/browser/api/electron_api_web_socket.cc     | 5 +++--
+ shell/common/gin_helper/wrappable_pointer_tags.h | 3 ++-
+ 2 files changed, 5 insertions(+), 3 deletions(-)
+
+diff --git a/shell/browser/api/electron_api_web_socket.cc b/shell/browser/api/electron_api_web_socket.cc
+index a4b6490e49..10cf42fcc5 100644
+--- a/shell/browser/api/electron_api_web_socket.cc
++++ b/shell/browser/api/electron_api_web_socket.cc
+@@ -18,13 +18,14 @@
+ #include "shell/common/gin_converters/gurl_converter.h"
+ #include "shell/common/gin_converters/std_converter.h"
+ #include "shell/common/gin_helper/handle.h"
++#include "shell/common/gin_helper/wrappable_pointer_tags.h"
+ #include "shell/common/node_util.h"
+ #include "url/gurl.h"
+ 
+ namespace electron::api {
+ 
+-const gin::WrapperInfo WebSocket::kWrapperInfo = {{gin::kEmbedderNativeGin},
+-                                                  gin::kElectronWebSocket};
++const gin::WrapperInfo WebSocket::kWrapperInfo =
++    electron::MakeWrapperInfo(electron::kElectronWebSocket);
+ 
+ WebSocket::RequestFilter::RequestFilter() = default;
+ WebSocket::RequestFilter::RequestFilter(const RequestFilter&) = default;
+diff --git a/shell/common/gin_helper/wrappable_pointer_tags.h b/shell/common/gin_helper/wrappable_pointer_tags.h
+index 0edfb3f0c9..b149a70e3a 100644
+--- a/shell/common/gin_helper/wrappable_pointer_tags.h
++++ b/shell/common/gin_helper/wrappable_pointer_tags.h
+@@ -32,7 +32,8 @@ enum ElectronWrappablePointerTag : uint16_t {
+   kElectronTray,                  // electron::api::Tray
+   kElectronUtilityProcess,        // electron::api::UtilityProcessWrapper
+   kElectronWebRequest,            // electron::api::WebRequest
+-  kLastElectronPointerTag = kElectronWebRequest,
++  kElectronWebSocket,             // electron::api::WebSocket
++  kLastElectronPointerTag = kElectronWebSocket,
+ };
+ 
+ // Constructs a gin::WrapperInfo from an ElectronWrappablePointerTag,
+-- 
+2.53.0
+

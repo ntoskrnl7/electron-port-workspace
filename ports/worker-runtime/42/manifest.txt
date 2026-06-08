@@ -1,8 +1,6 @@
 schema_version=1
 name=worker-runtime
 target=42
-electronized_chromium_patches=true
-depends_on=preload
-electron_patch_stack_source=chromium-direct
+electronized_chromium_patches=false
+depends_on=preload,picture-in-picture-handle-api
 electron_patch_files=electron/*.patch
-chromium_direct_archive=chromium-direct

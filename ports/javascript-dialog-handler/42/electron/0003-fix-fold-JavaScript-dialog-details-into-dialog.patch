@@ -1,7 +1,7 @@
-From 1e9e361af7b4ee2fd97ce16965ccbd8e31dfab69 Mon Sep 17 00:00:00 2001
+From f1078bcca1a8e69d335a27147b75ff06a1d44382 Mon Sep 17 00:00:00 2001
 From: Codex <codex@localhost>
 Date: Wed, 20 May 2026 15:07:05 +0900
-Subject: [PATCH] fix: fold JavaScript dialog details into dialog
+Subject: [PATCH 3/5] fix: fold JavaScript dialog details into dialog
 
 ---
  .../api/structures/alert-javascript-dialog.md |  6 +++
@@ -108,10 +108,10 @@ index cde07e133e..d4945143b8 100644
    the renderer. Returns `true` if the dialog was handled by this call, otherwise
    `false`.
 diff --git a/docs/api/web-contents.md b/docs/api/web-contents.md
-index fa365741cd..c3c790a8d2 100644
+index ecc495757b..b85050126b 100644
 --- a/docs/api/web-contents.md
 +++ b/docs/api/web-contents.md
-@@ -1595,7 +1595,6 @@ mainWindow.webContents.setWindowOpenHandler((details) => {
+@@ -1637,7 +1637,6 @@ mainWindow.webContents.setWindowOpenHandler((details) => {
  
  * `handler` Function | null
    * `dialog` [AlertJavaScriptDialog](structures/alert-javascript-dialog.md) | [ConfirmJavaScriptDialog](structures/confirm-javascript-dialog.md) | [PromptJavaScriptDialog](structures/prompt-javascript-dialog.md) | [BeforeUnloadJavaScriptDialog](structures/before-unload-javascript-dialog.md)
@@ -119,7 +119,7 @@ index fa365741cd..c3c790a8d2 100644
  
  Sets a handler for renderer-initiated JavaScript dialogs. Passing `null` clears
  the handler and restores Electron's default handling.
-@@ -1615,7 +1614,7 @@ const { BrowserWindow } = require('electron')
+@@ -1657,7 +1656,7 @@ const { BrowserWindow } = require('electron')
  
  const win = new BrowserWindow()
  
@@ -128,7 +128,7 @@ index fa365741cd..c3c790a8d2 100644
    switch (dialog.type) {
      case 'alert':
        dialog.ok()
-@@ -1624,7 +1623,7 @@ win.webContents.setJavaScriptDialogHandler(async (dialog, details) => {
+@@ -1666,7 +1665,7 @@ win.webContents.setJavaScriptDialogHandler(async (dialog, details) => {
        dialog.confirm()
        break
      case 'prompt':
@@ -138,10 +138,10 @@ index fa365741cd..c3c790a8d2 100644
      case 'beforeunload':
        dialog.leave()
 diff --git a/lib/browser/api/web-contents.ts b/lib/browser/api/web-contents.ts
-index 0989b77bf9..a3aeefc262 100644
+index e390d27a0c..8ec1f09f45 100644
 --- a/lib/browser/api/web-contents.ts
 +++ b/lib/browser/api/web-contents.ts
-@@ -445,7 +445,7 @@ type JavaScriptDialog =
+@@ -372,7 +372,7 @@ type JavaScriptDialog =
    Electron.ConfirmJavaScriptDialog |
    Electron.PromptJavaScriptDialog |
    Electron.BeforeUnloadJavaScriptDialog;
@@ -150,7 +150,7 @@ index 0989b77bf9..a3aeefc262 100644
  type PendingJavaScriptDialog = { cancel: () => void };
  type JavaScriptDialogController = PendingJavaScriptDialog & { response: JavaScriptDialog };
  
-@@ -457,24 +457,18 @@ const getJavaScriptDialogOrigin = (info: JavaScriptDialogInfo) => {
+@@ -384,24 +384,18 @@ const getJavaScriptDialogOrigin = (info: JavaScriptDialogInfo) => {
    return info.frame.origin === 'file://' ? info.frame.url : info.frame.origin;
  };
  
@@ -182,7 +182,7 @@ index 0989b77bf9..a3aeefc262 100644
  
    const respond = (success: boolean, userInput = '') => {
      if (handled) return false;
-@@ -490,11 +484,12 @@ const createJavaScriptDialog = (
+@@ -417,11 +411,12 @@ const createJavaScriptDialog = (
      onDone();
    };
  
@@ -197,7 +197,7 @@ index 0989b77bf9..a3aeefc262 100644
            ok: () => respond(true)
          },
          cancel
-@@ -502,7 +497,8 @@ const createJavaScriptDialog = (
+@@ -429,7 +424,8 @@ const createJavaScriptDialog = (
      case 'confirm':
        return {
          response: {
@@ -207,7 +207,7 @@ index 0989b77bf9..a3aeefc262 100644
            confirm: () => respond(true),
            cancel: () => respond(false)
          },
-@@ -511,7 +507,9 @@ const createJavaScriptDialog = (
+@@ -438,7 +434,9 @@ const createJavaScriptDialog = (
      case 'prompt':
        return {
          response: {
@@ -218,7 +218,7 @@ index 0989b77bf9..a3aeefc262 100644
            submit: (value: string) => respond(true, `${value}`),
            cancel: () => respond(false)
          },
-@@ -520,7 +518,9 @@ const createJavaScriptDialog = (
+@@ -447,7 +445,9 @@ const createJavaScriptDialog = (
      case 'beforeunload':
        return {
          response: {
@@ -229,7 +229,7 @@ index 0989b77bf9..a3aeefc262 100644
            leave: () => respond(true),
            stay: () => respond(false)
          },
-@@ -565,11 +565,11 @@ const runJavaScriptDialogHandler = (
+@@ -492,11 +492,11 @@ const runJavaScriptDialogHandler = (
    const onDone = () => {
      if (dialog) pending.delete(dialog);
    };
@@ -244,7 +244,7 @@ index 0989b77bf9..a3aeefc262 100644
        process.nextTick(() => {
          throw error;
 diff --git a/spec/api-web-contents-spec.ts b/spec/api-web-contents-spec.ts
-index 5c66f37af0..209a8c8672 100644
+index ee679e5c72..b4f2626342 100644
 --- a/spec/api-web-contents-spec.ts
 +++ b/spec/api-web-contents-spec.ts
 @@ -210,11 +210,11 @@ describe('webContents module', () => {
@@ -276,10 +276,10 @@ index 5c66f37af0..209a8c8672 100644
              expect(dialog.leave()).to.equal(true);
              expect(dialog.stay()).to.equal(false);
 diff --git a/spec/chromium-spec.ts b/spec/chromium-spec.ts
-index cda491521e..9a62b0f619 100644
+index 39abdd3624..bf9851d0b2 100644
 --- a/spec/chromium-spec.ts
 +++ b/spec/chromium-spec.ts
-@@ -3642,11 +3642,11 @@ describe('chromium features', () => {
+@@ -3561,11 +3561,11 @@ describe('chromium features', () => {
          w.loadURL('about:blank');
  
          const seen: string[] = [];
@@ -296,7 +296,7 @@ index cda491521e..9a62b0f619 100644
  
            switch (dialog.type) {
              case 'alert':
-@@ -3658,7 +3658,7 @@ describe('chromium features', () => {
+@@ -3577,7 +3577,7 @@ describe('chromium features', () => {
                expect(dialog.cancel()).to.equal(false);
                break;
              case 'prompt':
@@ -305,7 +305,7 @@ index cda491521e..9a62b0f619 100644
                setImmediate(() => {
                  expect(dialog.submit('typed text')).to.equal(true);
                  expect(dialog.cancel()).to.equal(false);
-@@ -3684,7 +3684,7 @@ describe('chromium features', () => {
+@@ -3603,7 +3603,7 @@ describe('chromium features', () => {
          w.loadURL('about:blank');
  
          let called = false;
@@ -315,7 +315,7 @@ index cda491521e..9a62b0f619 100644
            if (dialog.type === 'alert') dialog.ok();
          });
 diff --git a/spec/ts-smoke/electron/main.ts b/spec/ts-smoke/electron/main.ts
-index d7d0087e12..169e8af282 100644
+index 862a77a69d..34b84a7bc8 100644
 --- a/spec/ts-smoke/electron/main.ts
 +++ b/spec/ts-smoke/electron/main.ts
 @@ -131,19 +131,25 @@ app.whenReady().then(() => {

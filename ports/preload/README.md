@@ -22,6 +22,10 @@ Frame preload scripts can opt into those initial empty iframe contexts with
 `Page.addScriptToEvaluateOnNewDocument` scripts in early same-origin subframe
 contexts and isolated/cross-origin subframe targets.
 
+For Electron 42, the bundle is rebased against `v42.3.3` and includes the
+startup-data typing alignment needed by Electron 42.3.x's renderer startup data
+shape.
+
 Target bundles live under:
 
 ```text

@@ -1,23 +1,23 @@
-From 2996b6bc0050b62cc054f6e9f29284c590037d5d Mon Sep 17 00:00:00 2001
+From 1f61718435612a69a7a7a0804ebb6c4872de17f9 Mon Sep 17 00:00:00 2001
 From: Codex <codex@localhost>
 Date: Wed, 20 May 2026 20:09:37 +0900
-Subject: [PATCH] fix: expose localized beforeunload dialog text
+Subject: [PATCH 4/5] fix: expose localized beforeunload dialog text
 
 ---
  BUILD.gn                                      |  1 +
  .../before-unload-javascript-dialog.md        |  3 +-
  lib/browser/api/web-contents.ts               |  2 ++
- .../browser/api/electron_api_web_contents.cc  | 12 +++++++-
+ .../browser/api/electron_api_web_contents.cc  | 10 ++++++-
  spec/api-web-contents-spec.ts                 | 28 +++++++++++++++++++
  spec/ts-smoke/electron/main.ts                |  2 +-
- typings/internal-electron.d.ts                |  2 +-
- 7 files changed, 46 insertions(+), 4 deletions(-)
+ typings/internal-electron.d.ts                |  1 +
+ 7 files changed, 44 insertions(+), 3 deletions(-)
 
 diff --git a/BUILD.gn b/BUILD.gn
-index 4dbc16cc7f..333d815456 100644
+index dcff0f453b..c50d1641ea 100644
 --- a/BUILD.gn
 +++ b/BUILD.gn
-@@ -497,6 +497,7 @@ source_set("electron_lib") {
+@@ -509,6 +509,7 @@ source_set("electron_lib") {
      "//components/pref_registry",
      "//components/prefs",
      "//components/security_state/content",
@@ -40,10 +40,10 @@ index 4bdb71d7e4..917b107807 100644
  * `isMainFrame` boolean - Whether the frame that requested the dialog is the
    main frame.
 diff --git a/lib/browser/api/web-contents.ts b/lib/browser/api/web-contents.ts
-index a3aeefc262..34dca2f1d4 100644
+index 8ec1f09f45..9affeac42f 100644
 --- a/lib/browser/api/web-contents.ts
 +++ b/lib/browser/api/web-contents.ts
-@@ -434,6 +434,7 @@ type JavaScriptDialogType = 'alert' | 'confirm' | 'prompt' | 'beforeunload';
+@@ -361,6 +361,7 @@ type JavaScriptDialogType = 'alert' | 'confirm' | 'prompt' | 'beforeunload';
  interface JavaScriptDialogInfo {
    frame: Electron.WebFrameMain;
    dialogType: JavaScriptDialogType;
@@ -51,7 +51,7 @@ index a3aeefc262..34dca2f1d4 100644
    messageText: string;
    defaultPromptText: string;
    isReload?: boolean;
-@@ -520,6 +521,7 @@ const createJavaScriptDialog = (
+@@ -447,6 +448,7 @@ const createJavaScriptDialog = (
          response: {
            ...details,
            type: 'beforeunload',
@@ -60,26 +60,10 @@ index a3aeefc262..34dca2f1d4 100644
            leave: () => respond(true),
            stay: () => respond(false)
 diff --git a/shell/browser/api/electron_api_web_contents.cc b/shell/browser/api/electron_api_web_contents.cc
-index f34ca4cdb1..b90607261c 100644
+index 02f2724889..781432f977 100644
 --- a/shell/browser/api/electron_api_web_contents.cc
 +++ b/shell/browser/api/electron_api_web_contents.cc
-@@ -50,6 +50,7 @@
- #include "components/prefs/scoped_user_pref_update.h"
- #include "components/security_state/content/content_utils.h"
- #include "components/security_state/core/security_state.h"
-+#include "components/strings/grit/components_strings.h"
- #include "content/browser/renderer_host/frame_tree_node.h"  // nogncheck
- #include "content/browser/renderer_host/input/touch_emulator_impl.h"  // nogncheck
- #include "content/browser/renderer_host/navigation_controller_impl.h"  // nogncheck
-@@ -179,6 +180,7 @@
- #include "ui/base/ime/text_input_action.h"
- #include "ui/base/ime/text_input_mode.h"
- #include "ui/base/ime/text_input_type.h"
-+#include "ui/base/l10n/l10n_util.h"
- #include "ui/display/screen.h"
- #include "ui/events/base_event_utils.h"
- #include "ui/events/blink/web_input_event_traits.h"
-@@ -6217,12 +6219,20 @@ void WebContents::RunBeforeUnloadDialog(content::WebContents* web_contents,
+@@ -7739,12 +7739,20 @@ void WebContents::RunBeforeUnloadDialog(content::WebContents* web_contents,
                                          bool is_reload,
                                          DialogClosedCallback callback) {
    if (has_javascript_dialog_handler_) {
@@ -102,7 +86,7 @@ index f34ca4cdb1..b90607261c 100644
                      .Set("isReload", is_reload)
                      .Build();
 diff --git a/spec/api-web-contents-spec.ts b/spec/api-web-contents-spec.ts
-index 209a8c8672..7d14440a31 100644
+index b4f2626342..9136f725b4 100644
 --- a/spec/api-web-contents-spec.ts
 +++ b/spec/api-web-contents-spec.ts
 @@ -214,6 +214,8 @@ describe('webContents module', () => {
@@ -155,7 +139,7 @@ index 209a8c8672..7d14440a31 100644
  
    describe('webContents.send(channel, args...)', () => {
 diff --git a/spec/ts-smoke/electron/main.ts b/spec/ts-smoke/electron/main.ts
-index 169e8af282..b27738de6a 100644
+index 34b84a7bc8..c4be4af3a2 100644
 --- a/spec/ts-smoke/electron/main.ts
 +++ b/spec/ts-smoke/electron/main.ts
 @@ -149,7 +149,7 @@ app.whenReady().then(() => {
@@ -168,18 +152,17 @@ index 169e8af282..b27738de6a 100644
          break;
      }
 diff --git a/typings/internal-electron.d.ts b/typings/internal-electron.d.ts
-index 1088fe1fbb..0032a8fee9 100644
+index 1729af29c8..73053591f6 100644
 --- a/typings/internal-electron.d.ts
 +++ b/typings/internal-electron.d.ts
-@@ -284,7 +284,7 @@ declare namespace Electron {
-     on(event: '-ipc-message-sync', listener: (event: Electron.IpcMainEvent, internal: boolean, channel: string, args: any[]) => void): this;
-     on(event: '-ipc-invoke', listener: (event: Electron.IpcMainInvokeEvent, internal: boolean, channel: string, args: any[]) => void): this;
-     on(event: '-ipc-ports', listener: (event: Electron.IpcMainEvent, internal: boolean, channel: string, message: any, ports: any[]) => void): this;
--    on(event: '-run-dialog', listener: (info: {frame: WebFrameMain, dialogType: 'prompt' | 'confirm' | 'alert' | 'beforeunload', messageText: string, defaultPromptText: string, isReload?: boolean}, callback: (success: boolean, user_input: string) => void) => void): this;
-+    on(event: '-run-dialog', listener: (info: {frame: WebFrameMain, dialogType: 'prompt' | 'confirm' | 'alert' | 'beforeunload', title?: string, messageText: string, defaultPromptText: string, isReload?: boolean}, callback: (success: boolean, user_input: string) => void) => void): this;
-     on(event: '-cancel-dialogs', listener: () => void): this;
-     on(event: 'ready-to-show', listener: () => void): this;
-     on(event: '-before-unload-fired', listener: (event: Electron.Event, proceed: boolean) => void): this;
+@@ -327,6 +327,7 @@ declare namespace Electron {
+         info: {
+           frame: WebFrameMain;
+           dialogType: 'prompt' | 'confirm' | 'alert' | 'beforeunload';
++          title?: string;
+           messageText: string;
+           defaultPromptText: string;
+           isReload?: boolean;
 -- 
 2.53.0
 

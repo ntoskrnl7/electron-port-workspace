@@ -2,6 +2,14 @@
 
 Electron 42 target bundle for the Picture-in-Picture handle API.
 
+Dependency:
+
+- `javascript-dialog-handler`
+
+The dependency is recorded in `manifest.txt` as
+`depends_on=javascript-dialog-handler`. Apply `javascript-dialog-handler/42`
+first. `port-bundle` validates this before applying the bundle.
+
 Patch directories:
 
 - `chromium-direct/*.patch`: native Chromium PiP window state support.

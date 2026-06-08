@@ -1,7 +1,7 @@
-From 27f453f8b4568452e7730e8b58e040e947539e3b Mon Sep 17 00:00:00 2001
+From 7661c0bfd58eabba9172547e3861a10b39efa095 Mon Sep 17 00:00:00 2001
 From: Codex <codex@localhost>
 Date: Wed, 20 May 2026 14:10:30 +0900
-Subject: [PATCH] fix: pass JavaScript dialog object first
+Subject: [PATCH 2/5] fix: pass JavaScript dialog object first
 
 ---
  docs/api/web-contents.md        | 4 ++--
@@ -12,10 +12,10 @@ Subject: [PATCH] fix: pass JavaScript dialog object first
  5 files changed, 9 insertions(+), 9 deletions(-)
 
 diff --git a/docs/api/web-contents.md b/docs/api/web-contents.md
-index a49406f9da..fa365741cd 100644
+index de9f455139..ecc495757b 100644
 --- a/docs/api/web-contents.md
 +++ b/docs/api/web-contents.md
-@@ -1594,8 +1594,8 @@ mainWindow.webContents.setWindowOpenHandler((details) => {
+@@ -1636,8 +1636,8 @@ mainWindow.webContents.setWindowOpenHandler((details) => {
  #### `contents.setJavaScriptDialogHandler(handler)`
  
  * `handler` Function | null
@@ -25,7 +25,7 @@ index a49406f9da..fa365741cd 100644
  
  Sets a handler for renderer-initiated JavaScript dialogs. Passing `null` clears
  the handler and restores Electron's default handling.
-@@ -1615,7 +1615,7 @@ const { BrowserWindow } = require('electron')
+@@ -1657,7 +1657,7 @@ const { BrowserWindow } = require('electron')
  
  const win = new BrowserWindow()
  
@@ -35,10 +35,10 @@ index a49406f9da..fa365741cd 100644
      case 'alert':
        dialog.ok()
 diff --git a/lib/browser/api/web-contents.ts b/lib/browser/api/web-contents.ts
-index d92004d8e6..0989b77bf9 100644
+index 7e20aa3e26..e390d27a0c 100644
 --- a/lib/browser/api/web-contents.ts
 +++ b/lib/browser/api/web-contents.ts
-@@ -445,7 +445,7 @@ type JavaScriptDialog =
+@@ -372,7 +372,7 @@ type JavaScriptDialog =
    Electron.ConfirmJavaScriptDialog |
    Electron.PromptJavaScriptDialog |
    Electron.BeforeUnloadJavaScriptDialog;
@@ -47,7 +47,7 @@ index d92004d8e6..0989b77bf9 100644
  type PendingJavaScriptDialog = { cancel: () => void };
  type JavaScriptDialogController = PendingJavaScriptDialog & { response: JavaScriptDialog };
  
-@@ -569,7 +569,7 @@ const runJavaScriptDialogHandler = (
+@@ -496,7 +496,7 @@ const runJavaScriptDialogHandler = (
    pending.add(dialog);
  
    try {
@@ -57,7 +57,7 @@ index d92004d8e6..0989b77bf9 100644
        process.nextTick(() => {
          throw error;
 diff --git a/spec/api-web-contents-spec.ts b/spec/api-web-contents-spec.ts
-index 8bc9066716..5c66f37af0 100644
+index 0dc16dfcd9..ee679e5c72 100644
 --- a/spec/api-web-contents-spec.ts
 +++ b/spec/api-web-contents-spec.ts
 @@ -210,7 +210,7 @@ describe('webContents module', () => {
@@ -79,10 +79,10 @@ index 8bc9066716..5c66f37af0 100644
          if (dialog.type === 'beforeunload') {
            setImmediate(() => {
 diff --git a/spec/chromium-spec.ts b/spec/chromium-spec.ts
-index 76190d30a6..cda491521e 100644
+index 2875bcd328..39abdd3624 100644
 --- a/spec/chromium-spec.ts
 +++ b/spec/chromium-spec.ts
-@@ -3642,7 +3642,7 @@ describe('chromium features', () => {
+@@ -3561,7 +3561,7 @@ describe('chromium features', () => {
          w.loadURL('about:blank');
  
          const seen: string[] = [];
@@ -91,7 +91,7 @@ index 76190d30a6..cda491521e 100644
            seen.push(`${details.type}:${details.messageText}`);
            expect(details.frame).to.equal(w.webContents.mainFrame);
            expect(details.url).to.equal('about:blank');
-@@ -3684,7 +3684,7 @@ describe('chromium features', () => {
+@@ -3603,7 +3603,7 @@ describe('chromium features', () => {
          w.loadURL('about:blank');
  
          let called = false;
@@ -101,7 +101,7 @@ index 76190d30a6..cda491521e 100644
            if (dialog.type === 'alert') dialog.ok();
          });
 diff --git a/spec/ts-smoke/electron/main.ts b/spec/ts-smoke/electron/main.ts
-index 63f8729e4e..d7d0087e12 100644
+index 2a92488cde..862a77a69d 100644
 --- a/spec/ts-smoke/electron/main.ts
 +++ b/spec/ts-smoke/electron/main.ts
 @@ -131,7 +131,7 @@ app.whenReady().then(() => {

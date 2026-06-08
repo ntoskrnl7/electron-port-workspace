@@ -1,7 +1,8 @@
-From 4cd9618096cdbe2dbedfe5d4fe09bab7e0debf75 Mon Sep 17 00:00:00 2001
+From 990f9fa027211a3064b43115c3396a3a5f300e5a Mon Sep 17 00:00:00 2001
 From: Jung-Kwang Lee <ntoskrnl7@gmail.com>
 Date: Wed, 6 May 2026 04:08:03 +0900
-Subject: fix: disable sandbox by default for subframe node integration
+Subject: [PATCH 4/9] fix: disable sandbox by default for subframe node
+ integration
 
 ---
  docs/api/structures/web-preferences.md    |   6 +-
@@ -42,7 +43,7 @@ index 28eb787aac..e0358292e4 100644
 +`nodeIntegrationInWorker: true`, `nodeIntegrationInSubFrames: true`, or
 +`sandbox: false` is specified. Explicitly setting `sandbox: true` keeps the
 +sandbox enabled.
-
+ 
  If your preload scripts do not depend on Node, no action is needed. If your
  preload scripts _do_ depend on Node, either refactor them to remove Node usage
 diff --git a/docs/tutorial/sandbox.md b/docs/tutorial/sandbox.md
@@ -51,7 +52,7 @@ index cbc0d13ae3..2d4aec5d30 100644
 +++ b/docs/tutorial/sandbox.md
 @@ -16,8 +16,10 @@ Starting from Electron 20, the sandbox is enabled for renderer processes without
  further configuration.
-
+ 
  Sandboxing is tied to Node.js integration. _Enabling Node.js integration_ for a
 -renderer process by setting `nodeIntegration: true` _disables the sandbox_ for the
 -process.
@@ -59,11 +60,11 @@ index cbc0d13ae3..2d4aec5d30 100644
 +`nodeIntegrationInWorker: true`, or `nodeIntegrationInSubFrames: true`
 +_disables the sandbox by default_ for the process. Explicitly setting
 +`sandbox: true` keeps the sandbox enabled.
-
+ 
  If you want to disable the sandbox for a process, see the
  [Disabling the sandbox for a single process](#disabling-the-sandbox-for-a-single-process)
 diff --git a/shell/browser/web_contents_preferences.cc b/shell/browser/web_contents_preferences.cc
-index bb0d4e76ac..c85890f30c 100644
+index 9b9bb7b69d..5e733d0a91 100644
 --- a/shell/browser/web_contents_preferences.cc
 +++ b/shell/browser/web_contents_preferences.cc
 @@ -281,7 +281,8 @@ bool WebContentsPreferences::IsSandboxed() const {
@@ -75,7 +76,7 @@ index bb0d4e76ac..c85890f30c 100644
 +      node_integration_in_sub_frames_;
    return !sandbox_disabled_by_default;
  }
-
+ 
 diff --git a/spec/api-subframe-spec.ts b/spec/api-subframe-spec.ts
 index 92dcfba98e..996ce64859 100644
 --- a/spec/api-subframe-spec.ts
@@ -83,7 +84,7 @@ index 92dcfba98e..996ce64859 100644
 @@ -233,6 +233,112 @@ describe('subframe Node.js global exposure policy', () => {
      return frame!;
    };
-
+ 
 +  const getNodeGlobals = async (target: Electron.WebFrameMain | Electron.WebContents) => {
 +    return target.executeJavaScript(`({
 +      process: typeof globalThis.process,
@@ -201,12 +202,12 @@ index 92dcfba98e..996ce64859 100644
 -      sandbox: false
 +      contextIsolation: false
      });
-
+ 
      const globals = await frame.executeJavaScript(`({
 @@ -270,6 +375,25 @@ describe('subframe Node.js global exposure policy', () => {
      });
    });
-
+ 
 +  it('does not expose Node.js globals in same-origin subframes when sandbox is explicitly enabled', async () => {
 +    const frame = await loadSameOriginFrame({
 +      nodeIntegration: false,
@@ -229,3 +230,6 @@ index 92dcfba98e..996ce64859 100644
    it('does not expose Node.js globals in initial empty same-origin subframes when only main frame nodeIntegration is enabled', async () => {
      w = new BrowserWindow({
        show: false,
+-- 
+2.53.0
+
