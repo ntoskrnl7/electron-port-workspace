@@ -1,0 +1,6 @@
+schema_version=1
+name=shared-memory
+target=42
+electronized_chromium_patches=false
+depends_on=websocket-main-bridge,worker-runtime,window-prompt-dialog,javascript-dialog-handler
+electron_patch_files=electron/*.patch

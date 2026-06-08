@@ -823,7 +823,7 @@ index 0000000000..229f11d99f
 --- /dev/null
 +++ b/shell/browser/user_agent_override.cc
 @@ -0,0 +1,236 @@
-+// Copyright (c) 2026 SoftCamp Co., Ltd.
++// Copyright (c) 2026 Electron Port Workspace contributors
 +// Use of this source code is governed by the MIT license that can be
 +// found in the LICENSE file.
 +
@@ -1065,7 +1065,7 @@ index 0000000000..01c6a10d8c
 --- /dev/null
 +++ b/shell/browser/user_agent_override.h
 @@ -0,0 +1,51 @@
-+// Copyright (c) 2026 SoftCamp Co., Ltd.
++// Copyright (c) 2026 Electron Port Workspace contributors
 +// Use of this source code is governed by the MIT license that can be
 +// found in the LICENSE file.
 +

@@ -1,0 +1,320 @@
+From 239ca09aee366429aefb002148e6a30ea7241b74 Mon Sep 17 00:00:00 2001
+From: Codex <codex@localhost>
+Date: Tue, 19 May 2026 19:12:09 +0900
+Subject: content: expose websocket interception metadata
+
+---
+ .../renderer_host/render_frame_host_impl.cc   |  9 ++++++-
+ .../service_worker/service_worker_host.cc     | 13 +++++++--
+ .../websockets/websocket_connector_impl.cc    | 27 ++++++++++++++-----
+ .../websockets/websocket_connector_impl.h     |  3 +++
+ .../worker_host/dedicated_worker_host.cc      | 14 +++++++---
+ .../browser/worker_host/shared_worker_host.cc | 11 ++++++--
+ .../public/browser/content_browser_client.cc  |  6 ++++-
+ .../public/browser/content_browser_client.h   | 25 ++++++++++++++++-
+ gin/public/wrappable_pointer_tags.h           |  3 ++-
+ 9 files changed, 94 insertions(+), 17 deletions(-)
+
+diff --git a/content/browser/renderer_host/render_frame_host_impl.cc b/content/browser/renderer_host/render_frame_host_impl.cc
+index a7f6f8b8cbd38..cff4fd4d14916 100644
+--- a/content/browser/renderer_host/render_frame_host_impl.cc
++++ b/content/browser/renderer_host/render_frame_host_impl.cc
+@@ -14876,9 +14876,16 @@ void RenderFrameHostImpl::BindMediaRemoterFactoryReceiver(
+
+ void RenderFrameHostImpl::CreateWebSocketConnector(
+     mojo::PendingReceiver<blink::mojom::WebSocketConnector> receiver) {
++  ContentBrowserClient::WebSocketCreatorInfo creator_info;
++  creator_info.type =
++      ContentBrowserClient::WebSocketCreatorInfo::Type::kFrame;
++  creator_info.browser_context = GetProcess()->GetBrowserContext();
++  creator_info.frame_id = GlobalRenderFrameHostId(GetProcess()->GetID(),
++                                                  routing_id_);
++
+   mojo::MakeSelfOwnedReceiver(
+       std::make_unique<WebSocketConnectorImpl>(
+-          GlobalRenderFrameHostId(GetProcess()->GetID(), routing_id_),
++          creator_info.frame_id, creator_info,
+           last_committed_origin_, isolation_info_, BuildClientSecurityState(),
+           GetNetworkRestrictionsID()),
+       std::move(receiver));
+diff --git a/content/browser/service_worker/service_worker_host.cc b/content/browser/service_worker/service_worker_host.cc
+index d80b34978d35c..b9363e64ac06a 100644
+--- a/content/browser/service_worker/service_worker_host.cc
++++ b/content/browser/service_worker/service_worker_host.cc
+@@ -24,6 +24,7 @@
+ #include "content/public/browser/browser_context.h"
+ #include "content/public/browser/browser_thread.h"
+ #include "content/public/browser/child_process_host.h"
++#include "content/public/browser/content_browser_client.h"
+ #include "content/public/browser/permission_controller.h"
+ #include "content/public/browser/permission_descriptor_util.h"
+ #include "content/public/browser/render_process_host.h"
+@@ -101,10 +102,18 @@ void ServiceWorkerHost::CreateWebSocketConnector(
+   DCHECK_CURRENTLY_ON(BrowserThread::UI);
+
+   const blink::StorageKey& storage_key = version_->key();
++  ContentBrowserClient::WebSocketCreatorInfo creator_info;
++  creator_info.type =
++      ContentBrowserClient::WebSocketCreatorInfo::Type::kServiceWorker;
++  creator_info.browser_context = GetProcessHost()->GetBrowserContext();
++  creator_info.frame_id =
++      content::GlobalRenderFrameHostId(worker_process_id_,
++                                       IPC::mojom::kRoutingIdNone);
++  creator_info.service_worker_version_id = version_->version_id();
++
+   mojo::MakeSelfOwnedReceiver(
+       std::make_unique<WebSocketConnectorImpl>(
+-          content::GlobalRenderFrameHostId(worker_process_id_,
+-                                           IPC::mojom::kRoutingIdNone),
++          creator_info.frame_id, creator_info,
+           storage_key.origin(), storage_key.ToPartialNetIsolationInfo(),
+           version_->BuildClientSecurityState()->Clone(),
+           // TODO(crbug.com/492462310): Pass network_restrictions_id so
+diff --git a/content/browser/websockets/websocket_connector_impl.cc b/content/browser/websockets/websocket_connector_impl.cc
+index 107cf4c00b25f..737a1f2b193a7 100644
+--- a/content/browser/websockets/websocket_connector_impl.cc
++++ b/content/browser/websockets/websocket_connector_impl.cc
+@@ -63,11 +63,13 @@ constexpr net::NetworkTrafficAnnotationTag kTrafficAnnotation =
+
+ WebSocketConnectorImpl::WebSocketConnectorImpl(
+     const content::GlobalRenderFrameHostId& frame_id,
++    WebSocketCreatorInfo creator_info,
+     const url::Origin& origin,
+     const net::IsolationInfo& isolation_info,
+     network::mojom::ClientSecurityStatePtr client_security_state,
+     std::optional<base::UnguessableToken> network_restrictions_id)
+     : frame_id_(frame_id),
++      creator_info_(std::move(creator_info)),
+       origin_(MaybeTreatLocalOriginAsOpaque(origin)),
+       isolation_info_(isolation_info),
+       client_security_state_(std::move(client_security_state)),
+@@ -90,12 +92,17 @@ void WebSocketConnectorImpl::Connect(
+   }
+
+   RenderFrameHost* frame = RenderFrameHost::FromID(frame_id_);
++  auto creator_info = creator_info_;
++  if (!creator_info.browser_context) {
++    creator_info.browser_context = process->GetBrowserContext();
++  }
+   const uint32_t options =
+       GetContentClient()->browser()->GetWebSocketOptions(frame);
+
+-  if (GetContentClient()->browser()->WillInterceptWebSocket(frame)) {
++  if (GetContentClient()->browser()->WillInterceptWebSocket(frame,
++                                                            creator_info)) {
+     GetContentClient()->browser()->CreateWebSocket(
+-        frame,
++        frame, creator_info, requested_protocols,
+         base::BindOnce(ConnectCalledByContentBrowserClient, requested_protocols,
+                        storage_access_api_status, isolation_info_, frame_id_,
+                        origin_, client_security_state_->Clone(), options,
+@@ -156,14 +163,22 @@ void WebSocketConnectorImpl::ConnectCalledByContentBrowserClient(
+   if (!process) {
+     return;
+   }
+-  process->GetStoragePartition()->GetNetworkContext()->CreateWebSocket(
++  content::StoragePartition* storage_partition = process->GetStoragePartition();
++  mojo::PendingRemote<network::mojom::URLLoaderNetworkServiceObserver>
++      url_loader_network_service_observer =
++          frame_id.frame_routing_id == IPC::mojom::kRoutingIdNone
++              ? static_cast<StoragePartitionImpl*>(storage_partition)
++                    ->CreateURLLoaderNetworkObserverForServiceOrSharedWorker(
++                        ToOriginatingProcessId(frame_id.child_id), origin)
++              : storage_partition->CreateURLLoaderNetworkObserverForFrame(
++                    frame_id);
++
++  storage_partition->GetNetworkContext()->CreateWebSocket(
+       url, requested_protocols, storage_access_api_status, isolation_info,
+       std::move(additional_headers), ToOriginatingProcessId(frame_id.child_id),
+       origin, std::move(client_security_state), options,
+       net::MutableNetworkTrafficAnnotationTag(kTrafficAnnotation),
+-      std::move(handshake_client),
+-      process->GetStoragePartition()->CreateURLLoaderNetworkObserverForFrame(
+-          frame_id),
++      std::move(handshake_client), std::move(url_loader_network_service_observer),
+       std::move(auth_handler), std::move(trusted_header_client),
+       std::move(throttling_profile_id), std::move(network_restrictions_id));
+ }
+diff --git a/content/browser/websockets/websocket_connector_impl.h b/content/browser/websockets/websocket_connector_impl.h
+index ca58234a0d267..248c1b1f6fee8 100644
+--- a/content/browser/websockets/websocket_connector_impl.h
++++ b/content/browser/websockets/websocket_connector_impl.h
+@@ -27,6 +27,7 @@ namespace content {
+ class WebSocketConnectorImpl final : public blink::mojom::WebSocketConnector {
+  public:
+   using WebSocketFactory = ContentBrowserClient::WebSocketFactory;
++  using WebSocketCreatorInfo = ContentBrowserClient::WebSocketCreatorInfo;
+
+   // Called on the UI thread.
+   // - For frames, |frame_id| should be their own id.
+@@ -36,6 +37,7 @@ class WebSocketConnectorImpl final : public blink::mojom::WebSocketConnector {
+   //   IPC::mojom::kRoutingIdNone because they do not have a frame.
+   WebSocketConnectorImpl(
+       const content::GlobalRenderFrameHostId& frame_id,
++      WebSocketCreatorInfo creator_info,
+       const url::Origin& origin,
+       const net::IsolationInfo& isolation_info,
+       network::mojom::ClientSecurityStatePtr client_security_state,
+@@ -73,6 +75,7 @@ class WebSocketConnectorImpl final : public blink::mojom::WebSocketConnector {
+           trusted_header_client);
+
+   const content::GlobalRenderFrameHostId frame_id_;
++  const WebSocketCreatorInfo creator_info_;
+   const url::Origin origin_;
+   const net::IsolationInfo isolation_info_;
+   const network::mojom::ClientSecurityStatePtr client_security_state_;
+diff --git a/content/browser/worker_host/dedicated_worker_host.cc b/content/browser/worker_host/dedicated_worker_host.cc
+index 1b3956138cd73..6938440917407 100644
+--- a/content/browser/worker_host/dedicated_worker_host.cc
++++ b/content/browser/worker_host/dedicated_worker_host.cc
+@@ -40,6 +40,7 @@
+ #include "content/browser/worker_host/worker_script_fetcher.h"
+ #include "content/public/browser/browser_context.h"
+ #include "content/public/browser/browser_thread.h"
++#include "content/public/browser/content_browser_client.h"
+ #include "content/public/browser/network_service_util.h"
+ #include "content/public/browser/permission_controller.h"
+ #include "content/public/browser/permission_descriptor_util.h"
+@@ -784,11 +785,18 @@ void DedicatedWorkerHost::CreateWebSocketConnector(
+     return;
+   }
+   // TODO(crbug.com/379869738) Remove GetUnsafeValue.
++  ContentBrowserClient::WebSocketCreatorInfo creator_info;
++  creator_info.type =
++      ContentBrowserClient::WebSocketCreatorInfo::Type::kDedicatedWorker;
++  creator_info.browser_context = GetProcessHost()->GetBrowserContext();
++  creator_info.frame_id =
++      GlobalRenderFrameHostId(ancestor_render_frame_host_id_.child_id,
++                              ancestor_render_frame_host_id_.frame_routing_id);
++  creator_info.dedicated_worker_token = GetToken();
++
+   mojo::MakeSelfOwnedReceiver(
+       std::make_unique<WebSocketConnectorImpl>(
+-          GlobalRenderFrameHostId(
+-              ancestor_render_frame_host_id_.child_id,
+-              ancestor_render_frame_host_id_.frame_routing_id),
++          creator_info.frame_id, creator_info,
+           GetWorkerStorageKey().origin(),
+           ancestor_render_frame_host->GetIsolationInfoForSubresources(),
+           worker_client_security_state_->Clone(),
+diff --git a/content/browser/worker_host/shared_worker_host.cc b/content/browser/worker_host/shared_worker_host.cc
+index 37bce787b0814..b777a3248da66 100644
+--- a/content/browser/worker_host/shared_worker_host.cc
++++ b/content/browser/worker_host/shared_worker_host.cc
+@@ -687,11 +687,18 @@ void SharedWorkerHost::CreateWebSocketConnector(
+     mojo::PendingReceiver<blink::mojom::WebSocketConnector> receiver) {
+   DCHECK_CURRENTLY_ON(BrowserThread::UI);
+   const blink::StorageKey& storage_key = GetWorkerStorageKey();
++  ContentBrowserClient::WebSocketCreatorInfo creator_info;
++  creator_info.type =
++      ContentBrowserClient::WebSocketCreatorInfo::Type::kSharedWorker;
++  creator_info.browser_context = GetProcessHost()->GetBrowserContext();
++  creator_info.frame_id =
++      GlobalRenderFrameHostId(GetProcessHost()->GetID(),
++                              IPC::mojom::kRoutingIdNone);
++  creator_info.shared_worker_token = token();
+
+   mojo::MakeSelfOwnedReceiver(
+       std::make_unique<WebSocketConnectorImpl>(
+-          GlobalRenderFrameHostId(GetProcessHost()->GetID(),
+-                                  IPC::mojom::kRoutingIdNone),
++          creator_info.frame_id, creator_info,
+           storage_key.origin(), storage_key.ToPartialNetIsolationInfo(),
+           worker_client_security_state_->Clone(),
+           // TODO(crbug.com/492462310): Pass network_restrictions_id so
+diff --git a/content/public/browser/content_browser_client.cc b/content/public/browser/content_browser_client.cc
+index bf59994f36d72..02f9c2c4c4e0a 100644
+--- a/content/public/browser/content_browser_client.cc
++++ b/content/public/browser/content_browser_client.cc
+@@ -1135,7 +1135,9 @@ void ContentBrowserClient::WillCreateURLLoaderFactory(
+   DCHECK(browser_context);
+ }
+
+-bool ContentBrowserClient::WillInterceptWebSocket(RenderFrameHost*) {
++bool ContentBrowserClient::WillInterceptWebSocket(
++    RenderFrameHost*,
++    const WebSocketCreatorInfo&) {
+   return false;
+ }
+
+@@ -1145,6 +1147,8 @@ uint32_t ContentBrowserClient::GetWebSocketOptions(RenderFrameHost* frame) {
+
+ void ContentBrowserClient::CreateWebSocket(
+     RenderFrameHost* frame,
++    const WebSocketCreatorInfo& creator_info,
++    const std::vector<std::string>& requested_protocols,
+     WebSocketFactory factory,
+     const GURL& url,
+     const net::SiteForCookies& site_for_cookies,
+diff --git a/content/public/browser/content_browser_client.h b/content/public/browser/content_browser_client.h
+index 7f43b7ac4be6e..210d41ccdbd61 100644
+--- a/content/public/browser/content_browser_client.h
++++ b/content/public/browser/content_browser_client.h
+@@ -44,6 +44,7 @@
+ #include "content/public/browser/file_system_access_permission_context.h"
+ #include "content/public/browser/frame_tree_node_id.h"
+ #include "content/public/browser/generated_code_cache_settings.h"
++#include "content/public/browser/global_routing_id.h"
+ #include "content/public/browser/interest_group_api_operation.h"
+ #include "content/public/browser/interest_group_manager.h"
+ #include "content/public/browser/keep_alive_request_tracker.h"
+@@ -84,6 +85,7 @@
+ #include "services/network/public/mojom/websocket.mojom-forward.h"
+ #include "storage/browser/file_system/file_system_context.h"
+ #include "third_party/blink/public/common/mediastream/media_devices.h"
++#include "third_party/blink/public/common/tokens/tokens.h"
+ #include "third_party/blink/public/common/user_agent/user_agent_metadata.h"
+ #include "third_party/blink/public/mojom/ai/ai_manager.mojom-forward.h"
+ #include "third_party/blink/public/mojom/browsing_topics/browsing_topics.mojom-forward.h"
+@@ -2108,8 +2110,27 @@ class CONTENT_EXPORT ContentBrowserClient {
+       network::mojom::URLLoaderFactoryOverridePtr* factory_override,
+       scoped_refptr<base::SequencedTaskRunner> navigation_response_task_runner);
+
++  struct WebSocketCreatorInfo {
++    enum class Type {
++      kFrame,
++      kDedicatedWorker,
++      kSharedWorker,
++      kServiceWorker,
++      kUnknown,
++    };
++
++    Type type = Type::kUnknown;
++    BrowserContext* browser_context = nullptr;
++    GlobalRenderFrameHostId frame_id;
++    std::optional<blink::DedicatedWorkerToken> dedicated_worker_token;
++    std::optional<blink::SharedWorkerToken> shared_worker_token;
++    int64_t service_worker_version_id = -1;
++  };
++
+   // Returns true when the embedder wants to intercept a websocket connection.
+-  virtual bool WillInterceptWebSocket(RenderFrameHost* frame);
++  virtual bool WillInterceptWebSocket(
++      RenderFrameHost* frame,
++      const WebSocketCreatorInfo& creator_info);
+
+   // Returns the WebSocket creation options.
+   virtual uint32_t GetWebSocketOptions(RenderFrameHost* frame);
+@@ -2132,6 +2153,8 @@ class CONTENT_EXPORT ContentBrowserClient {
+   // enabled.
+   virtual void CreateWebSocket(
+       RenderFrameHost* frame,
++      const WebSocketCreatorInfo& creator_info,
++      const std::vector<std::string>& requested_protocols,
+       WebSocketFactory factory,
+       const GURL& url,
+       const net::SiteForCookies& site_for_cookies,
+diff --git a/gin/public/wrappable_pointer_tags.h b/gin/public/wrappable_pointer_tags.h
+index 66875adf7afa9..ff255d9f33b23 100644
+--- a/gin/public/wrappable_pointer_tags.h
++++ b/gin/public/wrappable_pointer_tags.h
+@@ -95,7 +95,8 @@ enum WrappablePointerTag : uint16_t {
+   kElectronSession,                     // electron::api::Session
+   kElectronTray,                        // electron::api::Tray
+   kElectronWebRequest,                  // electron::api::WebRequest
+-  kLastPointerTag = kElectronWebRequest,
++  kElectronWebSocket,                   // electron::api::WebSocket
++  kLastPointerTag = kElectronWebSocket,
+ };
+
+ static_assert(kLastPointerTag <

@@ -1,0 +1,1885 @@
+From c95ae2a2c4e0cb186f74184cc691210b217f4103 Mon Sep 17 00:00:00 2001
+From: Codex <codex@localhost>
+Date: Tue, 19 May 2026 19:12:14 +0900
+Subject: feat: add session websocket handler
+
+---
+ docs/api/session.md                           |   4 +
+ .../structures/web-socket-accept-options.md   |   6 +
+ .../structures/web-socket-close-details.md    |   5 +
+ docs/api/structures/web-socket-filter.md      |   6 +
+ docs/api/structures/web-socket-message.md     |   4 +
+ docs/api/web-socket.md                        | 151 ++++
+ filenames.gni                                 |   4 +
+ shell/browser/api/electron_api_session.cc     |   9 +
+ shell/browser/api/electron_api_session.h      |   3 +
+ shell/browser/api/electron_api_web_socket.cc  | 199 +++++
+ shell/browser/api/electron_api_web_socket.h   | 118 +++
+ .../api/electron_api_web_socket_main.cc       | 759 ++++++++++++++++++
+ .../api/electron_api_web_socket_main.h        | 199 +++++
+ shell/browser/electron_browser_client.cc      |  71 +-
+ shell/browser/electron_browser_client.h       |  17 +-
+ spec/chromium-spec.ts                         |  81 ++
+ 16 files changed, 1628 insertions(+), 8 deletions(-)
+ create mode 100644 docs/api/structures/web-socket-accept-options.md
+ create mode 100644 docs/api/structures/web-socket-close-details.md
+ create mode 100644 docs/api/structures/web-socket-filter.md
+ create mode 100644 docs/api/structures/web-socket-message.md
+ create mode 100644 docs/api/web-socket.md
+ create mode 100644 shell/browser/api/electron_api_web_socket.cc
+ create mode 100644 shell/browser/api/electron_api_web_socket.h
+ create mode 100644 shell/browser/api/electron_api_web_socket_main.cc
+ create mode 100644 shell/browser/api/electron_api_web_socket_main.h
+
+diff --git a/docs/api/session.md b/docs/api/session.md
+index 7a9e868bea..79d99b0337 100644
+--- a/docs/api/session.md
++++ b/docs/api/session.md
+@@ -1761,6 +1761,10 @@ shared workers in this session.
+
+ A [`WebRequest`](web-request.md) object for this session.
+
++#### `ses.webSocket` _Readonly_
++
++A [`WebSocket`](web-socket.md) object for this session.
++
+ #### `ses.protocol` _Readonly_
+
+ A [`Protocol`](protocol.md) object for this session.
+diff --git a/docs/api/structures/web-socket-accept-options.md b/docs/api/structures/web-socket-accept-options.md
+new file mode 100644
+index 0000000000..32c76deb19
+--- /dev/null
++++ b/docs/api/structures/web-socket-accept-options.md
+@@ -0,0 +1,6 @@
++# WebSocketAcceptOptions Object
++
++* `protocol` string (optional) - The selected subprotocol. The value must be
++  one of `socket.protocols`.
++* `responseHeaders` Record\<string, string | string[]\> (optional) - Extra
++  response headers for the WebSocket handshake.
+diff --git a/docs/api/structures/web-socket-close-details.md b/docs/api/structures/web-socket-close-details.md
+new file mode 100644
+index 0000000000..62068031b2
+--- /dev/null
++++ b/docs/api/structures/web-socket-close-details.md
+@@ -0,0 +1,5 @@
++# WebSocketCloseDetails Object
++
++* `code` Integer
++* `reason` string
++* `wasClean` boolean
+diff --git a/docs/api/structures/web-socket-filter.md b/docs/api/structures/web-socket-filter.md
+new file mode 100644
+index 0000000000..1391a480c5
+--- /dev/null
++++ b/docs/api/structures/web-socket-filter.md
+@@ -0,0 +1,6 @@
++# WebSocketFilter Object
++
++* `urls` string[] (optional) - URL patterns used to match WebSocket URLs. If
++  omitted, all URLs are matched.
++* `excludeUrls` string[] (optional) - URL patterns used to exclude matching
++  WebSocket URLs.
+diff --git a/docs/api/structures/web-socket-message.md b/docs/api/structures/web-socket-message.md
+new file mode 100644
+index 0000000000..82a6eee11e
+--- /dev/null
++++ b/docs/api/structures/web-socket-message.md
+@@ -0,0 +1,4 @@
++# WebSocketMessage Object
++
++* `type` string - Can be `text` or `binary`.
++* `data` string | Buffer - The message payload.
+diff --git a/docs/api/web-socket.md b/docs/api/web-socket.md
+new file mode 100644
+index 0000000000..3725eb561d
+--- /dev/null
++++ b/docs/api/web-socket.md
+@@ -0,0 +1,151 @@
++## Class: WebSocket
++
++> Intercept and handle WebSocket connections created by pages and workers in a
++> session.
++
++Process: [Main](../glossary.md#main-process)<br />
++_This class is not exported from the `'electron'` module. It is only available
++as a property of a [`Session`](session.md) instance._
++
++Instances of the `WebSocket` class are accessed by using the `webSocket`
++property of a `Session`.
++
++### Instance Methods
++
++#### `webSocket.setHandler([filter, ]handler)`
++
++* `filter` [WebSocketFilter](structures/web-socket-filter.md) (optional)
++* `handler` Function | null
++  * `socket` [WebSocketMain](#class-websocketmain)
++
++Sets the handler used to intercept matching WebSocket connections. Passing
++`null` removes the handler.
++
++Only one handler can be active for a session. If no handler is set, or if the
++URL does not match the filter, Electron continues with its default WebSocket
++handling.
++
++The connection stays pending until the handler calls one of
++[`socket.continue()`](#socketcontinue),
++[`socket.accept([options])`](#socketacceptoptions), or
++[`socket.fail([reason])`](#socketfailreason). The decision can be made
++asynchronously after the handler returns.
++
++```js
++const { session } = require('electron')
++
++session.defaultSession.webSocket.setHandler(
++  { urls: ['ws://127.0.0.1:*/*'] },
++  async (socket) => {
++    socket.accept()
++    await socket.send('hello from main')
++  }
++)
++```
++
++## Class: WebSocketMain
++
++> Represents one intercepted WebSocket connection.
++
++Process: [Main](../glossary.md#main-process)<br />
++_This class is not exported from the `'electron'` module. It is only available
++as the argument passed to
++[`webSocket.setHandler([filter, ]handler)`](#websocketsethandlerfilter-handler)._
++
++### Instance Events
++
++#### Event: 'message'
++
++Returns:
++
++* `message` [WebSocketMessage](structures/web-socket-message.md)
++
++Emitted when the renderer sends a WebSocket message to the accepted connection.
++
++#### Event: 'close'
++
++Returns:
++
++* `details` [WebSocketCloseDetails](structures/web-socket-close-details.md)
++
++Emitted when the renderer starts closing the WebSocket or when the connection is
++destroyed.
++
++### Instance Methods
++
++#### `socket.continue()`
++
++Continues the connection through Electron's default WebSocket handling. This
++preserves the existing [`webRequest`](web-request.md), extension, and Chromium
++network behavior.
++
++#### `socket.accept([options])`
++
++* `options` [WebSocketAcceptOptions](structures/web-socket-accept-options.md) (optional)
++
++Accepts the connection in the main process.
++
++#### `socket.fail([reason])`
++
++* `reason` string (optional)
++
++Fails the connection. If the connection has already been accepted, the renderer
++observes an abnormal close.
++
++#### `socket.send(message)`
++
++* `message` string | Buffer | [WebSocketMessage](structures/web-socket-message.md)
++
++Returns `Promise<void>` - Resolves after the message has been queued to the
++renderer.
++
++Sends a message to the renderer side of the accepted WebSocket.
++
++#### `socket.close([code, reason])`
++
++* `code` Integer (optional) - Defaults to `1000`.
++* `reason` string (optional)
++
++Closes the accepted WebSocket.
++
++#### `socket.pause()`
++
++Pauses incoming renderer-to-main message delivery.
++
++#### `socket.resume()`
++
++Resumes incoming renderer-to-main message delivery.
++
++#### `socket.isDestroyed()`
++
++Returns `boolean` - Whether the WebSocket connection has been destroyed.
++
++### Instance Properties
++
++#### `socket.id` _Readonly_
++
++A `string` identifying this WebSocket connection.
++
++#### `socket.url` _Readonly_
++
++A `string` containing the WebSocket URL.
++
++#### `socket.protocols` _Readonly_
++
++A `string[]` containing the subprotocols requested by the renderer.
++
++#### `socket.creatorType` _Readonly_
++
++A `string` identifying the object that created the WebSocket. Can be `frame`,
++`dedicated-worker`, `shared-worker`, `service-worker` or `unknown`.
++
++#### `socket.creator` _Readonly_
++
++A `WebFrameMain | DedicatedWorkerMain | SharedWorkerMain | ServiceWorkerMain | null`
++identifying the object that created the WebSocket.
++
++#### `socket.bufferedAmount` _Readonly_
++
++An `Integer` indicating the number of bytes queued by
++[`socket.send(message)`](#socketsendmessage) and not yet written to the
++renderer.
+diff --git a/filenames.gni b/filenames.gni
+index af90176840..850978e755 100644
+--- a/filenames.gni
++++ b/filenames.gni
+@@ -337,6 +337,10 @@ filenames = {
+     "shell/browser/api/electron_api_web_frame_main.h",
+     "shell/browser/api/electron_api_web_request.cc",
+     "shell/browser/api/electron_api_web_request.h",
++    "shell/browser/api/electron_api_web_socket.cc",
++    "shell/browser/api/electron_api_web_socket.h",
++    "shell/browser/api/electron_api_web_socket_main.cc",
++    "shell/browser/api/electron_api_web_socket_main.h",
+     "shell/browser/api/electron_api_web_view_manager.cc",
+     "shell/browser/api/electron_api_worker_util.cc",
+     "shell/browser/api/electron_api_worker_util.h",
+diff --git a/shell/browser/api/electron_api_session.cc b/shell/browser/api/electron_api_session.cc
+index 2676bc162c..7b5c14cf76 100644
+--- a/shell/browser/api/electron_api_session.cc
++++ b/shell/browser/api/electron_api_session.cc
+@@ -70,6 +70,7 @@
+ #include "shell/browser/api/electron_api_shared_worker_context.h"
+ #include "shell/browser/api/electron_api_web_frame_main.h"
+ #include "shell/browser/api/electron_api_web_request.h"
++#include "shell/browser/api/electron_api_web_socket.h"
+ #include "shell/browser/browser.h"
+ #include "shell/browser/electron_browser_client.h"
+ #include "shell/browser/electron_browser_context.h"
+@@ -1444,6 +1445,12 @@ WebRequest* Session::WebRequest(v8::Isolate* isolate) {
+   return web_request_;
+ }
+
++WebSocket* Session::WebSocket(v8::Isolate* isolate) {
++  if (!web_socket_)
++    web_socket_ = WebSocket::Create(isolate, base::PassKey<Session>{});
++  return web_socket_;
++}
++
+ NetLog* Session::NetLog(v8::Isolate* isolate) {
+   if (!net_log_) {
+     net_log_ = NetLog::Create(isolate, browser_context());
+@@ -1924,6 +1931,7 @@ void Session::FillObjectTemplate(v8::Isolate* isolate,
+       .SetProperty("protocol", &Session::Protocol)
+       .SetProperty("serviceWorkers", &Session::ServiceWorkerContext)
+       .SetProperty("sharedWorkers", &Session::SharedWorkerContext)
++      .SetProperty("webSocket", &Session::WebSocket)
+       .SetProperty("webRequest", &Session::WebRequest)
+       .SetProperty("storagePath", &Session::GetPath)
+       .Build();
+@@ -1937,6 +1945,7 @@ void Session::Trace(cppgc::Visitor* visitor) const {
+   visitor->Trace(net_log_);
+   visitor->Trace(service_worker_context_);
+   visitor->Trace(shared_worker_context_);
++  visitor->Trace(web_socket_);
+   visitor->Trace(web_request_);
+   visitor->Trace(weak_factory_);
+ }
+diff --git a/shell/browser/api/electron_api_session.h b/shell/browser/api/electron_api_session.h
+index 022ccaa0c6..2b9d2f2003 100644
+--- a/shell/browser/api/electron_api_session.h
++++ b/shell/browser/api/electron_api_session.h
+@@ -62,6 +62,7 @@ class NetLog;
+ class Protocol;
+ class ServiceWorkerContext;
+ class SharedWorkerContext;
++class WebSocket;
+ class WebRequest;
+
+ class Session final : public gin::Wrappable<Session>,
+@@ -175,6 +176,7 @@ class Session final : public gin::Wrappable<Session>,
+   api::Protocol* Protocol();
+   api::ServiceWorkerContext* ServiceWorkerContext();
+   api::SharedWorkerContext* SharedWorkerContext();
++  api::WebSocket* WebSocket(v8::Isolate* isolate);
+   WebRequest* WebRequest(v8::Isolate* isolate);
+   api::NetLog* NetLog(v8::Isolate* isolate);
+   void Preconnect(const gin_helper::Dictionary& options, gin::Arguments* args);
+@@ -224,6 +226,7 @@ class Session final : public gin::Wrappable<Session>,
+   cppgc::Member<api::NetLog> net_log_;
+   cppgc::Member<api::ServiceWorkerContext> service_worker_context_;
+   cppgc::Member<api::SharedWorkerContext> shared_worker_context_;
++  cppgc::Member<api::WebSocket> web_socket_;
+   cppgc::Member<api::WebRequest> web_request_;
+
+   raw_ptr<v8::Isolate> isolate_;
+diff --git a/shell/browser/api/electron_api_web_socket.cc b/shell/browser/api/electron_api_web_socket.cc
+new file mode 100644
+index 0000000000..a4b6490e49
+--- /dev/null
++++ b/shell/browser/api/electron_api_web_socket.cc
+@@ -0,0 +1,199 @@
++// Copyright (c) 2026 Electron Port Workspace contributors
++// Use of this source code is governed by the MIT license that can be
++// found in the LICENSE file.
++
++#include "shell/browser/api/electron_api_web_socket.h"
++
++#include <utility>
++
++#include "base/strings/string_number_conversions.h"
++#include "extensions/common/url_pattern.h"
++#include "gin/converter.h"
++#include "gin/dictionary.h"
++#include "gin/object_template_builder.h"
++#include "shell/browser/api/electron_api_session.h"
++#include "shell/browser/api/electron_api_web_socket_main.h"
++#include "shell/browser/javascript_environment.h"
++#include "shell/common/gin_converters/callback_converter.h"
++#include "shell/common/gin_converters/gurl_converter.h"
++#include "shell/common/gin_converters/std_converter.h"
++#include "shell/common/gin_helper/handle.h"
++#include "shell/common/node_util.h"
++#include "url/gurl.h"
++
++namespace electron::api {
++
++const gin::WrapperInfo WebSocket::kWrapperInfo = {{gin::kEmbedderNativeGin},
++                                                  gin::kElectronWebSocket};
++
++WebSocket::RequestFilter::RequestFilter() = default;
++WebSocket::RequestFilter::RequestFilter(const RequestFilter&) = default;
++WebSocket::RequestFilter::~RequestFilter() = default;
++
++WebSocket::HandlerInfo::HandlerInfo(RequestFilter filter, Handler handler)
++    : filter(std::move(filter)), handler(std::move(handler)) {}
++WebSocket::HandlerInfo::HandlerInfo(HandlerInfo&&) = default;
++WebSocket::HandlerInfo& WebSocket::HandlerInfo::operator=(HandlerInfo&&) =
++    default;
++WebSocket::HandlerInfo::~HandlerInfo() = default;
++
++void WebSocket::RequestFilter::AddUrlPattern(URLPattern pattern,
++                                             bool is_match_pattern) {
++  if (is_match_pattern) {
++    include_url_patterns_.emplace(std::move(pattern));
++  } else {
++    exclude_url_patterns_.emplace(std::move(pattern));
++  }
++}
++
++void WebSocket::RequestFilter::AddUrlPatterns(
++    const std::set<std::string>& filter_patterns,
++    RequestFilter* filter,
++    gin::Arguments* args,
++    bool is_match_pattern) {
++  for (const std::string& filter_pattern : filter_patterns) {
++    URLPattern pattern(URLPattern::SCHEME_ALL);
++    const URLPattern::ParseResult result = pattern.Parse(filter_pattern);
++    if (result == URLPattern::ParseResult::kSuccess) {
++      filter->AddUrlPattern(std::move(pattern), is_match_pattern);
++    } else {
++      const char* error_type = URLPattern::GetParseResultString(result);
++      args->ThrowTypeError("Invalid url pattern " + filter_pattern + ": " +
++                           error_type);
++      return;
++    }
++  }
++}
++
++bool WebSocket::RequestFilter::MatchesURLSet(
++    const GURL& url,
++    const std::set<URLPattern>& patterns) const {
++  if (patterns.empty())
++    return false;
++
++  for (const auto& pattern : patterns) {
++    if (pattern.MatchesURL(url))
++      return true;
++  }
++  return false;
++}
++
++bool WebSocket::RequestFilter::MatchesURL(const GURL& url) const {
++  return MatchesURLSet(url, include_url_patterns_) &&
++         !MatchesURLSet(url, exclude_url_patterns_);
++}
++
++WebSocket::WebSocket(base::PassKey<Session>) {}
++
++WebSocket::~WebSocket() = default;
++
++gin::ObjectTemplateBuilder WebSocket::GetObjectTemplateBuilder(
++    v8::Isolate* isolate) {
++  return gin::ObjectTemplateBuilder(isolate, GetClassName())
++      .SetMethod("setHandler", &WebSocket::SetHandler);
++}
++
++void WebSocket::Trace(cppgc::Visitor* visitor) const {
++  gin::Wrappable<WebSocket>::Trace(visitor);
++  visitor->Trace(weak_factory_);
++}
++
++const gin::WrapperInfo* WebSocket::wrapper_info() const {
++  return &kWrapperInfo;
++}
++
++const char* WebSocket::GetHumanReadableName() const {
++  return "Electron / WebSocket";
++}
++
++void WebSocket::SetHandler(gin::Arguments* args) {
++  v8::Local<v8::Value> arg;
++  std::set<std::string> include_patterns;
++  std::set<std::string> exclude_patterns;
++  RequestFilter filter;
++
++  gin::Dictionary dict(args->isolate());
++  if (args->GetNext(&arg) && !arg->IsFunction() && !arg->IsNull()) {
++    if (!gin::ConvertFromV8(args->isolate(), arg, &dict)) {
++      args->ThrowTypeError("filter must be an object");
++      return;
++    }
++    if (!dict.Get("urls", &include_patterns)) {
++      args->ThrowTypeError("Parameter 'filter' must have property 'urls'.");
++      return;
++    }
++    if (include_patterns.empty())
++      include_patterns.insert("<all_urls>");
++    dict.Get("excludeUrls", &exclude_patterns);
++    args->GetNext(&arg);
++  } else {
++    include_patterns.insert("<all_urls>");
++  }
++
++  filter.AddUrlPatterns(include_patterns, &filter, args);
++  filter.AddUrlPatterns(exclude_patterns, &filter, args, false);
++  if (args->isolate()->IsExecutionTerminating())
++    return;
++
++  Handler handler;
++  if (arg.IsEmpty() ||
++      !(gin::ConvertFromV8(args->isolate(), arg, &handler) || arg->IsNull())) {
++    args->ThrowTypeError("Must pass null or a Function");
++    return;
++  }
++
++  if (handler.is_null()) {
++    handler_info_.reset();
++  } else {
++    handler_info_ = HandlerInfo{std::move(filter), std::move(handler)};
++  }
++}
++
++bool WebSocket::HasHandler() const {
++  return handler_info_.has_value() && !handler_info_->handler.is_null();
++}
++
++bool WebSocket::MatchesURL(const GURL& url) const {
++  return HasHandler() && handler_info_->filter.MatchesURL(url);
++}
++
++bool WebSocket::HandleConnection(
++    v8::Isolate* isolate,
++    content::BrowserContext* browser_context,
++    const WebSocketCreatorInfo& creator_info,
++    const std::vector<std::string>& requested_protocols,
++    ContinueCallback continue_callback,
++    const GURL& url,
++    const net::SiteForCookies& site_for_cookies,
++    const std::optional<std::string>& user_agent,
++    mojo::PendingRemote<network::mojom::WebSocketHandshakeClient>
++        handshake_client) {
++  if (!MatchesURL(url))
++    return false;
++
++  v8::HandleScope handle_scope(isolate);
++  auto web_socket = WebSocketMain::Create(
++      isolate, base::NumberToString(++next_connection_id_), browser_context,
++      creator_info, std::move(continue_callback), url, requested_protocols,
++      site_for_cookies, user_agent, std::move(handshake_client));
++  if (web_socket.IsEmpty())
++    return false;
++
++  handler_info_->handler.Run(web_socket.ToV8());
++  return true;
++}
++
++// static
++WebSocket* WebSocket::FromOrCreate(v8::Isolate* isolate,
++                                   content::BrowserContext* browser_context) {
++  return Session::FromOrCreate(isolate, browser_context)->WebSocket(isolate);
++}
++
++// static
++WebSocket* WebSocket::Create(v8::Isolate* isolate,
++                             base::PassKey<Session> passkey) {
++  return cppgc::MakeGarbageCollected<WebSocket>(
++      isolate->GetCppHeap()->GetAllocationHandle(), std::move(passkey));
++}
++
++}  // namespace electron::api
+diff --git a/shell/browser/api/electron_api_web_socket.h b/shell/browser/api/electron_api_web_socket.h
+new file mode 100644
+index 0000000000..9d2c21ea4a
+--- /dev/null
++++ b/shell/browser/api/electron_api_web_socket.h
+@@ -0,0 +1,118 @@
++// Copyright (c) 2026 Electron Port Workspace contributors
++// Use of this source code is governed by the MIT license that can be
++// found in the LICENSE file.
++
++#ifndef ELECTRON_SHELL_BROWSER_API_ELECTRON_API_WEB_SOCKET_H_
++#define ELECTRON_SHELL_BROWSER_API_ELECTRON_API_WEB_SOCKET_H_
++
++#include <cstdint>
++#include <optional>
++#include <set>
++#include <string>
++#include <vector>
++
++#include "base/functional/callback.h"
++#include "base/types/pass_key.h"
++#include "content/public/browser/content_browser_client.h"
++#include "gin/weak_cell.h"
++#include "gin/wrappable.h"
++#include "net/cookies/site_for_cookies.h"
++#include "services/network/public/mojom/websocket.mojom.h"
++
++class GURL;
++class URLPattern;
++
++namespace content {
++class BrowserContext;
++}  // namespace content
++
++namespace gin {
++class Arguments;
++}  // namespace gin
++
++namespace electron::api {
++
++class Session;
++
++class WebSocket final : public gin::Wrappable<WebSocket> {
++ public:
++  using WebSocketCreatorInfo =
++      content::ContentBrowserClient::WebSocketCreatorInfo;
++  using WebSocketFactory = content::ContentBrowserClient::WebSocketFactory;
++  using ContinueCallback = base::OnceCallback<void(
++      mojo::PendingRemote<network::mojom::WebSocketHandshakeClient>)>;
++
++  static WebSocket* FromOrCreate(v8::Isolate* isolate,
++                                 content::BrowserContext* browser_context);
++  static WebSocket* Create(v8::Isolate* isolate, base::PassKey<Session>);
++
++  explicit WebSocket(base::PassKey<Session>);
++  ~WebSocket() override;
++
++  static const char* GetClassName() { return "WebSocket"; }
++
++  static const gin::WrapperInfo kWrapperInfo;
++  void Trace(cppgc::Visitor*) const override;
++  const gin::WrapperInfo* wrapper_info() const override;
++  const char* GetHumanReadableName() const override;
++  gin::ObjectTemplateBuilder GetObjectTemplateBuilder(
++      v8::Isolate* isolate) override;
++
++  void SetHandler(gin::Arguments* args);
++  bool HasHandler() const;
++  bool MatchesURL(const GURL& url) const;
++  bool HandleConnection(
++      v8::Isolate* isolate,
++      content::BrowserContext* browser_context,
++      const WebSocketCreatorInfo& creator_info,
++      const std::vector<std::string>& requested_protocols,
++      ContinueCallback continue_callback,
++      const GURL& url,
++      const net::SiteForCookies& site_for_cookies,
++      const std::optional<std::string>& user_agent,
++      mojo::PendingRemote<network::mojom::WebSocketHandshakeClient>
++          handshake_client);
++
++ private:
++  using Handler = base::RepeatingCallback<void(v8::Local<v8::Value>)>;
++
++  class RequestFilter {
++   public:
++    RequestFilter();
++    RequestFilter(const RequestFilter&);
++    ~RequestFilter();
++
++    void AddUrlPattern(URLPattern pattern, bool is_match_pattern);
++    void AddUrlPatterns(const std::set<std::string>& filter_patterns,
++                        RequestFilter* filter,
++                        gin::Arguments* args,
++                        bool is_match_pattern = true);
++    bool MatchesURL(const GURL& url) const;
++
++   private:
++    bool MatchesURLSet(const GURL& url,
++                       const std::set<URLPattern>& patterns) const;
++
++    std::set<URLPattern> include_url_patterns_;
++    std::set<URLPattern> exclude_url_patterns_;
++  };
++
++  struct HandlerInfo {
++    HandlerInfo(RequestFilter filter, Handler handler);
++    HandlerInfo(HandlerInfo&&);
++    HandlerInfo& operator=(HandlerInfo&&);
++    ~HandlerInfo();
++
++    RequestFilter filter;
++    Handler handler;
++  };
++
++  std::optional<HandlerInfo> handler_info_;
++  uint64_t next_connection_id_ = 0;
++
++  gin::WeakCellFactory<WebSocket> weak_factory_{this};
++};
++
++}  // namespace electron::api
++
++#endif  // ELECTRON_SHELL_BROWSER_API_ELECTRON_API_WEB_SOCKET_H_
+diff --git a/shell/browser/api/electron_api_web_socket_main.cc b/shell/browser/api/electron_api_web_socket_main.cc
+new file mode 100644
+index 0000000000..2c5e6b4954
+--- /dev/null
++++ b/shell/browser/api/electron_api_web_socket_main.cc
+@@ -0,0 +1,759 @@
++// Copyright (c) 2026 Electron Port Workspace contributors
++// Use of this source code is governed by the MIT license that can be
++// found in the LICENSE file.
++
++#include "shell/browser/api/electron_api_web_socket_main.h"
++
++#include <algorithm>
++#include <limits>
++#include <string_view>
++#include <utility>
++
++#include "base/containers/span.h"
++#include "base/functional/bind.h"
++#include "base/strings/strcat.h"
++#include "content/public/browser/browser_context.h"
++#include "content/public/browser/render_frame_host.h"
++#include "gin/converter.h"
++#include "gin/object_template_builder.h"
++#include "net/base/net_errors.h"
++#include "net/http/http_request_headers.h"
++#include "net/http/http_version.h"
++#include "net/websockets/websocket_errors.h"
++#include "shell/browser/api/electron_api_dedicated_worker_main.h"
++#include "shell/browser/api/electron_api_service_worker_context.h"
++#include "shell/browser/api/electron_api_service_worker_main.h"
++#include "shell/browser/api/electron_api_session.h"
++#include "shell/browser/api/electron_api_shared_worker_main.h"
++#include "shell/browser/api/electron_api_web_frame_main.h"
++#include "shell/browser/javascript_environment.h"
++#include "shell/common/gin_converters/blink_converter.h"
++#include "shell/common/gin_converters/content_converter.h"
++#include "shell/common/gin_converters/gurl_converter.h"
++#include "shell/common/gin_converters/std_converter.h"
++#include "shell/common/gin_helper/dictionary.h"
++#include "shell/common/gin_helper/handle.h"
++#include "shell/common/gin_helper/object_template_builder.h"
++#include "shell/common/node_includes.h"
++#include "shell/common/node_util.h"
++#include "url/gurl.h"
++#include "v8/include/v8.h"
++
++namespace electron::api {
++
++namespace {
++
++constexpr uint32_t kWebSocketDataPipeCapacity = 131000;
++constexpr uint64_t kMaxBufferedAmount = 64 * 1024 * 1024;
++
++network::mojom::WebSocketMessageType MessageTypeFromString(
++    const std::string& type) {
++  return type == "binary" ? network::mojom::WebSocketMessageType::BINARY
++                           : network::mojom::WebSocketMessageType::TEXT;
++}
++
++std::string MessageTypeToString(network::mojom::WebSocketMessageType type) {
++  return type == network::mojom::WebSocketMessageType::BINARY ? "binary"
++                                                              : "text";
++}
++
++bool IsAcceptedStatusCode(uint16_t code) {
++  return code == net::kWebSocketErrorNoStatusReceived ||
++         (code >= 1000 && code <= 4999);
++}
++
++void AddHeader(network::mojom::WebSocketHandshakeResponsePtr& response,
++               std::string name,
++               std::string value) {
++  response->headers.push_back(network::mojom::HttpHeader::New(name, value));
++  base::StrAppend(&response->headers_text, {name, ": ", value, "\r\n"});
++}
++
++void SetConstructorPrototype(
++    v8::Isolate* isolate,
++    v8::Local<v8::Function> constructor,
++    const gin_helper::Handle<WebSocketMain>& handle) {
++  if (handle.IsEmpty() || !handle.ToV8()->IsObject())
++    return;
++
++  v8::Local<v8::Context> context = isolate->GetCurrentContext();
++  v8::Local<v8::Value> prototype;
++  if (!constructor->Get(context, gin::StringToV8(isolate, "prototype"))
++           .ToLocal(&prototype) ||
++      !prototype->IsObject()) {
++    return;
++  }
++
++  [[maybe_unused]] bool ok = handle.ToV8()
++                                 .As<v8::Object>()
++                                 ->SetPrototype(context,
++                                                prototype.As<v8::Object>())
++                                 .FromMaybe(false);
++}
++
++}  // namespace
++
++gin::DeprecatedWrapperInfo WebSocketMain::kWrapperInfo = {
++    gin::kEmbedderNativeGin};
++
++WebSocketMain::PendingOutgoingMessage::PendingOutgoingMessage(
++    network::mojom::WebSocketMessageType type,
++    std::string data,
++    gin_helper::Promise<void> promise)
++    : type(type), data(std::move(data)), promise(std::move(promise)) {}
++WebSocketMain::PendingOutgoingMessage::PendingOutgoingMessage(
++    PendingOutgoingMessage&&) = default;
++WebSocketMain::PendingOutgoingMessage&
++WebSocketMain::PendingOutgoingMessage::operator=(PendingOutgoingMessage&&) =
++    default;
++WebSocketMain::PendingOutgoingMessage::~PendingOutgoingMessage() = default;
++
++WebSocketMain::WebSocketMain(
++    std::string connection_id,
++    content::BrowserContext* browser_context,
++    WebSocketCreatorInfo creator_info,
++    ContinueCallback continue_callback,
++    GURL url,
++    std::vector<std::string> requested_protocols,
++    net::SiteForCookies site_for_cookies,
++    std::optional<std::string> user_agent,
++    mojo::PendingRemote<network::mojom::WebSocketHandshakeClient>
++        handshake_client)
++    : connection_id_(std::move(connection_id)),
++      browser_context_(browser_context),
++      creator_info_(std::move(creator_info)),
++      continue_callback_(std::move(continue_callback)),
++      url_(std::move(url)),
++      requested_protocols_(std::move(requested_protocols)),
++      site_for_cookies_(std::move(site_for_cookies)),
++      user_agent_(std::move(user_agent)),
++      handshake_client_(std::move(handshake_client)),
++      writable_watcher_(FROM_HERE,
++                        mojo::SimpleWatcher::ArmingPolicy::MANUAL),
++      readable_watcher_(FROM_HERE, mojo::SimpleWatcher::ArmingPolicy::MANUAL) {
++  handshake_client_.set_disconnect_handler(base::BindOnce(
++      &WebSocketMain::Destroy, base::Unretained(this), false));
++}
++
++WebSocketMain::~WebSocketMain() {
++  Destroy(false);
++}
++
++// static
++gin_helper::Handle<WebSocketMain> WebSocketMain::New(v8::Isolate* isolate) {
++  return {};
++}
++
++// static
++gin_helper::Handle<WebSocketMain> WebSocketMain::Create(
++    v8::Isolate* isolate,
++    std::string connection_id,
++    content::BrowserContext* browser_context,
++    WebSocketCreatorInfo creator_info,
++    ContinueCallback continue_callback,
++    GURL url,
++    std::vector<std::string> requested_protocols,
++    net::SiteForCookies site_for_cookies,
++    std::optional<std::string> user_agent,
++    mojo::PendingRemote<network::mojom::WebSocketHandshakeClient>
++        handshake_client) {
++  auto handle = gin_helper::CreateHandle(
++      isolate, new WebSocketMain(std::move(connection_id), browser_context,
++                                 std::move(creator_info),
++                                 std::move(continue_callback), std::move(url),
++                                 std::move(requested_protocols),
++                                 std::move(site_for_cookies),
++                                 std::move(user_agent),
++                                 std::move(handshake_client)));
++  if (!handle.IsEmpty()) {
++    v8::Local<v8::Function> constructor =
++        GetConstructor(isolate, isolate->GetCurrentContext());
++    SetConstructorPrototype(isolate, constructor, handle);
++    handle->Pin(isolate);
++  }
++  return handle;
++}
++
++void WebSocketMain::FillObjectTemplate(v8::Isolate* isolate,
++                                       v8::Local<v8::ObjectTemplate> templ) {
++  gin_helper::ObjectTemplateBuilder(isolate, templ)
++      .SetMethod("continue", &WebSocketMain::Continue)
++      .SetMethod("accept", &WebSocketMain::Accept)
++      .SetMethod("fail", &WebSocketMain::Fail)
++      .SetMethod("send", &WebSocketMain::Send)
++      .SetMethod("close", &WebSocketMain::Close)
++      .SetMethod("pause", &WebSocketMain::Pause)
++      .SetMethod("resume", &WebSocketMain::Resume)
++      .SetMethod("isDestroyed", &WebSocketMain::IsDestroyed)
++      .SetProperty("id", &WebSocketMain::ID)
++      .SetProperty("url", &WebSocketMain::URL)
++      .SetProperty("protocols", &WebSocketMain::Protocols)
++      .SetProperty("creatorType", &WebSocketMain::CreatorType)
++      .SetProperty("creator", &WebSocketMain::Creator)
++      .SetProperty("bufferedAmount", &WebSocketMain::BufferedAmount)
++      .Build();
++}
++
++const char* WebSocketMain::GetTypeName() {
++  return GetClassName();
++}
++
++void WebSocketMain::Continue(gin::Arguments* args) {
++  if (!EnsurePendingDecision(args))
++    return;
++  StartRawNetworkConnection();
++}
++
++void WebSocketMain::Accept(gin::Arguments* args) {
++  if (!EnsurePendingDecision(args))
++    return;
++
++  v8::Local<v8::Value> value;
++  std::optional<std::string> protocol;
++  gin_helper::Dictionary response_headers =
++      gin_helper::Dictionary::CreateEmpty(args->isolate());
++  if (args->GetNext(&value) && !value->IsNullOrUndefined()) {
++    gin_helper::Dictionary options;
++    if (!gin::ConvertFromV8(args->isolate(), value, &options)) {
++      args->ThrowTypeError("accept options must be an object");
++      return;
++    }
++    options.GetOptional("protocol", &protocol);
++    v8::Local<v8::Value> headers_value;
++    if (options.Get("responseHeaders", &headers_value) &&
++        !headers_value->IsNullOrUndefined() &&
++        !gin::ConvertFromV8(args->isolate(), headers_value,
++                            &response_headers)) {
++      args->ThrowTypeError("responseHeaders must be an object");
++      return;
++    }
++  }
++
++  if (protocol && !protocol->empty() &&
++      !std::ranges::contains(requested_protocols_, *protocol)) {
++    args->ThrowTypeError("protocol was not requested by the renderer");
++    return;
++  }
++
++  BindAcceptedConnection(std::move(protocol), std::move(response_headers));
++}
++
++void WebSocketMain::Fail(gin::Arguments* args) {
++  if (destroyed_)
++    return;
++
++  std::string reason = "WebSocket connection was rejected";
++  args->GetNext(&reason);
++
++  FailConnection(reason);
++}
++
++void WebSocketMain::Close(gin::Arguments* args) {
++  if (!EnsureAccepted(args))
++    return;
++
++  int code = 1000;
++  std::string reason;
++  args->GetNext(&code);
++  args->GetNext(&reason);
++  if (code < 0 || code > std::numeric_limits<uint16_t>::max() ||
++      !IsAcceptedStatusCode(static_cast<uint16_t>(code))) {
++    args->ThrowTypeError("invalid WebSocket close code");
++    return;
++  }
++  client_->OnDropChannel(true, static_cast<uint16_t>(code), reason);
++  Destroy(true);
++}
++
++v8::Local<v8::Promise> WebSocketMain::Send(gin::Arguments* args) {
++  v8::Isolate* isolate = args->isolate();
++  gin_helper::Promise<void> promise(isolate);
++  v8::Local<v8::Promise> handle = promise.GetHandle();
++
++  if (destroyed_ || decision_ != Decision::kAccepted || !client_) {
++    promise.RejectWithErrorMessage("WebSocket is not open");
++    return handle;
++  }
++
++  v8::Local<v8::Value> value;
++  if (!args->GetNext(&value)) {
++    promise.RejectWithErrorMessage("message is required");
++    return handle;
++  }
++
++  network::mojom::WebSocketMessageType type;
++  std::string data;
++  if (!ParseOutgoingMessage(args, value, &type, &data)) {
++    promise.RejectWithErrorMessage("invalid WebSocket message");
++    return handle;
++  }
++
++  if (buffered_amount_ + data.size() > kMaxBufferedAmount) {
++    promise.RejectWithErrorMessage("WebSocket send queue limit exceeded");
++    return handle;
++  }
++
++  buffered_amount_ += data.size();
++  outgoing_messages_.emplace_back(type, std::move(data), std::move(promise));
++  ProcessOutgoingMessages();
++  return handle;
++}
++
++void WebSocketMain::Pause() {
++  paused_ = true;
++}
++
++void WebSocketMain::Resume() {
++  if (!paused_)
++    return;
++  paused_ = false;
++  ProcessIncomingFrames();
++}
++
++bool WebSocketMain::IsDestroyed() const {
++  return destroyed_;
++}
++
++std::string WebSocketMain::ID() const {
++  return connection_id_;
++}
++
++GURL WebSocketMain::URL() const {
++  return url_;
++}
++
++std::vector<std::string> WebSocketMain::Protocols() const {
++  return requested_protocols_;
++}
++
++std::string WebSocketMain::CreatorType() const {
++  switch (creator_info_.type) {
++    case WebSocketCreatorInfo::Type::kFrame:
++      return "frame";
++    case WebSocketCreatorInfo::Type::kDedicatedWorker:
++      return "dedicated-worker";
++    case WebSocketCreatorInfo::Type::kSharedWorker:
++      return "shared-worker";
++    case WebSocketCreatorInfo::Type::kServiceWorker:
++      return "service-worker";
++    case WebSocketCreatorInfo::Type::kUnknown:
++      return "unknown";
++  }
++}
++
++v8::Local<v8::Value> WebSocketMain::Creator(v8::Isolate* isolate) const {
++  if (destroyed_)
++    return v8::Null(isolate);
++
++  switch (creator_info_.type) {
++    case WebSocketCreatorInfo::Type::kFrame: {
++      auto* frame = content::RenderFrameHost::FromID(creator_info_.frame_id);
++      auto handle = WebFrameMain::From(isolate, frame);
++      return handle.IsEmpty() ? v8::Null(isolate) : handle.ToV8();
++    }
++    case WebSocketCreatorInfo::Type::kDedicatedWorker:
++      if (creator_info_.dedicated_worker_token) {
++        auto handle = DedicatedWorkerMain::FromToken(
++            isolate, *creator_info_.dedicated_worker_token);
++        return handle.IsEmpty() ? v8::Null(isolate) : handle.ToV8();
++      }
++      return v8::Null(isolate);
++    case WebSocketCreatorInfo::Type::kSharedWorker:
++      if (creator_info_.shared_worker_token) {
++        auto handle = SharedWorkerMain::FromToken(
++            isolate, *creator_info_.shared_worker_token);
++        return handle.IsEmpty() ? v8::Null(isolate) : handle.ToV8();
++      }
++      return v8::Null(isolate);
++    case WebSocketCreatorInfo::Type::kServiceWorker: {
++      if (!browser_context_ || creator_info_.service_worker_version_id < 0)
++        return v8::Null(isolate);
++      auto* session = Session::FromOrCreate(isolate, browser_context_);
++      if (!session)
++        return v8::Null(isolate);
++      auto handle = session->ServiceWorkerContext()
++                        ->GetWorkerFromVersionIDIfExists(
++                            isolate, creator_info_.service_worker_version_id);
++      return handle.IsEmpty() ? v8::Null(isolate) : handle.ToV8();
++    }
++    case WebSocketCreatorInfo::Type::kUnknown:
++      return v8::Null(isolate);
++  }
++}
++
++uint64_t WebSocketMain::BufferedAmount() const {
++  return buffered_amount_;
++}
++
++bool WebSocketMain::EnsurePendingDecision(gin::Arguments* args) const {
++  if (destroyed_) {
++    args->ThrowTypeError("WebSocket has been destroyed");
++    return false;
++  }
++  if (decision_ != Decision::kPending) {
++    args->ThrowTypeError("WebSocket decision has already been made");
++    return false;
++  }
++  return true;
++}
++
++bool WebSocketMain::EnsureAccepted(gin::Arguments* args) const {
++  if (destroyed_) {
++    args->ThrowTypeError("WebSocket has been destroyed");
++    return false;
++  }
++  if (decision_ != Decision::kAccepted || !client_) {
++    args->ThrowTypeError("WebSocket is not open");
++    return false;
++  }
++  return true;
++}
++
++bool WebSocketMain::ParseOutgoingMessage(
++    gin::Arguments* args,
++    v8::Local<v8::Value> value,
++    network::mojom::WebSocketMessageType* type,
++    std::string* data) {
++  v8::Isolate* isolate = args->isolate();
++  if (value->IsString()) {
++    *type = network::mojom::WebSocketMessageType::TEXT;
++    return gin::ConvertFromV8(isolate, value, data);
++  }
++
++  if (node::Buffer::HasInstance(value)) {
++    *type = network::mojom::WebSocketMessageType::BINARY;
++    auto span = electron::Buffer::as_byte_span(value);
++    data->assign(reinterpret_cast<const char*>(span.data()), span.size());
++    return true;
++  }
++
++  gin_helper::Dictionary message;
++  if (!gin::ConvertFromV8(isolate, value, &message))
++    return false;
++
++  std::string message_type;
++  v8::Local<v8::Value> message_data;
++  if (!message.Get("type", &message_type) ||
++      !message.Get("data", &message_data)) {
++    return false;
++  }
++
++  *type = MessageTypeFromString(message_type);
++  if (*type == network::mojom::WebSocketMessageType::TEXT) {
++    return gin::ConvertFromV8(isolate, message_data, data);
++  }
++
++  if (!node::Buffer::HasInstance(message_data))
++    return false;
++  auto span = electron::Buffer::as_byte_span(message_data);
++  data->assign(reinterpret_cast<const char*>(span.data()), span.size());
++  return true;
++}
++
++void WebSocketMain::BindAcceptedConnection(
++    std::optional<std::string> protocol,
++    gin_helper::Dictionary response_headers) {
++  const MojoCreateDataPipeOptions data_pipe_options{
++      sizeof(MojoCreateDataPipeOptions), MOJO_CREATE_DATA_PIPE_FLAG_NONE, 1,
++      kWebSocketDataPipeCapacity};
++
++  mojo::ScopedDataPipeConsumerHandle readable;
++  MojoResult result = mojo::CreateDataPipe(&data_pipe_options,
++                                           browser_to_renderer_writable_,
++                                           readable);
++  if (result != MOJO_RESULT_OK) {
++    FailConnection("failed to create WebSocket data pipe");
++    return;
++  }
++
++  mojo::ScopedDataPipeProducerHandle writable;
++  result = mojo::CreateDataPipe(&data_pipe_options, writable,
++                                renderer_to_browser_readable_);
++  if (result != MOJO_RESULT_OK) {
++    FailConnection("failed to create WebSocket data pipe");
++    return;
++  }
++
++  writable_watcher_.Watch(
++      browser_to_renderer_writable_.get(), MOJO_HANDLE_SIGNAL_WRITABLE,
++      MOJO_WATCH_CONDITION_SATISFIED,
++      base::BindRepeating(&WebSocketMain::OnWritable, base::Unretained(this)));
++  readable_watcher_.Watch(
++      renderer_to_browser_readable_.get(), MOJO_HANDLE_SIGNAL_READABLE,
++      MOJO_WATCH_CONDITION_SATISFIED,
++      base::BindRepeating(&WebSocketMain::OnReadable, base::Unretained(this)));
++
++  decision_ = Decision::kAccepted;
++  auto response =
++      CreateHandshakeResponse(std::move(protocol), std::move(response_headers));
++  handshake_client_->OnConnectionEstablished(
++      receiver_as_websocket_.BindNewPipeAndPassRemote(),
++      client_.BindNewPipeAndPassReceiver(), std::move(response),
++      std::move(readable), std::move(writable));
++  handshake_client_.reset();
++
++  receiver_as_websocket_.set_disconnect_handler(
++      base::BindOnce(&WebSocketMain::Destroy, base::Unretained(this), true));
++  client_.set_disconnect_handler(
++      base::BindOnce(&WebSocketMain::Destroy, base::Unretained(this), true));
++}
++
++network::mojom::WebSocketHandshakeResponsePtr
++WebSocketMain::CreateHandshakeResponse(std::optional<std::string> protocol,
++                                       gin_helper::Dictionary response_headers) {
++  auto response = network::mojom::WebSocketHandshakeResponse::New();
++  response->url = url_;
++  response->http_version = net::HttpVersion(1, 1);
++  response->status_code = 101;
++  response->status_text = "Switching Protocols";
++  response->headers_text = "HTTP/1.1 101 Switching Protocols\r\n";
++  response->selected_protocol = protocol.value_or("");
++
++  AddHeader(response, "Upgrade", "websocket");
++  AddHeader(response, "Connection", "Upgrade");
++  if (protocol && !protocol->empty())
++    AddHeader(response, "Sec-WebSocket-Protocol", *protocol);
++
++  v8::Isolate* isolate = response_headers.isolate();
++  v8::Local<v8::Context> context = isolate->GetCurrentContext();
++  v8::Local<v8::Array> names;
++  if (response_headers.GetHandle()
++          ->GetOwnPropertyNames(context)
++          .ToLocal(&names)) {
++    for (uint32_t i = 0; i < names->Length(); ++i) {
++      v8::Local<v8::Value> key;
++      if (!names->Get(context, i).ToLocal(&key))
++        continue;
++      std::string name;
++      if (!gin::ConvertFromV8(isolate, key, &name))
++        continue;
++      v8::Local<v8::Value> value;
++      if (!response_headers.GetHandle()->Get(context, key).ToLocal(&value))
++        continue;
++      std::vector<std::string> values;
++      if (gin::ConvertFromV8(isolate, value, &values)) {
++        for (auto& header_value : values)
++          AddHeader(response, name, std::move(header_value));
++        continue;
++      }
++      std::string header_value;
++      if (gin::ConvertFromV8(isolate, value, &header_value))
++        AddHeader(response, name, std::move(header_value));
++    }
++  }
++
++  response->headers_text.append("\r\n");
++  return response;
++}
++
++void WebSocketMain::StartRawNetworkConnection() {
++  decision_ = Decision::kContinued;
++
++  std::move(continue_callback_).Run(handshake_client_.Unbind());
++  Destroy(false);
++}
++
++void WebSocketMain::FailConnection(const std::string& reason) {
++  if (destroyed_)
++    return;
++  if (decision_ == Decision::kPending && handshake_client_) {
++    decision_ = Decision::kFailed;
++    handshake_client_->OnFailure(reason, net::ERR_FAILED, -1);
++    Destroy(false);
++    return;
++  }
++  if (decision_ == Decision::kAccepted && client_) {
++    client_->OnDropChannel(false, net::kWebSocketErrorAbnormalClosure, reason);
++    Destroy(true);
++  }
++}
++
++void WebSocketMain::Destroy(bool emit_close) {
++  if (destroyed_)
++    return;
++
++  destroyed_ = true;
++  writable_watcher_.Cancel();
++  readable_watcher_.Cancel();
++  receiver_as_websocket_.reset();
++  client_.reset();
++  handshake_client_.reset();
++  browser_to_renderer_writable_.reset();
++  renderer_to_browser_readable_.reset();
++  RejectPendingSends("WebSocket has been destroyed");
++  if (emit_close) {
++    v8::Isolate* isolate = JavascriptEnvironment::GetIsolate();
++    v8::HandleScope handle_scope(isolate);
++    gin_helper::Dictionary details =
++        gin_helper::Dictionary::CreateEmpty(isolate);
++    details.Set("code", static_cast<int>(net::kWebSocketErrorGoingAway));
++    details.Set("reason", "");
++    details.Set("wasClean", false);
++    EmitWithoutEvent("close", details);
++  }
++  Unpin();
++}
++
++void WebSocketMain::RejectPendingSends(const std::string& message) {
++  while (!outgoing_messages_.empty()) {
++    auto outgoing = std::move(outgoing_messages_.front());
++    outgoing_messages_.pop_front();
++    outgoing.promise.RejectWithErrorMessage(message);
++  }
++  buffered_amount_ = 0;
++}
++
++void WebSocketMain::SendMessage(network::mojom::WebSocketMessageType type,
++                                uint64_t data_length) {
++  if (destroyed_ || decision_ != Decision::kAccepted)
++    return;
++  if (type == network::mojom::WebSocketMessageType::CONTINUATION) {
++    FailConnection("WebSocket continuation frames are not supported");
++    return;
++  }
++  incoming_frames_.push_back({type, data_length, std::string()});
++  ProcessIncomingFrames();
++}
++
++void WebSocketMain::StartReceiving() {
++  ProcessIncomingFrames();
++}
++
++void WebSocketMain::StartClosingHandshake(uint16_t code,
++                                          const std::string& reason) {
++  if (destroyed_)
++    return;
++
++  v8::Isolate* isolate = JavascriptEnvironment::GetIsolate();
++  v8::HandleScope handle_scope(isolate);
++  gin_helper::Dictionary details =
++      gin_helper::Dictionary::CreateEmpty(isolate);
++  details.Set("code", static_cast<int>(code));
++  details.Set("reason", reason);
++  details.Set("wasClean", true);
++  EmitWithoutEvent("close", details);
++
++  if (client_)
++    client_->OnDropChannel(true, code, reason);
++  Destroy(false);
++}
++
++void WebSocketMain::ProcessIncomingFrames() {
++  if (destroyed_ || paused_ || !renderer_to_browser_readable_.is_valid())
++    return;
++
++  while (true) {
++    if (!current_incoming_frame_) {
++      if (incoming_frames_.empty())
++        return;
++      current_incoming_frame_ = std::move(incoming_frames_.front());
++      incoming_frames_.pop_front();
++      if (current_incoming_frame_->data_length >
++          std::numeric_limits<uint32_t>::max()) {
++        FailConnection("WebSocket message is too large");
++        return;
++      }
++      current_incoming_frame_->data.reserve(
++          static_cast<size_t>(current_incoming_frame_->data_length));
++    }
++
++    auto& frame = *current_incoming_frame_;
++    if (frame.data.size() == frame.data_length) {
++      EmitIncomingMessage(frame);
++      current_incoming_frame_.reset();
++      continue;
++    }
++
++    base::span<const uint8_t> read_buffer;
++    MojoResult result = renderer_to_browser_readable_->BeginReadData(
++        MOJO_READ_DATA_FLAG_NONE, read_buffer);
++    if (result == MOJO_RESULT_SHOULD_WAIT) {
++      readable_watcher_.ArmOrNotify();
++      return;
++    }
++    if (result != MOJO_RESULT_OK) {
++      FailConnection("failed to read WebSocket message");
++      return;
++    }
++    size_t num_bytes = std::min<size_t>(
++        frame.data_length - frame.data.size(), read_buffer.size());
++    frame.data.append(reinterpret_cast<const char*>(read_buffer.data()),
++                      num_bytes);
++    renderer_to_browser_readable_->EndReadData(num_bytes);
++  }
++}
++
++void WebSocketMain::OnReadable(MojoResult result,
++                               const mojo::HandleSignalsState& state) {
++  if (result != MOJO_RESULT_OK) {
++    Destroy(true);
++    return;
++  }
++  ProcessIncomingFrames();
++}
++
++void WebSocketMain::EmitIncomingMessage(const PendingIncomingFrame& frame) {
++  v8::Isolate* isolate = JavascriptEnvironment::GetIsolate();
++  v8::HandleScope handle_scope(isolate);
++  gin_helper::Dictionary message = gin_helper::Dictionary::CreateEmpty(isolate);
++  message.Set("type", MessageTypeToString(frame.type));
++  if (frame.type == network::mojom::WebSocketMessageType::BINARY) {
++    auto buffer =
++        electron::Buffer::Copy(isolate, base::as_byte_span(frame.data))
++            .ToLocalChecked();
++    message.Set("data", buffer);
++  } else {
++    message.Set("data", frame.data);
++  }
++  EmitWithoutEvent("message", message);
++}
++
++void WebSocketMain::ProcessOutgoingMessages() {
++  if (destroyed_ || decision_ != Decision::kAccepted || !client_ ||
++      !browser_to_renderer_writable_.is_valid()) {
++    return;
++  }
++
++  while (!outgoing_messages_.empty()) {
++    auto& outgoing = outgoing_messages_.front();
++    while (outgoing.offset < outgoing.data.size()) {
++      base::span<uint8_t> write_buffer;
++      MojoResult result = browser_to_renderer_writable_->BeginWriteData(
++          outgoing.data.size() - outgoing.offset, MOJO_WRITE_DATA_FLAG_NONE,
++          write_buffer);
++      if (result == MOJO_RESULT_SHOULD_WAIT) {
++        writable_watcher_.ArmOrNotify();
++        return;
++      }
++      if (result != MOJO_RESULT_OK) {
++        Destroy(true);
++        return;
++      }
++      size_t num_bytes =
++          std::min(write_buffer.size(), outgoing.data.size() - outgoing.offset);
++      std::string_view remaining(outgoing.data);
++      remaining.remove_prefix(outgoing.offset);
++      write_buffer.first(num_bytes).copy_from(
++          base::as_byte_span(remaining.substr(0, num_bytes)));
++      browser_to_renderer_writable_->EndWriteData(num_bytes);
++      outgoing.offset += num_bytes;
++      buffered_amount_ -= num_bytes;
++    }
++
++    auto complete = std::move(outgoing_messages_.front());
++    outgoing_messages_.pop_front();
++    client_->OnDataFrame(true, complete.type, complete.data.size());
++    complete.promise.Resolve();
++  }
++}
++
++void WebSocketMain::OnWritable(MojoResult result,
++                               const mojo::HandleSignalsState& state) {
++  if (result != MOJO_RESULT_OK) {
++    Destroy(true);
++    return;
++  }
++  ProcessOutgoingMessages();
++}
++
++}  // namespace electron::api
+diff --git a/shell/browser/api/electron_api_web_socket_main.h b/shell/browser/api/electron_api_web_socket_main.h
+new file mode 100644
+index 0000000000..4466f3f47b
+--- /dev/null
++++ b/shell/browser/api/electron_api_web_socket_main.h
+@@ -0,0 +1,199 @@
++// Copyright (c) 2026 Electron Port Workspace contributors
++// Use of this source code is governed by the MIT license that can be
++// found in the LICENSE file.
++
++#ifndef ELECTRON_SHELL_BROWSER_API_ELECTRON_API_WEB_SOCKET_MAIN_H_
++#define ELECTRON_SHELL_BROWSER_API_ELECTRON_API_WEB_SOCKET_MAIN_H_
++
++#include <cstdint>
++#include <deque>
++#include <optional>
++#include <string>
++#include <vector>
++
++#include "base/functional/callback.h"
++#include "base/memory/raw_ptr.h"
++#include "content/public/browser/content_browser_client.h"
++#include "mojo/public/cpp/bindings/receiver.h"
++#include "mojo/public/cpp/bindings/remote.h"
++#include "mojo/public/cpp/system/data_pipe.h"
++#include "mojo/public/cpp/system/simple_watcher.h"
++#include "net/cookies/site_for_cookies.h"
++#include "services/network/public/mojom/websocket.mojom.h"
++#include "shell/browser/event_emitter_mixin.h"
++#include "shell/common/gin_helper/constructible.h"
++#include "shell/common/gin_helper/dictionary.h"
++#include "shell/common/gin_helper/pinnable.h"
++#include "shell/common/gin_helper/promise.h"
++#include "shell/common/gin_helper/wrappable.h"
++
++class GURL;
++
++namespace content {
++class BrowserContext;
++class RenderFrameHost;
++}  // namespace content
++
++namespace gin {
++class Arguments;
++}  // namespace gin
++
++namespace gin_helper {
++template <typename T>
++class Handle;
++}  // namespace gin_helper
++
++namespace electron::api {
++
++class WebSocketMain final
++    : public gin_helper::DeprecatedWrappable<WebSocketMain>,
++      public gin_helper::Pinnable<WebSocketMain>,
++      public gin_helper::Constructible<WebSocketMain>,
++      public gin_helper::EventEmitterMixin<WebSocketMain>,
++      public network::mojom::WebSocket {
++ public:
++  using WebSocketCreatorInfo =
++      content::ContentBrowserClient::WebSocketCreatorInfo;
++  using ContinueCallback = base::OnceCallback<void(
++      mojo::PendingRemote<network::mojom::WebSocketHandshakeClient>)>;
++
++  static gin_helper::Handle<WebSocketMain> New(v8::Isolate* isolate);
++  static gin_helper::Handle<WebSocketMain> Create(
++      v8::Isolate* isolate,
++      std::string connection_id,
++      content::BrowserContext* browser_context,
++      WebSocketCreatorInfo creator_info,
++      ContinueCallback continue_callback,
++      GURL url,
++      std::vector<std::string> requested_protocols,
++      net::SiteForCookies site_for_cookies,
++      std::optional<std::string> user_agent,
++      mojo::PendingRemote<network::mojom::WebSocketHandshakeClient>
++          handshake_client);
++
++  static void FillObjectTemplate(v8::Isolate*, v8::Local<v8::ObjectTemplate>);
++  static const char* GetClassName() { return "WebSocketMain"; }
++
++  static gin::DeprecatedWrapperInfo kWrapperInfo;
++  const char* GetTypeName() override;
++
++  WebSocketMain(const WebSocketMain&) = delete;
++  WebSocketMain& operator=(const WebSocketMain&) = delete;
++
++  // network::mojom::WebSocket:
++  void SendMessage(network::mojom::WebSocketMessageType type,
++                   uint64_t data_length) override;
++  void StartReceiving() override;
++  void StartClosingHandshake(uint16_t code, const std::string& reason) override;
++
++ protected:
++  WebSocketMain(std::string connection_id,
++                content::BrowserContext* browser_context,
++                WebSocketCreatorInfo creator_info,
++                ContinueCallback continue_callback,
++                GURL url,
++                std::vector<std::string> requested_protocols,
++                net::SiteForCookies site_for_cookies,
++                std::optional<std::string> user_agent,
++                mojo::PendingRemote<network::mojom::WebSocketHandshakeClient>
++                    handshake_client);
++  ~WebSocketMain() override;
++
++ private:
++  enum class Decision {
++    kPending,
++    kContinued,
++    kAccepted,
++    kFailed,
++  };
++
++  struct PendingIncomingFrame {
++    network::mojom::WebSocketMessageType type;
++    uint64_t data_length;
++    std::string data;
++  };
++
++  struct PendingOutgoingMessage {
++    PendingOutgoingMessage(network::mojom::WebSocketMessageType type,
++                           std::string data,
++                           gin_helper::Promise<void> promise);
++    PendingOutgoingMessage(PendingOutgoingMessage&&);
++    PendingOutgoingMessage& operator=(PendingOutgoingMessage&&);
++    ~PendingOutgoingMessage();
++
++    network::mojom::WebSocketMessageType type;
++    std::string data;
++    size_t offset = 0;
++    gin_helper::Promise<void> promise;
++  };
++
++  void Continue(gin::Arguments* args);
++  void Accept(gin::Arguments* args);
++  void Fail(gin::Arguments* args);
++  void Close(gin::Arguments* args);
++  v8::Local<v8::Promise> Send(gin::Arguments* args);
++  void Pause();
++  void Resume();
++
++  bool IsDestroyed() const;
++  std::string ID() const;
++  GURL URL() const;
++  std::vector<std::string> Protocols() const;
++  std::string CreatorType() const;
++  v8::Local<v8::Value> Creator(v8::Isolate* isolate) const;
++  uint64_t BufferedAmount() const;
++
++  bool EnsurePendingDecision(gin::Arguments* args) const;
++  bool EnsureAccepted(gin::Arguments* args) const;
++  bool ParseOutgoingMessage(gin::Arguments* args,
++                            v8::Local<v8::Value> value,
++                            network::mojom::WebSocketMessageType* type,
++                            std::string* data);
++  void BindAcceptedConnection(std::optional<std::string> protocol,
++                              gin_helper::Dictionary response_headers);
++  network::mojom::WebSocketHandshakeResponsePtr CreateHandshakeResponse(
++      std::optional<std::string> protocol,
++      gin_helper::Dictionary response_headers);
++  void StartRawNetworkConnection();
++  void FailConnection(const std::string& reason);
++  void Destroy(bool emit_close);
++  void RejectPendingSends(const std::string& message);
++
++  void ProcessIncomingFrames();
++  void OnReadable(MojoResult result, const mojo::HandleSignalsState& state);
++  void EmitIncomingMessage(const PendingIncomingFrame& frame);
++
++  void ProcessOutgoingMessages();
++  void OnWritable(MojoResult result, const mojo::HandleSignalsState& state);
++
++  const std::string connection_id_;
++  const raw_ptr<content::BrowserContext> browser_context_;
++  const WebSocketCreatorInfo creator_info_;
++  ContinueCallback continue_callback_;
++  const GURL url_;
++  const std::vector<std::string> requested_protocols_;
++  const net::SiteForCookies site_for_cookies_;
++  const std::optional<std::string> user_agent_;
++
++  mojo::Remote<network::mojom::WebSocketHandshakeClient> handshake_client_;
++  mojo::Receiver<network::mojom::WebSocket> receiver_as_websocket_{this};
++  mojo::Remote<network::mojom::WebSocketClient> client_;
++
++  mojo::ScopedDataPipeProducerHandle browser_to_renderer_writable_;
++  mojo::ScopedDataPipeConsumerHandle renderer_to_browser_readable_;
++  mojo::SimpleWatcher writable_watcher_;
++  mojo::SimpleWatcher readable_watcher_;
++
++  std::deque<PendingIncomingFrame> incoming_frames_;
++  std::optional<PendingIncomingFrame> current_incoming_frame_;
++  std::deque<PendingOutgoingMessage> outgoing_messages_;
++
++  Decision decision_ = Decision::kPending;
++  bool destroyed_ = false;
++  bool paused_ = false;
++  uint64_t buffered_amount_ = 0;
++};
++
++}  // namespace electron::api
++
++#endif  // ELECTRON_SHELL_BROWSER_API_ELECTRON_API_WEB_SOCKET_MAIN_H_
+diff --git a/shell/browser/electron_browser_client.cc b/shell/browser/electron_browser_client.cc
+index f6a63460a7..234888d505 100644
+--- a/shell/browser/electron_browser_client.cc
++++ b/shell/browser/electron_browser_client.cc
+@@ -84,6 +84,7 @@
+ #include "shell/browser/api/electron_api_protocol.h"
+ #include "shell/browser/api/electron_api_web_contents.h"
+ #include "shell/browser/api/electron_api_web_request.h"
++#include "shell/browser/api/electron_api_web_socket.h"
+ #include "shell/browser/badging/badge_manager.h"
+ #include "shell/browser/bluetooth/electron_bluetooth_delegate.h"
+ #include "shell/browser/child_web_contents_tracker.h"
+@@ -1449,13 +1450,20 @@ bool ElectronBrowserClient::ShouldTreatURLSchemeAsFirstPartyWhenTopLevel(
+ }
+
+ bool ElectronBrowserClient::WillInterceptWebSocket(
+-    content::RenderFrameHost* frame) {
+-  if (!frame)
++    content::RenderFrameHost* frame,
++    const content::ContentBrowserClient::WebSocketCreatorInfo& creator_info) {
++  auto* browser_context =
++      frame ? frame->GetProcess()->GetBrowserContext()
++            : creator_info.browser_context;
++  if (!browser_context)
+     return false;
+
+   v8::Isolate* isolate = JavascriptEnvironment::GetIsolate();
+   v8::HandleScope scope(isolate);
+-  auto* browser_context = frame->GetProcess()->GetBrowserContext();
++  auto* web_socket = api::WebSocket::FromOrCreate(isolate, browser_context);
++  if (web_socket && web_socket->HasHandler())
++    return true;
++
+   auto* web_request = api::WebRequest::FromOrCreate(isolate, browser_context);
+
+   // NOTE: Some unit test environments do not initialize
+@@ -1478,6 +1486,8 @@ bool ElectronBrowserClient::WillInterceptWebSocket(
+
+ void ElectronBrowserClient::CreateWebSocket(
+     content::RenderFrameHost* frame,
++    const content::ContentBrowserClient::WebSocketCreatorInfo& creator_info,
++    const std::vector<std::string>& requested_protocols,
+     WebSocketFactory factory,
+     const GURL& url,
+     const net::SiteForCookies& site_for_cookies,
+@@ -1486,13 +1496,57 @@ void ElectronBrowserClient::CreateWebSocket(
+         handshake_client) {
+   v8::Isolate* isolate = JavascriptEnvironment::GetIsolate();
+   v8::HandleScope scope(isolate);
+-  auto* browser_context = frame->GetProcess()->GetBrowserContext();
++  auto* browser_context =
++      frame ? frame->GetProcess()->GetBrowserContext()
++            : creator_info.browser_context;
++  if (!browser_context)
++    return;
++
++  auto* web_socket = api::WebSocket::FromOrCreate(isolate, browser_context);
++  if (web_socket && web_socket->MatchesURL(url)) {
++    content::GlobalRenderFrameHostId frame_id;
++    if (frame)
++      frame_id = frame->GetGlobalId();
++    web_socket->HandleConnection(
++        isolate, browser_context, creator_info, requested_protocols,
++        base::BindOnce(&ElectronBrowserClient::ContinueWebSocketConnection,
++                       base::Unretained(this), frame_id, creator_info,
++                       std::move(factory), url, site_for_cookies, user_agent),
++        url, site_for_cookies, user_agent, std::move(handshake_client));
++    return;
++  }
++
++  ContinueWebSocketConnection(frame ? frame->GetGlobalId()
++                                    : content::GlobalRenderFrameHostId(),
++                              creator_info, std::move(factory), url,
++                              site_for_cookies, user_agent,
++                              std::move(handshake_client));
++}
++
++void ElectronBrowserClient::ContinueWebSocketConnection(
++    content::GlobalRenderFrameHostId frame_id,
++    const content::ContentBrowserClient::WebSocketCreatorInfo& creator_info,
++    WebSocketFactory factory,
++    const GURL& url,
++    const net::SiteForCookies& site_for_cookies,
++    const std::optional<std::string>& user_agent,
++    mojo::PendingRemote<network::mojom::WebSocketHandshakeClient>
++        handshake_client) {
++  v8::Isolate* isolate = JavascriptEnvironment::GetIsolate();
++  v8::HandleScope scope(isolate);
++  content::RenderFrameHost* frame =
++      frame_id ? content::RenderFrameHost::FromID(frame_id) : nullptr;
++  auto* browser_context =
++      frame ? frame->GetProcess()->GetBrowserContext()
++            : creator_info.browser_context;
++  if (!browser_context)
++    return;
+
+   auto* web_request = api::WebRequest::FromOrCreate(isolate, browser_context);
+   DCHECK(web_request);
+
+ #if BUILDFLAG(ENABLE_ELECTRON_EXTENSIONS)
+-  if (!web_request->HasListener()) {
++  if (frame && !web_request->HasListener()) {
+     auto* web_request_api = extensions::BrowserContextKeyedAPIFactory<
+         extensions::WebRequestAPI>::Get(browser_context);
+
+@@ -1507,8 +1561,11 @@ void ElectronBrowserClient::CreateWebSocket(
+
+   ProxyingWebSocket::StartProxying(
+       web_request, std::move(factory), url, site_for_cookies, user_agent,
+-      std::move(handshake_client), true, frame->GetProcess()->GetDeprecatedID(),
+-      frame->GetRoutingID(), frame->GetLastCommittedOrigin(), browser_context,
++      std::move(handshake_client), true,
++      creator_info.frame_id.child_id.GetUnsafeValue(),
++      creator_info.frame_id.frame_routing_id,
++      frame ? frame->GetLastCommittedOrigin() : url::Origin::Create(url),
++      browser_context,
+       &next_id_);
+ }
+
+diff --git a/shell/browser/electron_browser_client.h b/shell/browser/electron_browser_client.h
+index 002f355f2b..5721430dcc 100644
+--- a/shell/browser/electron_browser_client.h
++++ b/shell/browser/electron_browser_client.h
+@@ -249,13 +249,18 @@ class ElectronBrowserClient : public content::ContentBrowserClient,
+       NonNetworkURLLoaderFactoryMap* factories) override;
+   void CreateWebSocket(
+       content::RenderFrameHost* frame,
++      const content::ContentBrowserClient::WebSocketCreatorInfo& creator_info,
++      const std::vector<std::string>& requested_protocols,
+       WebSocketFactory factory,
+       const GURL& url,
+       const net::SiteForCookies& site_for_cookies,
+       const std::optional<std::string>& user_agent,
+       mojo::PendingRemote<network::mojom::WebSocketHandshakeClient>
+           handshake_client) override;
+-  bool WillInterceptWebSocket(content::RenderFrameHost*) override;
++  bool WillInterceptWebSocket(
++      content::RenderFrameHost*,
++      const content::ContentBrowserClient::WebSocketCreatorInfo& creator_info)
++      override;
+   void WillCreateURLLoaderFactory(
+       content::BrowserContext* browser_context,
+       content::RenderFrameHost* frame,
+@@ -356,6 +361,16 @@ class ElectronBrowserClient : public content::ContentBrowserClient,
+       const content::ChildProcessTerminationInfo& info) override;
+
+  private:
++  void ContinueWebSocketConnection(
++      content::GlobalRenderFrameHostId frame_id,
++      const content::ContentBrowserClient::WebSocketCreatorInfo& creator_info,
++      WebSocketFactory factory,
++      const GURL& url,
++      const net::SiteForCookies& site_for_cookies,
++      const std::optional<std::string>& user_agent,
++      mojo::PendingRemote<network::mojom::WebSocketHandshakeClient>
++          handshake_client);
++
+   content::SiteInstance* GetSiteInstanceFromAffinity(
+       content::BrowserContext* browser_context,
+       const GURL& url,
+diff --git a/spec/chromium-spec.ts b/spec/chromium-spec.ts
+index 84efec6091..975d4e26f8 100644
+--- a/spec/chromium-spec.ts
++++ b/spec/chromium-spec.ts
+@@ -3395,6 +3395,87 @@ describe('chromium features', () => {
+       `);
+       expect(await finished).to.include('Electron');
+     });
++
++    it('can be accepted and handled by the session WebSocket handler', async () => {
++      const ses = session.fromPartition(`websocket-main-${Date.now()}`);
++      defer(() => ses.webSocket.setHandler(null));
++
++      const targetURL = 'ws://127.0.0.1:61234/bridge';
++      let socketDetails: {
++        url: string;
++        protocols: string[];
++        creatorType: string;
++        hasCreator: boolean;
++      } | undefined;
++      const rendererMessage = new Promise((resolve, reject) => {
++        ses.webSocket.setHandler({ urls: ['ws://127.0.0.1:*/*'] }, socket => {
++          socket.on('message', resolve);
++          socket.accept();
++          void socket.send('from-main').catch(reject);
++
++          try {
++            socketDetails = {
++              url: String(socket.url),
++              protocols: socket.protocols,
++              creatorType: socket.creatorType,
++              hasCreator: socket.creator !== null
++            };
++          } catch (error) {
++            reject(error);
++          }
++        });
++      });
++
++      const w = new BrowserWindow({
++        show: false,
++        webPreferences: { session: ses }
++      });
++      defer(() => w.destroy());
++      await w.loadURL('about:blank');
++
++      const rendererResult = await w.webContents.executeJavaScript(`
++        new Promise((resolve, reject) => {
++          const socket = new WebSocket(${JSON.stringify(targetURL)})
++          const timer = setTimeout(() => reject(new Error('timed out')), 5000)
++          const messages = []
++
++          socket.onopen = () => {
++            socket.send('from-renderer')
++          }
++          socket.onmessage = event => {
++            messages.push(event.data)
++            socket.close(1000, 'done')
++          }
++          socket.onclose = event => {
++            clearTimeout(timer)
++            resolve({
++              messages,
++              code: event.code,
++              reason: event.reason,
++              wasClean: event.wasClean
++            })
++          }
++          socket.onerror = () => reject(new Error('unexpected error'))
++        })
++      `);
++
++      expect(socketDetails).to.deep.equal({
++        url: targetURL,
++        protocols: [],
++        creatorType: 'frame',
++        hasCreator: true
++      });
++      expect(await rendererMessage).to.deep.equal({
++        type: 'text',
++        data: 'from-renderer'
++      });
++      expect(rendererResult).to.deep.equal({
++        messages: ['from-main'],
++        code: 1000,
++        reason: 'done',
++        wasClean: true
++      });
++    });
+   });
+
+   describe('fetch', () => {
