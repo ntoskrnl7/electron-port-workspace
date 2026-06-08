@@ -1,7 +1,7 @@
-From b432db1104dd01fb547b82cdcdf7f37563c852b5 Mon Sep 17 00:00:00 2001
+From 9c1ad0e8d3737531b271106028e8e199e725b154 Mon Sep 17 00:00:00 2001
 From: Jung-Kwang Lee <ntoskrnl7@gmail.com>
 Date: Thu, 14 May 2026 17:58:46 +0900
-Subject: [PATCH 3/3] test: cover user agent override targets
+Subject: [PATCH] test: cover user agent override targets
 
 ---
  spec/api-app-spec.ts                    |  69 ++++++++---
@@ -11,7 +11,7 @@ Subject: [PATCH 3/3] test: cover user agent override targets
  create mode 100644 spec/lib/user-agent-override-helpers.ts
 
 diff --git a/spec/api-app-spec.ts b/spec/api-app-spec.ts
-index 2b7314cb83..a587d70634 100644
+index 273a4ecbc0..592e674eba 100644
 --- a/spec/api-app-spec.ts
 +++ b/spec/api-app-spec.ts
 @@ -17,6 +17,11 @@ import { promisify } from 'node:util';
@@ -24,9 +24,9 @@ index 2b7314cb83..a587d70634 100644
 +  UserAgentTargetSnapshots
 +} from './lib/user-agent-override-helpers';
  import { closeWindow, closeAllWindows } from './lib/window-helpers';
- 
- const fixturesPath = path.resolve(__dirname, 'fixtures');
-@@ -2541,9 +2546,10 @@ describe('default behavior', () => {
+ import {
+   makeXdgMockDirectories,
+@@ -2545,9 +2550,10 @@ describe('default behavior', () => {
    describe('user agent fallback', () => {
      let initialValue: string;
      const userAgent = 'Mozilla/5.0 AppUserAgentOverride/99.0';
@@ -39,7 +39,7 @@ index 2b7314cb83..a587d70634 100644
        fullVersion: '99.0.1234.5',
        platform: 'Windows',
        platformVersion: '19.0.0',
-@@ -2555,6 +2561,35 @@ describe('default behavior', () => {
+@@ -2559,6 +2565,35 @@ describe('default behavior', () => {
        formFactors: ['Desktop']
      };
  
@@ -75,7 +75,7 @@ index 2b7314cb83..a587d70634 100644
      before(() => {
        initialValue = app.userAgentFallback!;
      });
-@@ -2582,11 +2617,7 @@ describe('default behavior', () => {
+@@ -2586,11 +2621,7 @@ describe('default behavior', () => {
      it('can set a fallback with User-Agent Client Hints metadata', async () => {
        app.setUserAgentOverride({ userAgent, userAgentMetadata });
  
@@ -88,7 +88,7 @@ index 2b7314cb83..a587d70634 100644
        defer(() => {
          server.close();
        });
-@@ -2595,20 +2626,20 @@ describe('default behavior', () => {
+@@ -2599,20 +2630,20 @@ describe('default behavior', () => {
        const ses = session.fromPartition(`app-user-agent-override-${crypto.randomUUID()}`);
        const w = new BrowserWindow({ show: false, webPreferences: { session: ses } });
        await w.loadURL(url);
