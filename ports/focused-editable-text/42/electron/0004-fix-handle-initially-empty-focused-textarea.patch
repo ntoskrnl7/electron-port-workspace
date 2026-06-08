@@ -1,0 +1,260 @@
+From 04f2ce5a71984c302b0bcd3c18434525bf9effc4 Mon Sep 17 00:00:00 2001
+From: Jung-Kwang Lee <ntoskrnl7@gmail.com>
+Date: Mon, 8 Jun 2026 15:42:31 +0900
+Subject: [PATCH 4/4] fix: handle initially empty focused textarea
+
+---
+ docs/api/web-contents.md                      |   1 +
+ .../browser/api/electron_api_web_contents.cc  |  34 ++---
+ spec/api-web-contents-spec.ts                 | 136 ++++++++++++++++++
+ 3 files changed, 150 insertions(+), 21 deletions(-)
+
+diff --git a/docs/api/web-contents.md b/docs/api/web-contents.md
+index 4f932f7f19..b82252cbd7 100644
+--- a/docs/api/web-contents.md
++++ b/docs/api/web-contents.md
+@@ -1268,6 +1268,7 @@ const selectedText = info.text.slice(info.selection.start, info.selection.end)
+ Password inputs return `null`. Custom editors backed by DOM-editable content are
+ handled on a best-effort basis. Editors backed by canvas, virtual documents, or
+ application-internal models may only expose the focused DOM control.
++Empty text controls resolve with `text: ''` rather than `null`.
+ 
+ #### `contents.watchFocusedEditableText([options, ]callback)` _Experimental_
+ 
+diff --git a/shell/browser/api/electron_api_web_contents.cc b/shell/browser/api/electron_api_web_contents.cc
+index ca95dc63ca..619b7e46d0 100644
+--- a/shell/browser/api/electron_api_web_contents.cc
++++ b/shell/browser/api/electron_api_web_contents.cc
+@@ -2269,11 +2269,13 @@ std::optional<FocusedEditableTextSnapshot>
+ CreateFocusedEditableTextSnapshotFromInputState(
+     const ui::mojom::TextInputState& state,
+     uint32_t max_length) {
+-  if (!state.value)
+-    return std::nullopt;
+-
+   FocusedEditableTextSnapshot snapshot;
+-  snapshot.text = *state.value;
++  // Blink can expose an initially empty text control as a null WebString.
++  // Password and non-editable contexts are filtered before this point, so a
++  // missing value here represents empty editable text rather than unreadable
++  // text.
++  if (state.value)
++    snapshot.text = *state.value;
+   snapshot.selection = state.selection;
+   snapshot.composition = ClampCompositionToText(
+       state.composition ? std::make_optional(*state.composition) : std::nullopt,
+@@ -6742,24 +6744,14 @@ v8::Local<v8::Promise> WebContents::EditFocusedEditableText(
+     return handle;
+   }
+ 
+-  std::optional<size_t> text_length;
+-  if (text_input_state->value)
+-    text_length = text_input_state->value->length();
+-
+-  const bool needs_text_length =
+-      edit.kind == FocusedEditableTextEditKind::kReplaceText ||
+-      edit.selection_after.has_value();
+-  if (needs_text_length && !text_length) {
+-    v8::Local<v8::Value> null_value = v8::Null(isolate);
+-    promise.Resolve(null_value);
+-    return handle;
+-  }
++  const size_t text_length =
++      text_input_state->value ? text_input_state->value->length() : 0;
+ 
+   std::optional<gfx::Range> replacement_range;
+   size_t replaced_length = 0;
+   if (edit.kind == FocusedEditableTextEditKind::kReplaceText) {
+     replacement_range =
+-        ResolveFocusedEditableTextEditReplacementRange(edit, *text_length,
++        ResolveFocusedEditableTextEditReplacementRange(edit, text_length,
+                                                        &error);
+     if (!error.empty()) {
+       promise.RejectWithErrorMessage(error);
+@@ -6769,18 +6761,18 @@ v8::Local<v8::Promise> WebContents::EditFocusedEditableText(
+       replaced_length = replacement_range->length();
+     } else {
+       gfx::Range current = GetFocusedEditableTextEditCurrentReplacementRange(
+-          input_state, *text_length);
++          input_state, text_length);
+       replaced_length = current.length();
+     }
+-  } else if (text_length) {
++  } else {
+     gfx::Range current = GetFocusedEditableTextEditCurrentReplacementRange(
+-        input_state, *text_length);
++        input_state, text_length);
+     replaced_length = current.length();
+   }
+ 
+   std::optional<gfx::Range> selection_after;
+   const size_t final_text_length =
+-      text_length ? *text_length - replaced_length + edit.text.length() : 0;
++      text_length - replaced_length + edit.text.length();
+   if (edit.selection_after) {
+     selection_after = ClampFocusedEditableTextSelectionAfter(
+         *edit.selection_after, final_text_length);
+diff --git a/spec/api-web-contents-spec.ts b/spec/api-web-contents-spec.ts
+index 3a3c30d8ed..a549044a96 100644
+--- a/spec/api-web-contents-spec.ts
++++ b/spec/api-web-contents-spec.ts
+@@ -1380,6 +1380,42 @@ describe('webContents module', () => {
+     });
+   });
+ 
++  const focusInitiallyEmptyTextarea = async (contents: WebContents, inIframe = false) => {
++    const result = await contents.executeJavaScript(`
++      (() => {
++        try {
++          const body = document.body || document.documentElement.appendChild(document.createElement('body'));
++          if (${inIframe ? 'true' : 'false'}) {
++            body.innerHTML = '<iframe id="child"></iframe>';
++            const iframe = document.getElementById('child');
++            const doc = iframe && iframe.contentDocument;
++            if (!doc) return { ok: false, message: 'iframe contentDocument is not available' };
++            doc.open();
++            doc.write('<!DOCTYPE html><textarea id="field"></textarea>');
++            doc.close();
++            const field = doc.getElementById('field');
++            if (!field) return { ok: false, message: 'textarea was not created' };
++            iframe.contentWindow.focus();
++            field.focus();
++          } else {
++            body.innerHTML = '<textarea id="field"></textarea>';
++            const field = document.getElementById('field');
++            if (!field) return { ok: false, message: 'textarea was not created' };
++            field.focus();
++          }
++          return { ok: true };
++        } catch (error) {
++          return {
++            ok: false,
++            message: String(error && error.message || error),
++            html: document.documentElement?.outerHTML || ''
++          };
++        }
++      })()
++    `);
++    expect(result, JSON.stringify(result)).to.deep.equal({ ok: true });
++  };
++
+   describe('getFocusedEditableText() API', () => {
+     afterEach(closeAllWindows);
+ 
+@@ -1449,6 +1485,53 @@ describe('webContents module', () => {
+       expect(info.isPartial).to.be.false();
+     });
+ 
++    it('returns empty text for initially empty textarea controls', async () => {
++      const w = new BrowserWindow({ show: false, width: 400, height: 300 });
++      await w.loadURL('about:blank');
++
++      await focusInitiallyEmptyTextarea(w.webContents);
++
++      await waitUntil(async () => {
++        const info = await w.webContents.getFocusedEditableText({ mode: 'value' });
++        return info?.inputType === 'textArea' && info.text === '';
++      });
++
++      const mainInfo = await w.webContents.getFocusedEditableText({ mode: 'value' });
++      expect(mainInfo).to.not.equal(null);
++      if (mainInfo === null) {
++        throw new Error('Expected focused editable text');
++      }
++      expect(mainInfo.isMainFrame).to.be.true();
++      expect(mainInfo.inputType).to.equal('textArea');
++      expect(mainInfo.text).to.equal('');
++      expect(mainInfo.selection).to.deep.equal({
++        isCollapsed: true,
++        start: 0,
++        end: 0
++      });
++
++      await focusInitiallyEmptyTextarea(w.webContents, true);
++
++      await waitUntil(async () => {
++        const info = await w.webContents.getFocusedEditableText({ mode: 'value' });
++        return info?.inputType === 'textArea' && info.text === '' && !info.isMainFrame;
++      });
++
++      const iframeInfo = await w.webContents.getFocusedEditableText({ mode: 'value' });
++      expect(iframeInfo).to.not.equal(null);
++      if (iframeInfo === null) {
++        throw new Error('Expected focused editable text');
++      }
++      expect(iframeInfo.isMainFrame).to.be.false();
++      expect(iframeInfo.inputType).to.equal('textArea');
++      expect(iframeInfo.text).to.equal('');
++      expect(iframeInfo.selection).to.deep.equal({
++        isCollapsed: true,
++        start: 0,
++        end: 0
++      });
++    });
++
+     it('returns full contenteditable text on a best-effort DOM path', async () => {
+       const w = new BrowserWindow({ show: false, width: 400, height: 300 });
+       await w.loadURL(
+@@ -1654,6 +1737,59 @@ describe('webContents module', () => {
+       });
+     });
+ 
++    it('edits initially empty textarea controls', async () => {
++      const w = new BrowserWindow({ show: false, width: 400, height: 300 });
++      await w.loadURL('about:blank');
++
++      await focusInitiallyEmptyTextarea(w.webContents);
++      await waitUntil(async () => {
++        const info = await w.webContents.getFocusedEditableText({ mode: 'value' });
++        return info?.inputType === 'textArea' && info.text === '';
++      });
++
++      const mainInfo = await w.webContents.editFocusedEditableText({
++        kind: 'replaceText',
++        start: 0,
++        end: 0,
++        text: 'a'
++      });
++
++      expect(mainInfo).to.not.equal(null);
++      if (mainInfo === null) {
++        throw new Error('Expected focused editable text');
++      }
++      expect(mainInfo.text).to.equal('a');
++      expect(mainInfo.selection).to.deep.equal({
++        isCollapsed: true,
++        start: 1,
++        end: 1
++      });
++
++      await focusInitiallyEmptyTextarea(w.webContents, true);
++      await waitUntil(async () => {
++        const info = await w.webContents.getFocusedEditableText({ mode: 'value' });
++        return info?.inputType === 'textArea' && info.text === '' && !info.isMainFrame;
++      });
++
++      const iframeInfo = await w.webContents.editFocusedEditableText({
++        kind: 'insertText',
++        text: 'b',
++        selectionAfter: { start: 1, end: 1 }
++      });
++
++      expect(iframeInfo).to.not.equal(null);
++      if (iframeInfo === null) {
++        throw new Error('Expected focused editable text');
++      }
++      expect(iframeInfo.isMainFrame).to.be.false();
++      expect(iframeInfo.text).to.equal('b');
++      expect(iframeInfo.selection).to.deep.equal({
++        isCollapsed: true,
++        start: 1,
++        end: 1
++      });
++    });
++
+     it('replaces the current selection when no range is provided', async () => {
+       const w = new BrowserWindow({ show: false, width: 400, height: 300 });
+       await w.loadURL(
+-- 
+2.53.0
+

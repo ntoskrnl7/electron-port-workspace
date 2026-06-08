@@ -1,7 +1,7 @@
-From f63c1da2b5c440955195799e6193ff9466e30a29 Mon Sep 17 00:00:00 2001
+From 9ff35ac56988f4daab7a4c38b8bac3adc9445519 Mon Sep 17 00:00:00 2001
 From: Jung-Kwang Lee <ntoskrnl7@gmail.com>
 Date: Fri, 5 Jun 2026 18:22:56 +0900
-Subject: [PATCH] feat: add focused editable text edit API
+Subject: [PATCH 3/4] feat: add focused editable text edit API
 
 ---
  .../focused-editable-text-edit-selection.md   |   8 +
@@ -74,7 +74,7 @@ index 0000000000..a1c474233e
 +
 +This object is passed to `webContents.editFocusedEditableText()`.
 diff --git a/docs/api/web-contents.md b/docs/api/web-contents.md
-index f5cf295135..7663ba67ab 100644
+index 0f391fc26c..4f932f7f19 100644
 --- a/docs/api/web-contents.md
 +++ b/docs/api/web-contents.md
 @@ -1303,6 +1303,34 @@ are handled on a best-effort basis. The watcher is not a general DOM mutation
@@ -113,10 +113,10 @@ index f5cf295135..7663ba67ab 100644
  
  Returns `boolean` - Whether web page is still loading resources.
 diff --git a/shell/browser/api/electron_api_web_contents.cc b/shell/browser/api/electron_api_web_contents.cc
-index 5a6bd8121a..c35f4c3c57 100644
+index 41903835c0..ca95dc63ca 100644
 --- a/shell/browser/api/electron_api_web_contents.cc
 +++ b/shell/browser/api/electron_api_web_contents.cc
-@@ -2322,6 +2322,21 @@ struct FocusedEditableTextSnapshot {
+@@ -2154,6 +2154,21 @@ struct FocusedEditableTextSnapshot {
    bool is_partial = false;
  };
  
@@ -138,7 +138,7 @@ index 5a6bd8121a..c35f4c3c57 100644
  using FocusedEditableTextResultCallback =
      base::OnceCallback<void(v8::Local<v8::Value>)>;
  
-@@ -2554,10 +2569,156 @@ bool ParseFocusedEditableTextWatchOptionsDictionary(
+@@ -2386,10 +2401,156 @@ bool ParseFocusedEditableTextWatchOptionsDictionary(
    return true;
  }
  
@@ -296,7 +296,7 @@ index 5a6bd8121a..c35f4c3c57 100644
    auto* web_contents_impl = static_cast<content::WebContentsImpl*>(contents);
    auto* text_input_manager = web_contents_impl->GetTextInputManager();
    if (!text_input_manager)
-@@ -2585,6 +2746,8 @@ content::RenderFrameHost* GetFocusedEditableTextFrame(
+@@ -2417,6 +2578,8 @@ content::RenderFrameHost* GetFocusedEditableTextFrame(
    *input_state = CaptureFocusedEditableTextInputState(*text_input_state);
    if (text_input_state_out)
      *text_input_state_out = text_input_state;
@@ -305,7 +305,7 @@ index 5a6bd8121a..c35f4c3c57 100644
    return render_frame_host;
  }
  
-@@ -2848,6 +3011,126 @@ void RequestFocusedEditableTextSnapshot(
+@@ -2680,6 +2843,126 @@ void RequestFocusedEditableTextSnapshot(
        content::ISOLATED_WORLD_ID_GLOBAL);
  }
  
@@ -432,7 +432,7 @@ index 5a6bd8121a..c35f4c3c57 100644
  class FocusedEditableTextWatcher;
  
  class TextCaretFrameObserver : public base::SupportsUserData::Data,
-@@ -6528,6 +6811,85 @@ v8::Local<v8::Value> WebContents::WatchFocusedEditableText(
+@@ -6435,6 +6718,85 @@ v8::Local<v8::Value> WebContents::WatchFocusedEditableText(
    return wrapper;
  }
  
@@ -518,7 +518,7 @@ index 5a6bd8121a..c35f4c3c57 100644
  void WebContents::SendInputEvent(v8::Isolate* isolate,
                                   v8::Local<v8::Value> input_event) {
    content::RenderWidgetHostView* view =
-@@ -7951,6 +8313,8 @@ void WebContents::FillObjectTemplate(v8::Isolate* isolate,
+@@ -7840,6 +8202,8 @@ void WebContents::FillObjectTemplate(v8::Isolate* isolate,
        .SetMethod("getFocusedEditableText", &WebContents::GetFocusedEditableText)
        .SetMethod("watchFocusedEditableText",
                   &WebContents::WatchFocusedEditableText)
@@ -528,7 +528,7 @@ index 5a6bd8121a..c35f4c3c57 100644
        .SetMethod("dispatchInputEvent", &WebContents::DispatchInputEvent)
        .SetMethod("beginFrameSubscription", &WebContents::BeginFrameSubscription)
 diff --git a/shell/browser/api/electron_api_web_contents.h b/shell/browser/api/electron_api_web_contents.h
-index 30c89280ba..b84df2efff 100644
+index a3e53d0ad7..2f26cae543 100644
 --- a/shell/browser/api/electron_api_web_contents.h
 +++ b/shell/browser/api/electron_api_web_contents.h
 @@ -311,6 +311,7 @@ class WebContents final : public ExclusiveAccessContext,
@@ -540,10 +540,10 @@ index 30c89280ba..b84df2efff 100644
    // Send WebInputEvent to the page.
    void SendInputEvent(v8::Isolate* isolate, v8::Local<v8::Value> input_event);
 diff --git a/spec/api-web-contents-spec.ts b/spec/api-web-contents-spec.ts
-index 6c75e6a435..ccf24298eb 100644
+index ac114850b2..3a3c30d8ed 100644
 --- a/spec/api-web-contents-spec.ts
 +++ b/spec/api-web-contents-spec.ts
-@@ -1600,6 +1600,266 @@ describe('webContents module', () => {
+@@ -1572,6 +1572,266 @@ describe('webContents module', () => {
      });
    });
  

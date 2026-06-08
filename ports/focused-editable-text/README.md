@@ -55,6 +55,8 @@ UTF-16 range, or an open-ended range where only `start` or `end` is supplied.
 Password inputs return `null`. DOM-backed contenteditable editors are handled
 best-effort. Editors backed by canvas, hidden controls, or application-internal
 models may only expose the focused DOM control.
+Initially empty text controls, including empty `<textarea>` elements in iframes,
+are treated as editable text with `text: ''` rather than as unreadable text.
 
 Target bundles live under:
 
