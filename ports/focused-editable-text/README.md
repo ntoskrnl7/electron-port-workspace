@@ -52,9 +52,10 @@ or active composition. `replaceText` can edit the current selection, a closed
 UTF-16 range, or an open-ended range where only `start` or `end` is supplied.
 `selectionAfter` is best-effort and clamped to the final text length.
 
-Password inputs return `null`. DOM-backed contenteditable editors are handled
-best-effort. Editors backed by canvas, hidden controls, or application-internal
-models may only expose the focused DOM control.
+Password inputs are exposed with `inputType: 'password'`. DOM-backed
+contenteditable editors are handled best-effort. Editors backed by canvas,
+hidden controls, or application-internal models may only expose the focused DOM
+control.
 Initially empty text controls, including empty `<textarea>` elements in iframes,
 are treated as editable text with `text: ''` rather than as unreadable text.
 

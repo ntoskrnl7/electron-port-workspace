@@ -25,18 +25,18 @@ This bundle contains:
   and `FocusedEditableTextEditSelection`
 - watcher close semantics, per-watcher options, throttled/coalesced callback
   delivery, callback lifetime without retaining the return object, password
-  suppression, and focus-loss null handling
+  input snapshots, and focus-loss null handling
 - edit semantics for insert, replace current selection, closed/open-ended
-  replace ranges, best-effort clamped `selectionAfter`, password suppression,
+  replace ranges, best-effort clamped `selectionAfter`, password input editing,
   contenteditable editing, and invalid input rejection
 - initially empty text control normalization, including empty `<textarea>`
   elements in iframes
-- Specs covering no editable focus, password suppression, input value mode,
+- Specs covering no editable focus, password input snapshots, input value mode,
   empty textarea value mode, contenteditable full mode, truncation, surrounding
   mode, and invalid options
 - Specs covering watcher initial callback, updates, close, independent watcher
   options, callback lifetime without retaining the return object,
-  password/focus-loss nulls, and invalid watcher options
+  password input snapshots, focus-loss nulls, and invalid watcher options
 
 Patch directories:
 
@@ -56,7 +56,7 @@ env -u ELECTRON_RUN_AS_NODE npm run test -- --skipYarnInstall --runners=main --f
 env -u ELECTRON_RUN_AS_NODE npm run test -- --skipYarnInstall --runners=main --files spec/api-web-contents-spec.ts --grep "editFocusedEditableText"
 env -u ELECTRON_RUN_AS_NODE npm run test -- --skipYarnInstall --runners=main --files spec/api-web-contents-spec.ts --grep "FocusedEditableText"
 env -u ELECTRON_RUN_AS_NODE npm run test -- --skipYarnInstall --runners=main --files spec/api-web-contents-spec.ts --grep "text-caret-info-changed event"
-PATH=/tmp/electron-build-tools-gperf/root/usr/bin:$PATH ELECTRON_BUILD_NO_REMOTE=1 ELECTRON_BUILD_JOBS=16 ELECTRON_BUILD_REMOTE_JOBS=0 /path/to/electron-port-workspace/scripts/build-dev-electron-npm.sh --target 42 --include-widevine-cdm --widevine-license-ack
+scripts/build-dev-electron-npm.sh --target 42 --include-widevine-cdm --widevine-license-ack
 ```
 
 Use:
