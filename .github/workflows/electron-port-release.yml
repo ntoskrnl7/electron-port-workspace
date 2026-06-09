@@ -75,11 +75,16 @@ on:
         required: false
         default: ""
         type: string
-      runner_labels:
-        description: JSON runs-on value. Example "ubuntu-24.04" or ["self-hosted","linux","x64"].
+      runner_os:
+        description: GitHub-hosted runner image. Self-hosted runners are intentionally not supported.
         required: true
-        default: '["self-hosted","linux","x64"]'
-        type: string
+        default: ubuntu-24.04
+        type: choice
+        options:
+          - ubuntu-24.04
+          - windows-latest
+          - windows-2025
+          - macos-15
       workspace_base:
         description: Persistent workspace base directory. Leave blank to use runner.temp.
         required: false
@@ -110,13 +115,13 @@ permissions:
   contents: write
 
 concurrency:
-  group: electron-port-release-${{ inputs.target }}-${{ inputs.electron_tag }}-${{ inputs.runner_labels }}
+  group: electron-port-release-${{ inputs.target }}-${{ inputs.electron_tag }}-${{ inputs.runner_os }}
   cancel-in-progress: false
 
 jobs:
   build:
     name: Build ${{ inputs.electron_tag }} with ports
-    runs-on: ${{ fromJSON(inputs.runner_labels) }}
+    runs-on: ${{ inputs.runner_os }}
     timeout-minutes: 360
 
     env:
@@ -199,6 +204,7 @@ jobs:
           PACKAGE_KIND: ${{ inputs.package_kind }}
           RUN_SPECS: ${{ inputs.run_specs }}
           SPEC_ARGS: ${{ inputs.spec_args }}
+          RUNNER_OS_INPUT: ${{ inputs.runner_os }}
         run: |
           set -euo pipefail
 
@@ -340,6 +346,7 @@ jobs:
             echo "- Package kind: $PACKAGE_KIND"
             echo "- Run specs: $RUN_SPECS"
             echo "- Spec args: $SPEC_ARGS"
+            echo "- Runner: $RUNNER_OS_INPUT"
             echo "- Workspace base: $workspace_base"
             echo "- Release tag: $release_tag"
           } >> "$GITHUB_STEP_SUMMARY"
@@ -350,7 +357,7 @@ jobs:
           TARGET: ${{ inputs.target }}
           ELECTRON_TAG: ${{ inputs.electron_tag }}
           WORKSPACE_BASE: ${{ steps.inputs.outputs.workspace_base }}
-          NO_GIT_CACHE: ${{ (runner.os == 'macOS' || runner.os == 'Windows' || !contains(inputs.runner_labels, 'self-hosted')) && '1' || '0' }}
+          NO_GIT_CACHE: "1"
         run: |
           set -euo pipefail
 
