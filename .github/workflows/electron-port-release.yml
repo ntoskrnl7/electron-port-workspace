@@ -177,8 +177,13 @@ jobs:
           if ! command -v e >/dev/null 2>&1; then
             npm install --global @electron/build-tools
           fi
-          command -v e
-          e --version || true
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            command -v e.cmd
+            e.cmd --version || true
+          else
+            command -v e
+            e --version || true
+          fi
 
       - name: Resolve inputs
         id: inputs
@@ -206,6 +211,9 @@ jobs:
           if [[ -z "$workspace_base" ]]; then
             workspace_base="$RUNNER_TEMP/electron-port-workspace"
           fi
+          if [[ "$RUNNER_OS" == "Windows" ]] && command -v cygpath >/dev/null 2>&1; then
+            workspace_base="$(cygpath -m "$workspace_base")"
+          fi
           mkdir -p "$workspace_base"
 
           safe_tag="$(printf '%s\n' "$ELECTRON_TAG" | sed -E 's/[^A-Za-z0-9._-]+/-/g; s/^-+//; s/-+$//')"
@@ -219,8 +227,13 @@ jobs:
             release_name="Electron $ELECTRON_TAG ports ($TARGET)"
           fi
 
+          python_bin=python3
+          if ! command -v "$python_bin" >/dev/null 2>&1; then
+            python_bin=python
+          fi
+
           port_csv="$(
-            python3 - <<'PY'
+            "$python_bin" - <<'PY'
           import os
           import sys
           from pathlib import Path
@@ -337,7 +350,7 @@ jobs:
           TARGET: ${{ inputs.target }}
           ELECTRON_TAG: ${{ inputs.electron_tag }}
           WORKSPACE_BASE: ${{ steps.inputs.outputs.workspace_base }}
-          NO_GIT_CACHE: ${{ runner.os == 'macOS' && '1' || '0' }}
+          NO_GIT_CACHE: ${{ (runner.os == 'macOS' || runner.os == 'Windows') && '1' || '0' }}
         run: |
           set -euo pipefail
 
@@ -358,7 +371,23 @@ jobs:
               create_args+=(--no-git-cache)
             fi
 
-            if scripts/create-electron-major.sh "${create_args[@]}"; then
+            if [[ "$RUNNER_OS" == "Windows" ]]; then
+              ps_args=(
+                "$TARGET"
+                -BaseDir "$WORKSPACE_BASE"
+                -Tag "$ELECTRON_TAG"
+                -Sync
+                -ForceConfig
+              )
+              if [[ "$NO_GIT_CACHE" == "1" ]]; then
+                ps_args+=(-NoGitCache)
+              fi
+              create_command=(pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/create-electron-major.ps1 "${ps_args[@]}")
+            else
+              create_command=(scripts/create-electron-major.sh "${create_args[@]}")
+            fi
+
+            if "${create_command[@]}"; then
               df -h
               break
             else
@@ -386,16 +415,29 @@ jobs:
           set -euo pipefail
           src_root="$WORKSPACE_BASE/$TARGET/src"
           branch_name="actions/$TARGET-$SAFE_TAG-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
-          scripts/upgrade-electron-target.sh \
-            --target "$TARGET" \
-            --tag "$ELECTRON_TAG" \
-            --ports "$PORTS" \
-            --base-dir "$GITHUB_WORKSPACE" \
-            --src-root "$src_root" \
-            --branch-name "$branch_name" \
-            --skip-checkout \
-            --no-sync \
-            --no-backup
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/upgrade-electron-target.ps1 \
+              -Target "$TARGET" \
+              -Tag "$ELECTRON_TAG" \
+              -Ports "$PORTS" \
+              -BaseDir "$GITHUB_WORKSPACE" \
+              -SrcRoot "$src_root" \
+              -BranchName "$branch_name" \
+              -SkipCheckout \
+              -NoSync \
+              -NoBackup
+          else
+            scripts/upgrade-electron-target.sh \
+              --target "$TARGET" \
+              --tag "$ELECTRON_TAG" \
+              --ports "$PORTS" \
+              --base-dir "$GITHUB_WORKSPACE" \
+              --src-root "$src_root" \
+              --branch-name "$branch_name" \
+              --skip-checkout \
+              --no-sync \
+              --no-backup
+          fi
 
       - name: Build npm package tarballs
         id: build
@@ -420,6 +462,10 @@ jobs:
 
           src_root="$WORKSPACE_BASE/$TARGET/src"
           artifact_dir="$RUNNER_TEMP/electron-port-artifacts"
+          if [[ "$RUNNER_OS" == "Windows" ]] && command -v cygpath >/dev/null 2>&1; then
+            src_root="$(cygpath -m "$src_root")"
+            artifact_dir="$(cygpath -m "$artifact_dir")"
+          fi
           rm -rf "$artifact_dir"
           mkdir -p "$artifact_dir"
 
@@ -427,7 +473,11 @@ jobs:
           export ELECTRON_WORKSPACE_SRC_DIR="$src_root"
           export ELECTRON_PACKAGE_STAGING_DIR="$artifact_dir"
 
-          e use "$TARGET-release"
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            e.cmd use "$TARGET-release"
+          else
+            e use "$TARGET-release"
+          fi
 
           package_args=(
             --target "$TARGET"
@@ -440,11 +490,25 @@ jobs:
             package_args+=(--include-widevine-cdm --widevine-license-ack)
           fi
 
-          if [[ "$PACKAGE_MODE" == "release" ]]; then
-            scripts/build-release-electron-npm.sh "${package_args[@]}"
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            if [[ "$PACKAGE_MODE" == "release" ]]; then
+              pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/build-release-electron-npm.ps1 \
+                -Target "$TARGET" \
+                "${package_args[@]}"
+            else
+              export ELECTRON_PACKAGE_DEV_NUMBER="$DEV_NUMBER"
+              package_args+=(--dev-number "$DEV_NUMBER")
+              pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/build-dev-electron-npm.ps1 \
+                -Target "$TARGET" \
+                "${package_args[@]}"
+            fi
           else
-            package_args+=(--dev-number "$DEV_NUMBER")
-            scripts/build-dev-electron-npm.sh "${package_args[@]}"
+            if [[ "$PACKAGE_MODE" == "release" ]]; then
+              scripts/build-release-electron-npm.sh "${package_args[@]}"
+            else
+              package_args+=(--dev-number "$DEV_NUMBER")
+              scripts/build-dev-electron-npm.sh "${package_args[@]}"
+            fi
           fi
 
           shopt -s nullglob
@@ -471,6 +535,10 @@ jobs:
 
           src_root="$WORKSPACE_BASE/$TARGET/src"
           test_results_dir="$RUNNER_TEMP/electron-spec-results"
+          if [[ "$RUNNER_OS" == "Windows" ]] && command -v cygpath >/dev/null 2>&1; then
+            src_root="$(cygpath -m "$src_root")"
+            test_results_dir="$(cygpath -m "$test_results_dir")"
+          fi
           mkdir -p "$test_results_dir"
 
           export ELECTRON_WORKSPACE_TARGET="$TARGET"
@@ -478,8 +546,13 @@ jobs:
           export ELECTRON_TEST_RESULTS_DIR="$test_results_dir"
           export ELECTRON_OUT_DIR=Release
 
+          python_bin=python3
+          if ! command -v "$python_bin" >/dev/null 2>&1; then
+            python_bin=python
+          fi
+
           mapfile -t spec_args < <(
-            python3 - <<'PY'
+            "$python_bin" - <<'PY'
           import os
           import shlex
 

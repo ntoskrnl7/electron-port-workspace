@@ -337,12 +337,12 @@ if (-not $NoBackup) {
 }
 
 if (-not $SkipCheckout) {
-  Invoke-Logged git @('-C', $ElectronDir, 'fetch', 'origin', "refs/tags/$Tag`:refs/tags/$Tag")
+  Invoke-Logged git @('-C', $ElectronDir, 'fetch', '--no-tags', 'origin', "refs/tags/$Tag`:refs/tags/$Tag")
   Invoke-Logged git @('-C', $ElectronDir, 'checkout', $Tag)
 
   $chromiumVersion = Get-ElectronChromiumVersion
   Write-Host "Chromium revision from Electron DEPS: $chromiumVersion"
-  Invoke-Logged git @('-C', $SrcRoot, 'fetch', 'origin', "refs/tags/$chromiumVersion`:refs/tags/$chromiumVersion")
+  Invoke-Logged git @('-C', $SrcRoot, 'fetch', '--no-tags', 'origin', "refs/tags/$chromiumVersion`:refs/tags/$chromiumVersion")
   Invoke-Logged git @('-C', $SrcRoot, 'switch', '--detach', $chromiumVersion)
 
   if (-not $NoSync) {

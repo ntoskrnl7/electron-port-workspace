@@ -9,6 +9,7 @@ param(
   [switch]$Sync,
   [switch]$SetCurrent,
   [switch]$ForceConfig,
+  [switch]$NoGitCache,
   [switch]$UseSsh
 )
 
@@ -65,6 +66,25 @@ function Write-IfChanged {
   Write-Host "+ wrote $Path"
 }
 
+function Initialize-ElectronCheckoutAtTag {
+  param([string]$CheckoutTag)
+
+  $electronParent = Split-Path -Parent $electronDir
+  if (Test-Path -LiteralPath $electronDir) {
+    if (-not (Test-Path -LiteralPath (Join-Path $electronDir '.git'))) {
+      throw "Electron checkout path exists but is not a git repo: $electronDir"
+    }
+    return
+  }
+
+  Write-Host "Electron checkout is not present; bootstrapping Electron at $CheckoutTag before sync."
+  New-Item -ItemType Directory -Force -Path $electronParent | Out-Null
+  Invoke-Logged git init $electronDir
+  Invoke-Logged git -C $electronDir remote add origin $electronOrigin
+  Invoke-Logged git -C $electronDir fetch --no-tags --filter=blob:none origin "refs/tags/$CheckoutTag`:refs/tags/$CheckoutTag"
+  Invoke-Logged git -C $electronDir checkout $CheckoutTag
+}
+
 $root = Join-Path $BaseDir $Major
 $releaseConfig = "$Major-release"
 $testingConfig = "$Major-testing"
@@ -92,6 +112,17 @@ Write-IfChanged -Path (Join-Path $root '.gclient') -Content $gclient -Force:$For
 function New-ConfigJson {
   param([string]$ImportName, [string]$OutName)
   $schemaPath = (Join-Path $HOME '.electron_build_tools\evm-config.schema.json') -replace '\\', '/'
+  $configEnv = [ordered]@{
+    CHROMIUM_BUILDTOOLS_PATH = (Join-Path $root 'src\buildtools')
+  }
+  if (-not $NoGitCache) {
+    $gitCachePath = if ($env:ELECTRON_WORKSPACE_GIT_CACHE_PATH) {
+      $env:ELECTRON_WORKSPACE_GIT_CACHE_PATH
+    } else {
+      Join-Path $HOME '.git_cache'
+    }
+    $configEnv.GIT_CACHE_PATH = $gitCachePath
+  }
   $config = [ordered]@{
     '$schema' = "file:///$schemaPath"
     root = $root
@@ -110,10 +141,7 @@ function New-ConfigJson {
       out = $OutName
     }
     preserveSDK = 5
-    env = @{
-      CHROMIUM_BUILDTOOLS_PATH = (Join-Path $root 'src\buildtools')
-      GIT_CACHE_PATH = (Join-Path $HOME '.git_cache')
-    }
+    env = $configEnv
   }
   return ($config | ConvertTo-Json -Depth 8)
 }
@@ -129,11 +157,11 @@ if ($SetCurrent) {
 $electronDir = Join-Path $root 'src\electron'
 if ($Tag) {
   if (-not (Test-Path -LiteralPath (Join-Path $electronDir '.git'))) {
-    Write-Host 'Electron checkout is not present yet; running sync first.'
-    Invoke-Logged e "--config=$releaseConfig" sync
+    Initialize-ElectronCheckoutAtTag $Tag
+  } else {
+    Invoke-Logged git -C $electronDir fetch --no-tags origin "refs/tags/$Tag`:refs/tags/$Tag"
+    Invoke-Logged git -C $electronDir checkout $Tag
   }
-  Invoke-Logged git -C $electronDir fetch origin "refs/tags/$Tag`:refs/tags/$Tag"
-  Invoke-Logged git -C $electronDir checkout $Tag
 }
 
 if ($Sync) {
