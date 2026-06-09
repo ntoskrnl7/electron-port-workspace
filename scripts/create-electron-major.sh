@@ -227,7 +227,7 @@ bootstrap_electron_checkout() {
   run mkdir -p "$ROOT/src"
   run git init "$electron_dir"
   run git -C "$electron_dir" remote add origin "$ELECTRON_ORIGIN"
-  run git -C "$electron_dir" fetch --no-tags --filter=blob:none origin "refs/tags/$tag:refs/tags/$tag"
+  run git -C "$electron_dir" fetch --no-tags origin "refs/tags/$tag:refs/tags/$tag"
   run git -C "$electron_dir" checkout "$tag"
 }
 

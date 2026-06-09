@@ -81,7 +81,7 @@ function Initialize-ElectronCheckoutAtTag {
   New-Item -ItemType Directory -Force -Path $electronParent | Out-Null
   Invoke-Logged git init $electronDir
   Invoke-Logged git -C $electronDir remote add origin $electronOrigin
-  Invoke-Logged git -C $electronDir fetch --no-tags --filter=blob:none origin "refs/tags/$CheckoutTag`:refs/tags/$CheckoutTag"
+  Invoke-Logged git -C $electronDir fetch --no-tags origin "refs/tags/$CheckoutTag`:refs/tags/$CheckoutTag"
   Invoke-Logged git -C $electronDir checkout $CheckoutTag
 }
 
