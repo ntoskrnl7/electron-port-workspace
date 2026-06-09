@@ -205,6 +205,23 @@ run() {
   "$@"
 }
 
+bootstrap_electron_checkout() {
+  local tag=$1
+  local electron_dir="$ROOT/src/electron"
+
+  if [[ -e "$electron_dir" && ! -d "$electron_dir/.git" ]]; then
+    echo "error: Electron checkout path exists but is not a git repo: $electron_dir" >&2
+    exit 1
+  fi
+
+  echo "Electron checkout is not present; bootstrapping Electron at $tag before sync."
+  run mkdir -p "$ROOT/src"
+  run git init "$electron_dir"
+  run git -C "$electron_dir" remote add origin "$ELECTRON_ORIGIN"
+  run git -C "$electron_dir" fetch --filter=blob:none origin "refs/tags/$tag:refs/tags/$tag"
+  run git -C "$electron_dir" checkout "$tag"
+}
+
 main() {
   run mkdir -p "$ROOT" "$CONFIGS_DIR"
 
@@ -219,11 +236,11 @@ main() {
 
   if [[ -n "$TAG" ]]; then
     if [[ ! -d "$ROOT/src/electron/.git" ]]; then
-      echo "Electron checkout is not present yet; running sync first."
-      run e --config="$RELEASE_CONFIG" sync
+      bootstrap_electron_checkout "$TAG"
+    else
+      run git -C "$ROOT/src/electron" fetch origin "refs/tags/$TAG:refs/tags/$TAG"
+      run git -C "$ROOT/src/electron" checkout "$TAG"
     fi
-    run git -C "$ROOT/src/electron" fetch origin "refs/tags/$TAG:refs/tags/$TAG"
-    run git -C "$ROOT/src/electron" checkout "$TAG"
   fi
 
   if [[ "$DO_SYNC" -eq 1 ]]; then

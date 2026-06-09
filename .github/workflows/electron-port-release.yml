@@ -290,11 +290,29 @@ jobs:
           WORKSPACE_BASE: ${{ steps.inputs.outputs.workspace_base }}
         run: |
           set -euo pipefail
-          scripts/create-electron-major.sh "$TARGET" \
-            --base-dir "$WORKSPACE_BASE" \
-            --tag "$ELECTRON_TAG" \
-            --sync \
-            --force-config
+
+          attempt=1
+          max_attempts=2
+          while true; do
+            echo "Create/sync attempt $attempt of $max_attempts"
+            if scripts/create-electron-major.sh "$TARGET" \
+              --base-dir "$WORKSPACE_BASE" \
+              --tag "$ELECTRON_TAG" \
+              --sync \
+              --force-config; then
+              break
+            else
+              status=$?
+            fi
+
+            if [[ "$attempt" -ge "$max_attempts" ]]; then
+              exit "$status"
+            fi
+
+            attempt=$((attempt + 1))
+            echo "Create/sync failed; retrying after a short pause."
+            sleep 60
+          done
 
       - name: Apply port bundles
         shell: bash
