@@ -133,6 +133,41 @@ jobs:
           node-version: ${{ inputs.node_version }}
           package-manager-cache: false
 
+      - name: Prepare macOS disk space
+        if: ${{ runner.os == 'macOS' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "Disk before cleanup:"
+          df -h
+
+          selected_xcode="$(xcode-select -p 2>/dev/null || true)"
+          for app in /Applications/Xcode*.app; do
+            [[ -d "$app" ]] || continue
+            developer_dir="$app/Contents/Developer"
+            if [[ -n "$selected_xcode" && "$developer_dir" == "$selected_xcode" ]]; then
+              echo "Keeping selected Xcode: $app"
+              continue
+            fi
+            echo "Removing unused Xcode: $app"
+            sudo rm -rf "$app"
+          done
+
+          sudo rm -rf \
+            /Library/Developer/CoreSimulator/Caches/* \
+            /Library/Developer/CoreSimulator/Profiles/Runtimes/* \
+            "$HOME/Library/Developer/CoreSimulator/Caches"/* \
+            "$HOME/Library/Developer/Xcode/DerivedData"/* \
+            "$HOME/Library/Caches/Homebrew" \
+            "$HOME/Library/Caches/pip" \
+            "$HOME/.cache/yarn" \
+            "$HOME/.npm/_cacache" \
+            "$HOME/.git_cache" || true
+
+          echo "Disk after cleanup:"
+          df -h
+
       - name: Prepare tooling
         shell: bash
         run: |
@@ -302,6 +337,7 @@ jobs:
           TARGET: ${{ inputs.target }}
           ELECTRON_TAG: ${{ inputs.electron_tag }}
           WORKSPACE_BASE: ${{ steps.inputs.outputs.workspace_base }}
+          NO_GIT_CACHE: ${{ runner.os == 'macOS' && '1' || '0' }}
         run: |
           set -euo pipefail
 
@@ -309,11 +345,21 @@ jobs:
           max_attempts=2
           while true; do
             echo "Create/sync attempt $attempt of $max_attempts"
-            if scripts/create-electron-major.sh "$TARGET" \
-              --base-dir "$WORKSPACE_BASE" \
-              --tag "$ELECTRON_TAG" \
-              --sync \
-              --force-config; then
+            df -h
+
+            create_args=(
+              "$TARGET"
+              --base-dir "$WORKSPACE_BASE"
+              --tag "$ELECTRON_TAG"
+              --sync
+              --force-config
+            )
+            if [[ "$NO_GIT_CACHE" == "1" ]]; then
+              create_args+=(--no-git-cache)
+            fi
+
+            if scripts/create-electron-major.sh "${create_args[@]}"; then
+              df -h
               break
             else
               status=$?

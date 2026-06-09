@@ -328,12 +328,12 @@ if [[ "$DO_BACKUP" -eq 1 ]]; then
 fi
 
 if [[ "$SKIP_CHECKOUT" -eq 0 ]]; then
-  run git -C "$ELECTRON_DIR" fetch origin "refs/tags/$TAG:refs/tags/$TAG"
+  run git -C "$ELECTRON_DIR" fetch --no-tags origin "refs/tags/$TAG:refs/tags/$TAG"
   run git -C "$ELECTRON_DIR" checkout "$TAG"
 
   chromium_version="$(electron_chromium_version)"
   echo "Chromium revision from Electron DEPS: $chromium_version"
-  run git -C "$SRC_ROOT" fetch origin "refs/tags/$chromium_version:refs/tags/$chromium_version"
+  run git -C "$SRC_ROOT" fetch --no-tags origin "refs/tags/$chromium_version:refs/tags/$chromium_version"
   run git -C "$SRC_ROOT" switch --detach "$chromium_version"
 
   if [[ "$DO_SYNC" -eq 1 ]]; then

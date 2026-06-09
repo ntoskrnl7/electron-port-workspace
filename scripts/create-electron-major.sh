@@ -19,6 +19,9 @@ Options:
   --sync                  Run e --config=<major>-release sync after creating configs.
   --set-current           Write <major>-release to evm-current.txt.
   --force-config          Overwrite existing build-tools config files.
+  --no-git-cache          Do not set GIT_CACHE_PATH in build-tools configs.
+                          Useful for one-shot hosted CI runners with limited
+                          disk space.
   --use-ssh               Use git@github.com:electron/electron.git instead of https.
   -h, --help              Show this help.
 
@@ -41,6 +44,7 @@ DO_SYNC=0
 SET_CURRENT=0
 FORCE_CONFIG=0
 USE_SSH=0
+USE_GIT_CACHE=1
 
 if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
   usage
@@ -86,6 +90,10 @@ while [[ $# -gt 0 ]]; do
       FORCE_CONFIG=1
       shift
       ;;
+    --no-git-cache)
+      USE_GIT_CACHE=0
+      shift
+      ;;
     --use-ssh)
       USE_SSH=1
       shift
@@ -119,8 +127,10 @@ write_config() {
   local path=$1
   local import_name=$2
   local out_name=$3
+  local git_cache_path
   local tmp
   tmp=$(mktemp)
+  git_cache_path=${ELECTRON_WORKSPACE_GIT_CACHE_PATH:-"$HOME/.git_cache"}
 
   cat >"$tmp" <<EOF
 {
@@ -142,8 +152,7 @@ write_config() {
   },
   "preserveSDK": 5,
   "env": {
-    "CHROMIUM_BUILDTOOLS_PATH": "$ROOT/src/buildtools",
-    "GIT_CACHE_PATH": "$HOME/.git_cache"
+    "CHROMIUM_BUILDTOOLS_PATH": "$ROOT/src/buildtools"$(if [[ "$USE_GIT_CACHE" -eq 1 ]]; then printf ',\n    "GIT_CACHE_PATH": "%s"' "$git_cache_path"; fi)
   }
 }
 EOF
@@ -218,7 +227,7 @@ bootstrap_electron_checkout() {
   run mkdir -p "$ROOT/src"
   run git init "$electron_dir"
   run git -C "$electron_dir" remote add origin "$ELECTRON_ORIGIN"
-  run git -C "$electron_dir" fetch --filter=blob:none origin "refs/tags/$tag:refs/tags/$tag"
+  run git -C "$electron_dir" fetch --no-tags --filter=blob:none origin "refs/tags/$tag:refs/tags/$tag"
   run git -C "$electron_dir" checkout "$tag"
 }
 
@@ -238,7 +247,7 @@ main() {
     if [[ ! -d "$ROOT/src/electron/.git" ]]; then
       bootstrap_electron_checkout "$TAG"
     else
-      run git -C "$ROOT/src/electron" fetch origin "refs/tags/$TAG:refs/tags/$TAG"
+      run git -C "$ROOT/src/electron" fetch --no-tags origin "refs/tags/$TAG:refs/tags/$TAG"
       run git -C "$ROOT/src/electron" checkout "$TAG"
     fi
   fi
