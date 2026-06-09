@@ -350,7 +350,7 @@ jobs:
           TARGET: ${{ inputs.target }}
           ELECTRON_TAG: ${{ inputs.electron_tag }}
           WORKSPACE_BASE: ${{ steps.inputs.outputs.workspace_base }}
-          NO_GIT_CACHE: ${{ (runner.os == 'macOS' || runner.os == 'Windows') && '1' || '0' }}
+          NO_GIT_CACHE: ${{ (runner.os == 'macOS' || runner.os == 'Windows' || !contains(inputs.runner_labels, 'self-hosted')) && '1' || '0' }}
         run: |
           set -euo pipefail
 
