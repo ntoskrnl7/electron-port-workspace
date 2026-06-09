@@ -95,6 +95,16 @@ on:
         required: true
         default: "16"
         type: string
+      run_specs:
+        description: Run Electron specs after building the package.
+        required: true
+        default: true
+        type: boolean
+      spec_args:
+        description: Shell-style arguments passed to the Electron spec runner.
+        required: true
+        default: "--runners=main"
+        type: string
 
 permissions:
   contents: write
@@ -147,6 +157,8 @@ jobs:
           RELEASE_NAME_INPUT: ${{ inputs.release_name }}
           PACKAGE_MODE: ${{ inputs.package_mode }}
           PACKAGE_KIND: ${{ inputs.package_kind }}
+          RUN_SPECS: ${{ inputs.run_specs }}
+          SPEC_ARGS: ${{ inputs.spec_args }}
         run: |
           set -euo pipefail
 
@@ -278,6 +290,8 @@ jobs:
             echo "- Ports: $port_csv"
             echo "- Package mode: $PACKAGE_MODE"
             echo "- Package kind: $PACKAGE_KIND"
+            echo "- Run specs: $RUN_SPECS"
+            echo "- Spec args: $SPEC_ARGS"
             echo "- Workspace base: $workspace_base"
             echo "- Release tag: $release_tag"
           } >> "$GITHUB_STEP_SUMMARY"
@@ -397,6 +411,49 @@ jobs:
 
           printf '%s\n' "${tarballs[@]}" | tee "$artifact_dir/tarballs.txt"
           echo "artifact_dir=$artifact_dir" >> "$GITHUB_OUTPUT"
+
+      - name: Run Electron specs
+        if: ${{ inputs.run_specs }}
+        timeout-minutes: 120
+        shell: bash
+        env:
+          TARGET: ${{ inputs.target }}
+          WORKSPACE_BASE: ${{ steps.inputs.outputs.workspace_base }}
+          SPEC_ARGS: ${{ inputs.spec_args }}
+        run: |
+          set -euo pipefail
+
+          src_root="$WORKSPACE_BASE/$TARGET/src"
+          test_results_dir="$RUNNER_TEMP/electron-spec-results"
+          mkdir -p "$test_results_dir"
+
+          export ELECTRON_WORKSPACE_TARGET="$TARGET"
+          export ELECTRON_WORKSPACE_SRC_DIR="$src_root"
+          export ELECTRON_TEST_RESULTS_DIR="$test_results_dir"
+          export ELECTRON_OUT_DIR=Release
+
+          mapfile -t spec_args < <(
+            python3 - <<'PY'
+          import os
+          import shlex
+
+          for arg in shlex.split(os.environ.get("SPEC_ARGS", "")):
+              print(arg)
+          PY
+          )
+
+          scripts/run-electron-specs.sh \
+            --target "$TARGET" \
+            --src-root "$src_root" \
+            -- "${spec_args[@]}"
+
+      - name: Upload spec results
+        if: ${{ always() && inputs.run_specs }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: electron-port-${{ inputs.target }}-${{ steps.inputs.outputs.safe_tag }}-spec-results
+          path: ${{ runner.temp }}/electron-spec-results
+          if-no-files-found: ignore
 
       - name: Upload package artifact
         uses: actions/upload-artifact@v7
