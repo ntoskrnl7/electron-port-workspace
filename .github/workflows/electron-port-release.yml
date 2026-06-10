@@ -138,6 +138,31 @@ jobs:
           node-version: ${{ inputs.node_version }}
           package-manager-cache: false
 
+      - name: Prepare Linux disk space
+        if: ${{ runner.os == 'Linux' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "Disk before cleanup:"
+          df -h
+
+          sudo rm -rf \
+            /usr/share/dotnet \
+            /usr/local/lib/android \
+            /usr/local/share/boost \
+            /usr/local/share/powershell \
+            /opt/az \
+            /opt/ghc \
+            /opt/hostedtoolcache/CodeQL \
+            "$HOME/.cache" \
+            "$HOME/.npm/_cacache" || true
+
+          docker system prune -af || true
+
+          echo "Disk after cleanup:"
+          df -h
+
       - name: Prepare macOS disk space
         if: ${{ runner.os == 'macOS' }}
         shell: bash
