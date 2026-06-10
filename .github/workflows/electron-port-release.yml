@@ -487,7 +487,6 @@ jobs:
           fi
 
           package_args=(
-            --target "$TARGET"
             --package-kind "$PACKAGE_KIND"
             --package-name "$PACKAGE_NAME"
             --staging-dir "$artifact_dir"
@@ -504,17 +503,16 @@ jobs:
                 "${package_args[@]}"
             else
               export ELECTRON_PACKAGE_DEV_NUMBER="$DEV_NUMBER"
-              package_args+=(--dev-number "$DEV_NUMBER")
               pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/build-dev-electron-npm.ps1 \
                 -Target "$TARGET" \
                 "${package_args[@]}"
             fi
           else
             if [[ "$PACKAGE_MODE" == "release" ]]; then
-              scripts/build-release-electron-npm.sh "${package_args[@]}"
+              scripts/build-release-electron-npm.sh --target "$TARGET" "${package_args[@]}"
             else
-              package_args+=(--dev-number "$DEV_NUMBER")
-              scripts/build-dev-electron-npm.sh "${package_args[@]}"
+              export ELECTRON_PACKAGE_DEV_NUMBER="$DEV_NUMBER"
+              scripts/build-dev-electron-npm.sh --target "$TARGET" "${package_args[@]}"
             fi
           fi
 
