@@ -83,6 +83,7 @@ function Initialize-ElectronCheckoutAtTag {
   Invoke-Logged git -C $electronDir remote add origin $electronOrigin
   Invoke-Logged git -C $electronDir fetch --no-tags origin "refs/tags/$CheckoutTag`:refs/tags/$CheckoutTag"
   Invoke-Logged git -C $electronDir checkout $CheckoutTag
+  Invoke-Logged git -C $electronDir pack-refs --all
 }
 
 $root = Join-Path $BaseDir $Major
@@ -161,6 +162,7 @@ if ($Tag) {
   } else {
     Invoke-Logged git -C $electronDir fetch --no-tags origin "refs/tags/$Tag`:refs/tags/$Tag"
     Invoke-Logged git -C $electronDir checkout $Tag
+    Invoke-Logged git -C $electronDir pack-refs --all
   }
 }
 

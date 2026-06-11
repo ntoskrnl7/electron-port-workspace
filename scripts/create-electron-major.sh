@@ -229,6 +229,7 @@ bootstrap_electron_checkout() {
   run git -C "$electron_dir" remote add origin "$ELECTRON_ORIGIN"
   run git -C "$electron_dir" fetch --no-tags origin "refs/tags/$tag:refs/tags/$tag"
   run git -C "$electron_dir" checkout "$tag"
+  run git -C "$electron_dir" pack-refs --all
 }
 
 main() {
@@ -249,6 +250,7 @@ main() {
     else
       run git -C "$ROOT/src/electron" fetch --no-tags origin "refs/tags/$TAG:refs/tags/$TAG"
       run git -C "$ROOT/src/electron" checkout "$TAG"
+      run git -C "$ROOT/src/electron" pack-refs --all
     fi
   fi
 
