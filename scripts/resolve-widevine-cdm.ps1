@@ -408,6 +408,21 @@ function Get-WidevineUpdateDownload {
   return $null
 }
 
+function Expand-ZipToDirectory {
+  param(
+    [string]$ZipPath,
+    [string]$DestinationDir,
+    [string]$Name
+  )
+
+  New-Item -ItemType Directory -Force -Path $DestinationDir | Out-Null
+  try {
+    Expand-Archive -LiteralPath $ZipPath -DestinationPath $DestinationDir -Force
+  } catch {
+    throw "$Name failed: $($_.Exception.Message)"
+  }
+}
+
 function Expand-CrxToDirectory {
   param(
     [string]$CrxPath,
@@ -444,8 +459,7 @@ function Expand-CrxToDirectory {
   } finally {
     $stream.Dispose()
   }
-  New-Item -ItemType Directory -Force -Path $DestinationDir | Out-Null
-  Invoke-NativeCommand -FilePath 'tar' -Arguments @('-xf', $zipPath, '-C', $DestinationDir) -Name 'tar extract crx payload'
+  Expand-ZipToDirectory -ZipPath $zipPath -DestinationDir $DestinationDir -Name 'extract crx payload'
 }
 
 function Download-WidevineFromUpdate2 {
@@ -538,8 +552,7 @@ function Download-WidevineFromChromeForTesting {
   $zipPath = Join-Path $TempDir 'chrome-for-testing.zip'
   Invoke-WebRequest -Uri $download.url -OutFile $zipPath -UseBasicParsing -TimeoutSec 900
   $extractDir = Join-Path $TempDir 'chrome-for-testing'
-  New-Item -ItemType Directory -Force -Path $extractDir | Out-Null
-  Invoke-NativeCommand -FilePath 'tar' -Arguments @('-xf', $zipPath, '-C', $extractDir) -Name 'tar extract Chrome for Testing'
+  Expand-ZipToDirectory -ZipPath $zipPath -DestinationDir $extractDir -Name 'extract Chrome for Testing'
   return $extractDir
 }
 
