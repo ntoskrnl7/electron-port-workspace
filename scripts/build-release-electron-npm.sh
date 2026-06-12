@@ -113,7 +113,7 @@ fi
 if [[ -n "${ELECTRON_BUILD_JOBS:-}" ]]; then
   BUILD_ARGS+=(-j "$ELECTRON_BUILD_JOBS")
 fi
-if [[ -n "${ELECTRON_BUILD_REMOTE_JOBS:-}" ]]; then
+if [[ "${ELECTRON_BUILD_NO_REMOTE:-0}" != "1" && "${ELECTRON_BUILD_REMOTE_JOBS:-}" =~ ^[1-9][0-9]*$ ]]; then
   BUILD_ARGS+=(-remote_jobs "$ELECTRON_BUILD_REMOTE_JOBS")
 fi
 

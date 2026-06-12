@@ -126,7 +126,6 @@ jobs:
 
     env:
       ELECTRON_BUILD_NO_REMOTE: "1"
-      ELECTRON_BUILD_REMOTE_JOBS: "0"
 
     steps:
       - name: Checkout

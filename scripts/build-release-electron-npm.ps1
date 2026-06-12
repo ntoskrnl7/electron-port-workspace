@@ -104,7 +104,7 @@ try {
   } elseif ($env:ELECTRON_BUILD_JOBS) {
     $buildArgs += @('-j', $env:ELECTRON_BUILD_JOBS)
   }
-  if ($env:ELECTRON_BUILD_REMOTE_JOBS) {
+  if ($env:ELECTRON_BUILD_NO_REMOTE -ne '1' -and $env:ELECTRON_BUILD_REMOTE_JOBS -match '^[1-9][0-9]*$') {
     $buildArgs += @('-remote_jobs', $env:ELECTRON_BUILD_REMOTE_JOBS)
   }
 
