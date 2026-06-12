@@ -35,6 +35,30 @@ function Invoke-NativeCommand {
   }
 }
 
+function Invoke-NativeOutput {
+  param(
+    [Parameter(Mandatory = $true)]
+    [string]$FilePath,
+    [string[]]$Arguments = @(),
+    [string]$Name = $FilePath
+  )
+
+  $previousErrorActionPreference = $ErrorActionPreference
+  try {
+    $ErrorActionPreference = 'Continue'
+    $output = & $FilePath @Arguments
+    $exitCode = $LASTEXITCODE
+  } finally {
+    $ErrorActionPreference = $previousErrorActionPreference
+  }
+
+  if ($exitCode -ne 0) {
+    throw "$Name failed with exit code $exitCode"
+  }
+
+  return $output
+}
+
 function Test-Truthy {
   param([object]$Value)
   if ($Value -eq $true) { return $true }
@@ -96,9 +120,11 @@ Resolve-WidevineCdmForPackage
 
 Push-Location $srcDir
 try {
-  $electronBuildTools = if ($IsWindows -or $env:OS -eq 'Windows_NT') { 'e.cmd' } else { 'e' }
+  $isWindowsBuild = $IsWindows -or $env:OS -eq 'Windows_NT'
+  $electronBuildTools = if ($isWindowsBuild) { 'e.cmd' } else { 'e' }
+  $noRemoteBuild = $env:ELECTRON_BUILD_NO_REMOTE -eq '1'
   $buildArgs = @('--target', 'electron:electron_dist_zip')
-  if ($env:ELECTRON_BUILD_NO_REMOTE -eq '1') { $buildArgs += '--no-remote' }
+  if ($noRemoteBuild) { $buildArgs += '--no-remote' }
   if ($env:ELECTRON_BUILD_LOCAL_JOBS) {
     $buildArgs += @('-local_jobs', $env:ELECTRON_BUILD_LOCAL_JOBS)
   } elseif ($env:ELECTRON_BUILD_JOBS) {
@@ -108,7 +134,28 @@ try {
     $buildArgs += @('-remote_jobs', $env:ELECTRON_BUILD_REMOTE_JOBS)
   }
 
-  Invoke-NativeCommand -FilePath $electronBuildTools -Arguments (@('build') + $buildArgs) -Name 'e build'
+  if ($isWindowsBuild -and $noRemoteBuild) {
+    Invoke-NativeCommand -FilePath $electronBuildTools -Arguments @('build', '--gen', 'only', '--no-remote') -Name 'e build --gen only'
+
+    $outName = (Invoke-NativeOutput -FilePath $electronBuildTools -Arguments @('show', 'out') -Name 'e show out' |
+      Where-Object { $_ } |
+      Select-Object -Last 1).Trim()
+    if (-not $outName) {
+      throw 'e show out did not return a build output directory.'
+    }
+
+    $ninjaArgs = @('-C', (Join-Path 'out' $outName))
+    if ($env:ELECTRON_BUILD_LOCAL_JOBS) {
+      $ninjaArgs += @('-j', $env:ELECTRON_BUILD_LOCAL_JOBS)
+    } elseif ($env:ELECTRON_BUILD_JOBS) {
+      $ninjaArgs += @('-j', $env:ELECTRON_BUILD_JOBS)
+    }
+    $ninjaArgs += 'electron:electron_dist_zip'
+
+    Invoke-NativeCommand -FilePath $electronBuildTools -Arguments (@('depot-tools', 'ninja') + $ninjaArgs) -Name 'ninja electron_dist_zip'
+  } else {
+    Invoke-NativeCommand -FilePath $electronBuildTools -Arguments (@('build') + $buildArgs) -Name 'e build'
+  }
 
   Invoke-NativeCommand -FilePath 'npm.cmd' -Arguments @('--prefix', 'electron', 'run', 'create-typescript-definitions') -Name 'npm create-typescript-definitions'
 
