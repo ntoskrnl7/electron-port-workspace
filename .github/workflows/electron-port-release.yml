@@ -220,7 +220,7 @@ jobs:
         shell: bash
         env:
           RAW_PORTS: ${{ inputs.ports }}
-          TARGET: ${{ inputs.target }}
+          ELECTRON_TARGET: ${{ inputs.target }}
           ELECTRON_TAG: ${{ inputs.electron_tag }}
           WORKSPACE_BASE_INPUT: ${{ inputs.workspace_base }}
           RELEASE_TAG_INPUT: ${{ inputs.release_tag }}
@@ -233,8 +233,8 @@ jobs:
         run: |
           set -euo pipefail
 
-          if [[ ! "$TARGET" =~ ^[0-9]+$ ]]; then
-            echo "target must be an Electron major number for this workflow: $TARGET" >&2
+          if [[ ! "$ELECTRON_TARGET" =~ ^[0-9]+$ ]]; then
+            echo "target must be an Electron major number for this workflow: $ELECTRON_TARGET" >&2
             exit 1
           fi
 
@@ -250,12 +250,12 @@ jobs:
           safe_tag="$(printf '%s\n' "$ELECTRON_TAG" | sed -E 's/[^A-Za-z0-9._-]+/-/g; s/^-+//; s/-+$//')"
           release_tag="$RELEASE_TAG_INPUT"
           if [[ -z "$release_tag" ]]; then
-            release_tag="electron-$TARGET-$safe_tag"
+            release_tag="electron-$ELECTRON_TARGET-$safe_tag"
           fi
 
           release_name="$RELEASE_NAME_INPUT"
           if [[ -z "$release_name" ]]; then
-            release_name="Electron $ELECTRON_TAG ports ($TARGET)"
+            release_name="Electron $ELECTRON_TAG ports ($ELECTRON_TARGET)"
           fi
 
           python_bin=python3
@@ -269,7 +269,7 @@ jobs:
           import sys
           from pathlib import Path
 
-          target = os.environ["TARGET"]
+          target = os.environ["ELECTRON_TARGET"]
           raw_ports = os.environ["RAW_PORTS"].strip()
           ports_root = Path("ports")
 
@@ -364,7 +364,7 @@ jobs:
           {
             echo "### Electron port release inputs"
             echo
-            echo "- Target: $TARGET"
+            echo "- Target: $ELECTRON_TARGET"
             echo "- Electron tag: $ELECTRON_TAG"
             echo "- Ports: $port_csv"
             echo "- Package mode: $PACKAGE_MODE"
@@ -379,7 +379,7 @@ jobs:
       - name: Create and sync Electron workspace
         shell: bash
         env:
-          TARGET: ${{ inputs.target }}
+          ELECTRON_TARGET: ${{ inputs.target }}
           ELECTRON_TAG: ${{ inputs.electron_tag }}
           WORKSPACE_BASE: ${{ steps.inputs.outputs.workspace_base }}
           NO_GIT_CACHE: "1"
@@ -393,7 +393,7 @@ jobs:
             df -h
 
             create_args=(
-              "$TARGET"
+              "$ELECTRON_TARGET"
               --base-dir "$WORKSPACE_BASE"
               --tag "$ELECTRON_TAG"
               --sync
@@ -405,7 +405,7 @@ jobs:
 
             if [[ "$RUNNER_OS" == "Windows" ]]; then
               ps_args=(
-                "$TARGET"
+                "$ELECTRON_TARGET"
                 -BaseDir "$WORKSPACE_BASE"
                 -Tag "$ELECTRON_TAG"
                 -Sync
@@ -438,18 +438,18 @@ jobs:
       - name: Apply port bundles
         shell: bash
         env:
-          TARGET: ${{ inputs.target }}
+          ELECTRON_TARGET: ${{ inputs.target }}
           ELECTRON_TAG: ${{ inputs.electron_tag }}
           WORKSPACE_BASE: ${{ steps.inputs.outputs.workspace_base }}
           PORTS: ${{ steps.inputs.outputs.port_csv }}
           SAFE_TAG: ${{ steps.inputs.outputs.safe_tag }}
         run: |
           set -euo pipefail
-          src_root="$WORKSPACE_BASE/$TARGET/src"
-          branch_name="actions/$TARGET-$SAFE_TAG-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          src_root="$WORKSPACE_BASE/$ELECTRON_TARGET/src"
+          branch_name="actions/$ELECTRON_TARGET-$SAFE_TAG-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           if [[ "$RUNNER_OS" == "Windows" ]]; then
             pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/upgrade-electron-target.ps1 \
-              -Target "$TARGET" \
+              -Target "$ELECTRON_TARGET" \
               -Tag "$ELECTRON_TAG" \
               -Ports "$PORTS" \
               -BaseDir "$GITHUB_WORKSPACE" \
@@ -460,7 +460,7 @@ jobs:
               -NoBackup
           else
             scripts/upgrade-electron-target.sh \
-              --target "$TARGET" \
+              --target "$ELECTRON_TARGET" \
               --tag "$ELECTRON_TAG" \
               --ports "$PORTS" \
               --base-dir "$GITHUB_WORKSPACE" \
@@ -475,7 +475,7 @@ jobs:
         id: build
         shell: bash
         env:
-          TARGET: ${{ inputs.target }}
+          ELECTRON_TARGET: ${{ inputs.target }}
           WORKSPACE_BASE: ${{ steps.inputs.outputs.workspace_base }}
           PACKAGE_MODE: ${{ inputs.package_mode }}
           PACKAGE_KIND: ${{ inputs.package_kind }}
@@ -492,7 +492,7 @@ jobs:
             exit 1
           fi
 
-          src_root="$WORKSPACE_BASE/$TARGET/src"
+          src_root="$WORKSPACE_BASE/$ELECTRON_TARGET/src"
           artifact_dir="$RUNNER_TEMP/electron-port-artifacts"
           if [[ "$RUNNER_OS" == "Windows" ]] && command -v cygpath >/dev/null 2>&1; then
             src_root="$(cygpath -m "$src_root")"
@@ -501,14 +501,14 @@ jobs:
           rm -rf "$artifact_dir"
           mkdir -p "$artifact_dir"
 
-          export ELECTRON_WORKSPACE_TARGET="$TARGET"
+          export ELECTRON_WORKSPACE_TARGET="$ELECTRON_TARGET"
           export ELECTRON_WORKSPACE_SRC_DIR="$src_root"
           export ELECTRON_PACKAGE_STAGING_DIR="$artifact_dir"
 
           if [[ "$RUNNER_OS" == "Windows" ]]; then
-            e.cmd use "$TARGET-release"
+            e.cmd use "$ELECTRON_TARGET-release"
           else
-            e use "$TARGET-release"
+            e use "$ELECTRON_TARGET-release"
           fi
 
           package_args=(
@@ -524,20 +524,20 @@ jobs:
           if [[ "$RUNNER_OS" == "Windows" ]]; then
             if [[ "$PACKAGE_MODE" == "release" ]]; then
               pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/build-release-electron-npm.ps1 \
-                -Target "$TARGET" \
+                -Target "$ELECTRON_TARGET" \
                 "${package_args[@]}"
             else
               export ELECTRON_PACKAGE_DEV_NUMBER="$DEV_NUMBER"
               pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/build-dev-electron-npm.ps1 \
-                -Target "$TARGET" \
+                -Target "$ELECTRON_TARGET" \
                 "${package_args[@]}"
             fi
           else
             if [[ "$PACKAGE_MODE" == "release" ]]; then
-              scripts/build-release-electron-npm.sh --target "$TARGET" "${package_args[@]}"
+              scripts/build-release-electron-npm.sh --target "$ELECTRON_TARGET" "${package_args[@]}"
             else
               export ELECTRON_PACKAGE_DEV_NUMBER="$DEV_NUMBER"
-              scripts/build-dev-electron-npm.sh --target "$TARGET" "${package_args[@]}"
+              scripts/build-dev-electron-npm.sh --target "$ELECTRON_TARGET" "${package_args[@]}"
             fi
           fi
 
@@ -557,13 +557,13 @@ jobs:
         timeout-minutes: 120
         shell: bash
         env:
-          TARGET: ${{ inputs.target }}
+          ELECTRON_TARGET: ${{ inputs.target }}
           WORKSPACE_BASE: ${{ steps.inputs.outputs.workspace_base }}
           SPEC_ARGS: ${{ inputs.spec_args }}
         run: |
           set -euo pipefail
 
-          src_root="$WORKSPACE_BASE/$TARGET/src"
+          src_root="$WORKSPACE_BASE/$ELECTRON_TARGET/src"
           test_results_dir="$RUNNER_TEMP/electron-spec-results"
           if [[ "$RUNNER_OS" == "Windows" ]] && command -v cygpath >/dev/null 2>&1; then
             src_root="$(cygpath -m "$src_root")"
@@ -571,7 +571,7 @@ jobs:
           fi
           mkdir -p "$test_results_dir"
 
-          export ELECTRON_WORKSPACE_TARGET="$TARGET"
+          export ELECTRON_WORKSPACE_TARGET="$ELECTRON_TARGET"
           export ELECTRON_WORKSPACE_SRC_DIR="$src_root"
           export ELECTRON_TEST_RESULTS_DIR="$test_results_dir"
           export ELECTRON_OUT_DIR=Release
@@ -592,7 +592,7 @@ jobs:
           )
 
           scripts/run-electron-specs.sh \
-            --target "$TARGET" \
+            --target "$ELECTRON_TARGET" \
             --src-root "$src_root" \
             -- "${spec_args[@]}"
 
@@ -617,7 +617,7 @@ jobs:
         if: ${{ inputs.create_release }}
         shell: bash
         env:
-          TARGET: ${{ inputs.target }}
+          ELECTRON_TARGET: ${{ inputs.target }}
           ELECTRON_TAG: ${{ inputs.electron_tag }}
           PORTS: ${{ steps.inputs.outputs.port_csv }}
           PACKAGE_MODE: ${{ inputs.package_mode }}
@@ -632,7 +632,7 @@ jobs:
             echo "# $RELEASE_NAME"
             echo
             echo "- Electron tag: $ELECTRON_TAG"
-            echo "- Target: $TARGET"
+            echo "- Target: $ELECTRON_TARGET"
             echo "- Ports: $PORTS"
             echo "- Package mode: $PACKAGE_MODE"
             echo "- Package kind: $PACKAGE_KIND"
