@@ -50,6 +50,14 @@ Each feature can have separate bundles for targets such as `41`, `42`, and
 `main`. Target manifests record metadata and dependencies; apply scripts check
 that dependency state before applying a bundle.
 
+## API Usage
+
+For application-facing API documentation, see
+[docs/api/README.md](docs/api/README.md). For a shorter entry point, see
+[docs/api-usage.md](docs/api-usage.md). The `ports/` README files focus on port
+maintenance notes, target-specific apply order, conflict history, and validation
+details.
+
 ## Layout
 
 ```text
