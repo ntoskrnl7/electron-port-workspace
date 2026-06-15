@@ -1,0 +1,2834 @@
+From 342c46e63ffea2f7443a345787e113672741a1b8 Mon Sep 17 00:00:00 2001
+From: Jung-Kwang Lee <ntoskrnl7@gmail.com>
+Date: Thu, 11 Jun 2026 17:05:28 +0900
+Subject: feat: add web notification handler
+
+---
+ docs/README.md                                |   1 +
+ docs/api/session.md                           |  41 +
+ .../web-notification-action-event.md          |   8 +
+ .../api/structures/web-notification-action.md |   8 +
+ .../web-notification-close-event.md           |   4 +
+ .../web-notification-failed-event.md          |   3 +
+ .../web-notification-reply-event.md           |   6 +
+ docs/api/web-notification.md                  | 194 +++++
+ filenames.gni                                 |   2 +
+ package.json                                  |   2 +-
+ ...eb-notification-typescript-definitions.mjs | 239 ++++++
+ shell/browser/api/electron_api_session.cc     |  22 +
+ shell/browser/api/electron_api_session.h      |   9 +
+ .../api/electron_api_web_notification.cc      | 703 ++++++++++++++++++
+ .../api/electron_api_web_notification.h       | 190 +++++
+ shell/browser/electron_browser_client.cc      |   5 +-
+ shell/browser/electron_browser_context.cc     |   5 +-
+ shell/browser/electron_browser_context.h      |   2 +
+ .../platform_notification_service.cc          | 225 +++---
+ .../platform_notification_service.h           |  42 +-
+ spec/api-service-worker-main-spec.ts          |   9 +-
+ spec/api-session-spec.ts                      | 654 ++++++++++++++++
+ spec/ts-smoke/electron/main.ts                |  74 ++
+ 23 files changed, 2351 insertions(+), 97 deletions(-)
+ create mode 100644 docs/api/structures/web-notification-action-event.md
+ create mode 100644 docs/api/structures/web-notification-action.md
+ create mode 100644 docs/api/structures/web-notification-close-event.md
+ create mode 100644 docs/api/structures/web-notification-failed-event.md
+ create mode 100644 docs/api/structures/web-notification-reply-event.md
+ create mode 100644 docs/api/web-notification.md
+ create mode 100644 script/fix-web-notification-typescript-definitions.mjs
+ create mode 100644 shell/browser/api/electron_api_web_notification.cc
+ create mode 100644 shell/browser/api/electron_api_web_notification.h
+
+diff --git a/docs/README.md b/docs/README.md
+index a1a74684c0..1d3ab88c32 100644
+--- a/docs/README.md
++++ b/docs/README.md
+@@ -141,6 +141,7 @@ These individual tutorials expand on topics discussed in the guide above.
+ * [View](api/view.md)
+ * [webContents](api/web-contents.md)
+ * [webFrameMain](api/web-frame-main.md)
++* [WebNotification](api/web-notification.md)
+ * [WebContentsView](api/web-contents-view.md)
+
+ ### Modules for the Renderer Process (Web Page):
+diff --git a/docs/api/session.md b/docs/api/session.md
+index 79d99b0337..aef2a69f0f 100644
+--- a/docs/api/session.md
++++ b/docs/api/session.md
+@@ -1279,6 +1279,47 @@ app.whenReady().then(() => {
+ })
+ ```
+
++#### `ses.setWebNotificationHandler(handler)` _Experimental_
++
++* `handler` Function | null
++  * `notification` [WebNotification](web-notification.md)
++
++Sets the handler used to observe and control Web Notifications created in this
++session. Passing `null` removes the handler.
++
++The handler receives notifications created by page or frame code with
++`new Notification()` and persistent notifications created by service workers
++with `ServiceWorkerRegistration.showNotification()`.
++
++If no handler is set, Electron displays notifications with the default native
++notification behavior. If a handler is set and the notification should not be
++shown by Electron automatically, call
++[`notification.suppress()`](web-notification.md#notificationsuppress) before the
++handler returns. The notification can still be controlled later with methods
++such as [`notification.click()`](web-notification.md#notificationclick),
++[`notification.clickAction(action)`](web-notification.md#notificationclickactionaction),
++[`notification.reply(text[, action])`](web-notification.md#notificationreplytext-action),
++and [`notification.close([options])`](web-notification.md#notificationcloseoptions).
++
++```js
++const { session } = require('electron')
++
++session.defaultSession.setWebNotificationHandler((notification) => {
++  notification.suppress()
++
++  notification.on('action', (event) => {
++    console.log('action clicked:', event.action)
++  })
++
++  sendToRemoteAgent({
++    id: notification.id,
++    title: notification.title,
++    body: notification.body,
++    actions: notification.actions
++  })
++})
++```
++
+ #### `ses.clearHostResolverCache()`
+
+ Returns `Promise<void>` - Resolves when the operation is complete.
+diff --git a/docs/api/structures/web-notification-action-event.md b/docs/api/structures/web-notification-action-event.md
+new file mode 100644
+index 0000000000..4b4dc2b89f
+--- /dev/null
++++ b/docs/api/structures/web-notification-action-event.md
+@@ -0,0 +1,8 @@
++# WebNotificationActionEvent Object
++
++* `index` Integer - The zero-based action index from the Web Notification.
++* `type` string - Either `button` or `text`.
++* `action` string - The developer-provided action string.
++* `title` string - The action title.
++* `icon` string - The action icon URL, or an empty string.
++* `placeholder` string (optional) - Placeholder text for text actions.
+diff --git a/docs/api/structures/web-notification-action.md b/docs/api/structures/web-notification-action.md
+new file mode 100644
+index 0000000000..73337209c5
+--- /dev/null
++++ b/docs/api/structures/web-notification-action.md
+@@ -0,0 +1,8 @@
++# WebNotificationAction Object
++
++* `index` Integer - The zero-based action index from the Web Notification.
++* `type` string - Either `button` or `text`.
++* `action` string - The developer-provided action string.
++* `title` string - The action title.
++* `icon` string - The action icon URL, or an empty string.
++* `placeholder` string (optional) - Placeholder text for text actions.
+diff --git a/docs/api/structures/web-notification-close-event.md b/docs/api/structures/web-notification-close-event.md
+new file mode 100644
+index 0000000000..e2ea2d31b2
+--- /dev/null
++++ b/docs/api/structures/web-notification-close-event.md
+@@ -0,0 +1,4 @@
++# WebNotificationCloseEvent Object
++
++* `byUser` boolean - Whether the notification was closed by a user action.
++* `reason` string - The platform close reason when available.
+diff --git a/docs/api/structures/web-notification-failed-event.md b/docs/api/structures/web-notification-failed-event.md
+new file mode 100644
+index 0000000000..64b0455e8f
+--- /dev/null
++++ b/docs/api/structures/web-notification-failed-event.md
+@@ -0,0 +1,3 @@
++# WebNotificationFailedEvent Object
++
++* `error` string - The error encountered while showing the native notification.
+diff --git a/docs/api/structures/web-notification-reply-event.md b/docs/api/structures/web-notification-reply-event.md
+new file mode 100644
+index 0000000000..2de47a092c
+--- /dev/null
++++ b/docs/api/structures/web-notification-reply-event.md
+@@ -0,0 +1,6 @@
++# WebNotificationReplyEvent Object
++
++* `text` string - The reply text.
++* `index` Integer - The zero-based text action index, or `-1` if unavailable.
++* `action` [WebNotificationAction](web-notification-action.md) (optional) - The
++  text action associated with this reply.
+diff --git a/docs/api/web-notification.md b/docs/api/web-notification.md
+new file mode 100644
+index 0000000000..5e704cde9a
+--- /dev/null
++++ b/docs/api/web-notification.md
+@@ -0,0 +1,194 @@
++## Class: WebNotification
++
++> Represents a Web Notification created by a frame or service worker.
++
++Process: [Main](../glossary.md#main-process)<br />
++_This class is not exported from the `'electron'` module. It is only available
++as the argument passed to
++[`session.setWebNotificationHandler(handler)`](session.md#sessetwebnotificationhandlerhandler)._
++
++### Instance Events
++
++#### Event: 'show'
++
++Emitted when Electron's native notification presenter displays the notification.
++
++#### Event: 'click'
++
++Emitted when the notification body is clicked.
++
++For persistent service worker notifications, this dispatches the web
++`notificationclick` event to the service worker.
++
++#### Event: 'action'
++
++Returns:
++
++* `details` [WebNotificationActionEvent](structures/web-notification-action-event.md)
++
++Emitted when an action button is clicked.
++
++For persistent service worker notifications, this dispatches the web
++`notificationclick` event to the service worker with the matching action.
++
++#### Event: 'reply'
++
++Returns:
++
++* `details` [WebNotificationReplyEvent](structures/web-notification-reply-event.md)
++
++Emitted when the user submits text for a text action.
++
++For persistent service worker notifications, this dispatches the web
++`notificationclick` event to the service worker with the reply text.
++
++#### Event: 'close'
++
++Returns:
++
++* `details` [WebNotificationCloseEvent](structures/web-notification-close-event.md)
++
++Emitted when the notification is closed.
++
++#### Event: 'failed'
++
++Returns:
++
++* `details` [WebNotificationFailedEvent](structures/web-notification-failed-event.md)
++
++Emitted when Electron fails to show the native notification.
++
++### Instance Methods
++
++#### `notification.show()`
++
++Shows the notification using Electron's native notification presenter.
++
++#### `notification.suppress()`
++
++Prevents Electron from automatically showing the notification after the
++`setWebNotificationHandler` callback returns.
++
++The notification remains valid and can still be controlled later with
++[`notification.click()`](#notificationclick),
++[`notification.clickAction(action)`](#notificationclickactionaction),
++[`notification.reply(text[, action])`](#notificationreplytext-action), and
++[`notification.close([options])`](#notificationcloseoptions).
++
++#### `notification.close([options])`
++
++* `options` Object (optional)
++  * `byUser` boolean (optional) - Whether the close should be treated as a
++    user-initiated close. Defaults to `true`.
++
++Closes the notification. For persistent service worker notifications, this
++dispatches `notificationclose` when `byUser` is `true`.
++
++#### `notification.click()`
++
++Dispatches a notification body click.
++
++#### `notification.clickAction(action)`
++
++* `action` Integer | string - The zero-based action index or the web
++  notification action string.
++
++Dispatches an action button click.
++
++#### `notification.reply(text[, action])`
++
++* `text` string
++* `action` Integer | string (optional) - The zero-based action index or the web
++  notification action string. If omitted, Electron uses the first text action.
++
++Dispatches a text reply.
++
++#### `notification.getServiceWorker()`
++
++Returns `Promise<ServiceWorkerMain>` - Resolves with the service worker for this
++persistent notification's scope.
++
++This method is only available on persistent service worker notifications. In
++TypeScript, check [`notification.persistent`](#notificationpersistent-readonly)
++before calling it.
++
++#### `notification.isDestroyed()`
++
++Returns `boolean` - Whether the notification object has been destroyed.
++
++### Instance Properties
++
++#### `notification.id` _Readonly_
++
++A `string` identifying this notification.
++
++#### `notification.persistent` _Readonly_
++
++A `boolean` indicating whether the notification was created by
++`ServiceWorkerRegistration.showNotification()`.
++
++In TypeScript this property discriminates persistent service worker
++notifications from non-persistent notifications. Non-persistent notifications
++can be created by a frame, dedicated worker, or shared worker with
++`new Notification()`. Persistent notifications are created by service workers
++with `ServiceWorkerRegistration.showNotification()`.
++
++#### `notification.origin` _Readonly_
++
++A `string` containing the notification origin.
++
++#### `notification.title` _Readonly_
++
++A `string` containing the notification title.
++
++#### `notification.body` _Readonly_
++
++A `string` containing the notification body.
++
++#### `notification.tag` _Readonly_
++
++A `string` containing the notification tag.
++
++#### `notification.actions` _Readonly_
++
++A [`WebNotificationAction[]`](structures/web-notification-action.md) containing
++the web notification actions.
++
++#### `notification.frame` _Readonly_
++
++A `WebFrameMain | undefined` identifying the frame associated with a
++non-persistent notification.
++
++This property is set for frame notifications and dedicated worker
++notifications. It is `undefined` for shared worker notifications and persistent
++service worker notifications.
++
++#### `notification.webContents` _Readonly_
++
++A `WebContents | undefined` identifying the `WebContents` associated with a
++non-persistent notification.
++
++This property is set for frame notifications and dedicated worker
++notifications. It is `undefined` for shared worker notifications and persistent
++service worker notifications.
++
++#### `notification.documentUrl` _Readonly_
++
++A `string | undefined` containing the document URL for a frame notification.
++
++This property is `undefined` for worker notifications and persistent service
++worker notifications.
++
++#### `notification.serviceWorkerScope` _Readonly_
++
++A `string` containing the service worker scope for a persistent notification.
++
++This property is `undefined` for non-persistent notifications.
++
++#### `notification.serviceWorker` _Readonly_
++
++A `ServiceWorkerMain | undefined` for the running service worker associated with
++this persistent notification. This property is `undefined` when the service
++worker is not currently running. Use
++[`notification.getServiceWorker()`](#notificationgetserviceworker) to start and
++retrieve it.
+diff --git a/filenames.gni b/filenames.gni
+index 6b12f500b9..e65d40a21e 100644
+--- a/filenames.gni
++++ b/filenames.gni
+@@ -342,6 +342,8 @@ filenames = {
+     "shell/browser/api/electron_api_web_socket.h",
+     "shell/browser/api/electron_api_web_socket_main.cc",
+     "shell/browser/api/electron_api_web_socket_main.h",
++    "shell/browser/api/electron_api_web_notification.cc",
++    "shell/browser/api/electron_api_web_notification.h",
+     "shell/browser/api/electron_api_web_view_manager.cc",
+     "shell/browser/api/electron_api_worker_util.cc",
+     "shell/browser/api/electron_api_worker_util.h",
+diff --git a/package.json b/package.json
+index 1e55bff93e..a338926f45 100644
+--- a/package.json
++++ b/package.json
+@@ -74,7 +74,7 @@
+     "lint:api-history": "lint-roller-markdown-api-history --root \"./docs/api/\" --schema \"./docs/api-history.schema.json\" --breaking-changes-file \"./docs/breaking-changes.md\" --check-placement --check-strings \"*.md\"",
+     "lint:chromium-roller": "node ./script/lint-roller-chromium-changes.mjs",
+     "create-api-json": "node script/create-api-json.mjs",
+-    "create-typescript-definitions": "npm run create-api-json && electron-typescript-definitions --api=electron-api.json && node script/fix-preload-typescript-definitions.mjs && node spec/ts-smoke/runner.js",
++    "create-typescript-definitions": "npm run create-api-json && electron-typescript-definitions --api=electron-api.json && node script/fix-preload-typescript-definitions.mjs && node script/fix-web-notification-typescript-definitions.mjs && node spec/ts-smoke/runner.js",
+     "gn-typescript-definitions": "npm run create-typescript-definitions && node script/cp.mjs electron.d.ts",
+     "pre-flight": "pre-flight",
+     "gn-check": "node ./script/gn-check.js",
+diff --git a/script/fix-web-notification-typescript-definitions.mjs b/script/fix-web-notification-typescript-definitions.mjs
+new file mode 100644
+index 0000000000..19cba7a5c2
+--- /dev/null
++++ b/script/fix-web-notification-typescript-definitions.mjs
+@@ -0,0 +1,239 @@
++import fs from 'node:fs';
++import path from 'node:path';
++
++const definitionsPath = path.resolve('electron.d.ts');
++let definitions = fs.readFileSync(definitionsPath, 'utf8');
++
++const replacement = `  type WebNotification = WebFrameNotification | WebWorkerNotification | WebServiceWorkerNotification;
++
++  interface WebNotificationBase extends NodeJS.EventEmitter {
++
++    // Docs: https://electronjs.org/docs/api/web-notification
++
++    /**
++     * Emitted when an action button is clicked.
++     *
++     * For persistent service worker notifications, this dispatches the web
++     * \`notificationclick\` event to the service worker with the matching action.
++     */
++    on(event: 'action', listener: (details: WebNotificationActionEvent) => void): this;
++    off(event: 'action', listener: (details: WebNotificationActionEvent) => void): this;
++    once(event: 'action', listener: (details: WebNotificationActionEvent) => void): this;
++    addListener(event: 'action', listener: (details: WebNotificationActionEvent) => void): this;
++    removeListener(event: 'action', listener: (details: WebNotificationActionEvent) => void): this;
++    /**
++     * Emitted when the notification body is clicked.
++     *
++     * For persistent service worker notifications, this dispatches the web
++     * \`notificationclick\` event to the service worker.
++     */
++    on(event: 'click', listener: () => void): this;
++    off(event: 'click', listener: () => void): this;
++    once(event: 'click', listener: () => void): this;
++    addListener(event: 'click', listener: () => void): this;
++    removeListener(event: 'click', listener: () => void): this;
++    /**
++     * Emitted when the notification is closed.
++     */
++    on(event: 'close', listener: (details: WebNotificationCloseEvent) => void): this;
++    off(event: 'close', listener: (details: WebNotificationCloseEvent) => void): this;
++    once(event: 'close', listener: (details: WebNotificationCloseEvent) => void): this;
++    addListener(event: 'close', listener: (details: WebNotificationCloseEvent) => void): this;
++    removeListener(event: 'close', listener: (details: WebNotificationCloseEvent) => void): this;
++    /**
++     * Emitted when Electron fails to show the native notification.
++     */
++    on(event: 'failed', listener: (details: WebNotificationFailedEvent) => void): this;
++    off(event: 'failed', listener: (details: WebNotificationFailedEvent) => void): this;
++    once(event: 'failed', listener: (details: WebNotificationFailedEvent) => void): this;
++    addListener(event: 'failed', listener: (details: WebNotificationFailedEvent) => void): this;
++    removeListener(event: 'failed', listener: (details: WebNotificationFailedEvent) => void): this;
++    /**
++     * Emitted when the user submits text for a text action.
++     *
++     * For persistent service worker notifications, this dispatches the web
++     * \`notificationclick\` event to the service worker with the reply text.
++     */
++    on(event: 'reply', listener: (details: WebNotificationReplyEvent) => void): this;
++    off(event: 'reply', listener: (details: WebNotificationReplyEvent) => void): this;
++    once(event: 'reply', listener: (details: WebNotificationReplyEvent) => void): this;
++    addListener(event: 'reply', listener: (details: WebNotificationReplyEvent) => void): this;
++    removeListener(event: 'reply', listener: (details: WebNotificationReplyEvent) => void): this;
++    /**
++     * Emitted when Electron's native notification presenter displays the notification.
++     */
++    on(event: 'show', listener: () => void): this;
++    off(event: 'show', listener: () => void): this;
++    once(event: 'show', listener: () => void): this;
++    addListener(event: 'show', listener: () => void): this;
++    removeListener(event: 'show', listener: () => void): this;
++    /**
++     * Dispatches a notification body click.
++     */
++    click(): void;
++    /**
++     * Dispatches an action button click.
++     */
++    clickAction(action: (number) | (string)): void;
++    /**
++     * Closes the notification. For persistent service worker notifications, this
++     * dispatches \`notificationclose\` when \`byUser\` is \`true\`.
++     */
++    close(options?: WebNotificationCloseOptions): void;
++    /**
++     * Whether the notification object has been destroyed.
++     */
++    isDestroyed(): boolean;
++    /**
++     * Dispatches a text reply.
++     */
++    reply(text: string, action?: (number) | (string)): void;
++    /**
++     * Shows the notification using Electron's native notification presenter.
++     */
++    show(): void;
++    /**
++     * Prevents Electron from automatically showing the notification after the
++     * \`setWebNotificationHandler\` callback returns.
++     *
++     * The notification remains valid and can still be controlled later with
++     * \`notification.click()\`, \`notification.clickAction(action)\`,
++     * \`notification.reply(text[, action])\`, and \`notification.close([options])\`.
++     */
++    suppress(): void;
++    /**
++     * A \`WebNotificationAction[]\` containing the web notification actions.
++     *
++     */
++    readonly actions: WebNotificationAction[];
++    /**
++     * A \`string\` containing the notification body.
++     *
++     */
++    readonly body: string;
++    /**
++     * A \`string\` identifying this notification.
++     *
++     */
++    readonly id: string;
++    /**
++     * A \`string\` containing the notification origin.
++     *
++     */
++    readonly origin: string;
++    /**
++     * A \`string\` containing the notification tag.
++     *
++     */
++    readonly tag: string;
++    /**
++     * A \`string\` containing the notification title.
++     *
++     */
++    readonly title: string;
++  }
++
++  interface WebFrameNotification extends WebNotificationBase {
++    /**
++     * The notification was created by a frame with \`new Notification()\`.
++     */
++    readonly persistent: false;
++    /**
++     * The document URL for the frame notification.
++     */
++    readonly documentUrl: string;
++    /**
++     * The frame that created the notification.
++     */
++    readonly frame: WebFrameMain;
++    /**
++     * Persistent service worker notifications only.
++     */
++    readonly serviceWorker: undefined;
++    /**
++     * Persistent service worker notifications only.
++     */
++    readonly serviceWorkerScope: undefined;
++    /**
++     * The \`WebContents\` that owns the creating frame.
++     */
++    readonly webContents: WebContents;
++  }
++
++  interface WebWorkerNotification extends WebNotificationBase {
++    /**
++     * The notification was created by a dedicated worker or shared worker with
++     * \`new Notification()\`.
++     */
++    readonly persistent: false;
++    /**
++     * Frame document notifications only.
++     */
++    readonly documentUrl: undefined;
++    /**
++     * The ancestor frame for dedicated worker notifications. This is
++     * \`undefined\` for shared worker notifications.
++     */
++    readonly frame: (WebFrameMain) | (undefined);
++    /**
++     * Persistent service worker notifications only.
++     */
++    readonly serviceWorker: undefined;
++    /**
++     * Persistent service worker notifications only.
++     */
++    readonly serviceWorkerScope: undefined;
++    /**
++     * The \`WebContents\` that owns the ancestor frame for dedicated worker
++     * notifications. This is \`undefined\` for shared worker notifications.
++     */
++    readonly webContents: (WebContents) | (undefined);
++  }
++
++  interface WebServiceWorkerNotification extends WebNotificationBase {
++    /**
++     * The notification was created by
++     * \`ServiceWorkerRegistration.showNotification()\`.
++     */
++    readonly persistent: true;
++    /**
++     * Non-persistent notifications only.
++     */
++    readonly documentUrl: undefined;
++    /**
++     * Non-persistent notifications only.
++     */
++    readonly frame: undefined;
++    /**
++     * Resolves with the service worker for this persistent notification's scope.
++     */
++    getServiceWorker(): Promise<Electron.ServiceWorkerMain>;
++    /**
++     * The running service worker associated with this persistent notification, when
++     * it is currently running.
++     */
++    readonly serviceWorker: (ServiceWorkerMain) | (undefined);
++    /**
++     * The service worker scope for this persistent notification.
++     */
++    readonly serviceWorkerScope: string;
++    /**
++     * Non-persistent notifications only.
++     */
++    readonly webContents: undefined;
++  }
++`;
++
++if (!definitions.includes('type WebNotification = WebFrameNotification | WebWorkerNotification | WebServiceWorkerNotification;')) {
++  const startMarker = '  class WebNotification extends NodeEventEmitter {';
++  const endMarker = '\n  interface WebNotificationAction {';
++  const start = definitions.indexOf(startMarker);
++  const end = definitions.indexOf(endMarker, start);
++
++  if (start === -1 || end === -1) {
++    throw new Error('Unable to find generated WebNotification class in electron.d.ts');
++  }
++
++  definitions = definitions.slice(0, start) + replacement + definitions.slice(end);
++  fs.writeFileSync(definitionsPath, definitions);
++}
+diff --git a/shell/browser/api/electron_api_session.cc b/shell/browser/api/electron_api_session.cc
+index d018d72a51..c7f2f1c4b7 100644
+--- a/shell/browser/api/electron_api_session.cc
++++ b/shell/browser/api/electron_api_session.cc
+@@ -971,6 +971,26 @@ void Session::SetBluetoothPairingHandler(v8::Local<v8::Value> val,
+   permission_manager->SetBluetoothPairingHandler(handler);
+ }
+
++void Session::SetWebNotificationHandler(gin::Arguments* args) {
++  v8::Local<v8::Value> value;
++  WebNotificationHandler handler;
++  if (!args->GetNext(&value) ||
++      !(value->IsNull() ||
++        gin::ConvertFromV8(args->isolate(), value, &handler))) {
++    args->ThrowTypeError("Must pass null or function");
++    return;
++  }
++
++  web_notification_handler_ = std::move(handler);
++}
++
++bool Session::HandleWebNotification(v8::Local<v8::Value> notification) {
++  if (web_notification_handler_.is_null())
++    return false;
++  web_notification_handler_.Run(notification);
++  return true;
++}
++
+ v8::Local<v8::Promise> Session::ClearHostResolverCache(gin::Arguments* args) {
+   v8::Isolate* isolate = args->isolate();
+   gin_helper::Promise<void> promise(isolate);
+@@ -1882,6 +1902,8 @@ void Session::FillObjectTemplate(v8::Isolate* isolate,
+                  &Session::SetUSBProtectedClassesHandler)
+       .SetMethod("setBluetoothPairingHandler",
+                  &Session::SetBluetoothPairingHandler)
++      .SetMethod("setWebNotificationHandler",
++                 &Session::SetWebNotificationHandler)
+       .SetMethod("clearHostResolverCache", &Session::ClearHostResolverCache)
+       .SetMethod("clearAuthCache", &Session::ClearAuthCache)
+       .SetMethod("allowNTLMCredentialsForDomains",
+diff --git a/shell/browser/api/electron_api_session.h b/shell/browser/api/electron_api_session.h
+index 2b9d2f2003..3143d6917e 100644
+--- a/shell/browser/api/electron_api_session.h
++++ b/shell/browser/api/electron_api_session.h
+@@ -9,6 +9,7 @@
+ #include <string>
+ #include <vector>
+
++#include "base/functional/callback.h"
+ #include "base/memory/raw_ptr.h"
+ #include "base/values.h"
+ #include "content/public/browser/download_manager.h"
+@@ -48,6 +49,7 @@ class ProxyConfig;
+ namespace v8 {
+ template <typename T>
+ class TracedReference;
++class Value;
+ }
+
+ namespace electron {
+@@ -146,6 +148,8 @@ class Session final : public gin::Wrappable<Session>,
+                                      gin::Arguments* args);
+   void SetBluetoothPairingHandler(v8::Local<v8::Value> val,
+                                   gin::Arguments* args);
++  void SetWebNotificationHandler(gin::Arguments* args);
++  bool HandleWebNotification(v8::Local<v8::Value> notification);
+   v8::Local<v8::Promise> ClearHostResolverCache(gin::Arguments* args);
+   v8::Local<v8::Promise> ClearAuthCache();
+   void AllowNTLMCredentialsForDomains(const std::string& domains);
+@@ -219,6 +223,9 @@ class Session final : public gin::Wrappable<Session>,
+   void SetDisplayMediaRequestHandler(v8::Isolate* isolate,
+                                      v8::Local<v8::Value> val);
+
++  using WebNotificationHandler =
++      base::RepeatingCallback<void(v8::Local<v8::Value>)>;
++
+   // Cached gin_helper::Wrappable objects.
+   v8::TracedReference<v8::Value> cookies_;
+   cppgc::Member<api::Extensions> extensions_;
+@@ -229,6 +236,8 @@ class Session final : public gin::Wrappable<Session>,
+   cppgc::Member<api::WebSocket> web_socket_;
+   cppgc::Member<api::WebRequest> web_request_;
+
++  WebNotificationHandler web_notification_handler_;
++
+   raw_ptr<v8::Isolate> isolate_;
+
+   // The client id to enable the network throttler.
+diff --git a/shell/browser/api/electron_api_web_notification.cc b/shell/browser/api/electron_api_web_notification.cc
+new file mode 100644
+index 0000000000..d6398ce52e
+--- /dev/null
++++ b/shell/browser/api/electron_api_web_notification.cc
+@@ -0,0 +1,703 @@
++// Copyright (c) 2026 The Electron Authors
++// Use of this source code is governed by the MIT license that can be
++// found in the LICENSE file.
++
++#include "shell/browser/api/electron_api_web_notification.h"
++
++#include <utility>
++
++#include "base/strings/utf_string_conversions.h"
++#include "content/public/browser/notification_event_dispatcher.h"
++#include "content/public/browser/render_frame_host.h"
++#include "content/public/browser/service_worker_context.h"
++#include "content/public/browser/storage_partition.h"
++#include "content/public/browser/web_contents.h"
++#include "gin/converter.h"
++#include "gin/data_object_builder.h"
++#include "gin/dictionary.h"
++#include "gin/object_template_builder.h"
++#include "shell/browser/api/electron_api_service_worker_main.h"
++#include "shell/browser/api/electron_api_web_contents.h"
++#include "shell/browser/api/electron_api_web_frame_main.h"
++#include "shell/browser/electron_browser_client.h"
++#include "shell/browser/electron_browser_context.h"
++#include "shell/browser/javascript_environment.h"
++#include "shell/browser/notifications/notification.h"
++#include "shell/browser/notifications/notification_presenter.h"
++#include "shell/browser/notifications/platform_notification_service.h"
++#include "shell/common/gin_converters/gurl_converter.h"
++#include "shell/common/gin_helper/dictionary.h"
++#include "shell/common/gin_helper/handle.h"
++#include "shell/common/gin_helper/object_template_builder.h"
++#include "shell/common/gin_helper/promise.h"
++#include "third_party/blink/public/common/storage_key/storage_key.h"
++#include "third_party/blink/public/mojom/notifications/notification.mojom.h"
++#include "url/origin.h"
++
++namespace electron::api {
++
++namespace {
++
++std::string NotificationActionTypeToString(
++    blink::mojom::NotificationActionType type) {
++  switch (type) {
++    case blink::mojom::NotificationActionType::BUTTON:
++      return "button";
++    case blink::mojom::NotificationActionType::TEXT:
++      return "text";
++  }
++}
++
++void DispatchComplete(content::PersistentNotificationStatus status) {}
++
++v8::Local<v8::Value> ToUndefined(v8::Isolate* isolate) {
++  return v8::Undefined(isolate);
++}
++
++void SetConstructorPrototype(
++    v8::Isolate* isolate,
++    v8::Local<v8::Function> constructor,
++    const gin_helper::Handle<WebNotification>& handle) {
++  if (handle.IsEmpty() || !handle.ToV8()->IsObject())
++    return;
++
++  v8::Local<v8::Context> context = isolate->GetCurrentContext();
++  v8::Local<v8::Value> prototype;
++  if (!constructor->Get(context, gin::StringToV8(isolate, "prototype"))
++           .ToLocal(&prototype) ||
++      !prototype->IsObject()) {
++    return;
++  }
++
++  [[maybe_unused]] bool ok = handle.ToV8()
++                                 .As<v8::Object>()
++                                 ->SetPrototype(context,
++                                                prototype.As<v8::Object>())
++                                 .FromMaybe(false);
++}
++
++}  // namespace
++
++class WebNotification::Delegate final : public electron::NotificationDelegate {
++ public:
++  explicit Delegate(WebNotification* owner) : owner_(owner) {}
++
++  Delegate(const Delegate&) = delete;
++  Delegate& operator=(const Delegate&) = delete;
++
++  void NotificationDestroyed() override {
++    if (owner_)
++      owner_->OnNativeDestroyed();
++    delete this;
++  }
++
++  void NotificationFailed(const std::string& error) override {
++    if (owner_)
++      owner_->OnNativeFailed(error);
++  }
++
++  void NotificationReplied(const std::string& reply) override {
++    if (owner_)
++      owner_->OnNativeReplied(reply);
++  }
++
++  void NotificationAction(int action_index, int selection_index) override {
++    if (owner_)
++      owner_->OnNativeAction(action_index, selection_index);
++  }
++
++  void NotificationClick() override {
++    if (owner_)
++      owner_->OnNativeClicked();
++  }
++
++  void NotificationClosed(const std::string& reason) override {
++    if (owner_)
++      owner_->OnNativeClosed(reason);
++  }
++
++  void NotificationDisplayed() override {
++    if (owner_)
++      owner_->OnNativeDisplayed();
++  }
++
++ private:
++  raw_ptr<WebNotification> owner_;
++};
++
++gin::DeprecatedWrapperInfo WebNotification::kWrapperInfo = {
++    gin::kEmbedderNativeGin};
++
++WebNotification::WebNotification(
++    PlatformNotificationService* service,
++    ElectronBrowserContext* browser_context,
++    content::RenderFrameHost* render_frame_host,
++    std::string notification_id,
++    GURL origin,
++    GURL document_url,
++    std::optional<GURL> service_worker_scope,
++    blink::PlatformNotificationData notification_data,
++    blink::NotificationResources notification_resources)
++    : service_(service),
++      browser_context_(browser_context),
++      frame_id_(render_frame_host ? render_frame_host->GetGlobalId()
++                                  : content::GlobalRenderFrameHostId()),
++      notification_id_(std::move(notification_id)),
++      origin_(std::move(origin)),
++      document_url_(std::move(document_url)),
++      service_worker_scope_(std::move(service_worker_scope)),
++      notification_data_(std::move(notification_data)),
++      notification_resources_(std::move(notification_resources)) {}
++
++WebNotification::~WebNotification() {
++  Destroy(false);
++}
++
++gin_helper::Handle<WebNotification> WebNotification::New(v8::Isolate* isolate) {
++  return {};
++}
++
++gin_helper::Handle<WebNotification> WebNotification::Create(
++    v8::Isolate* isolate,
++    PlatformNotificationService* service,
++    ElectronBrowserContext* browser_context,
++    content::RenderFrameHost* render_frame_host,
++    std::string notification_id,
++    GURL origin,
++    GURL document_url,
++    std::optional<GURL> service_worker_scope,
++    blink::PlatformNotificationData notification_data,
++    blink::NotificationResources notification_resources) {
++  v8::Local<v8::Function> constructor =
++      GetConstructor(isolate, isolate->GetCurrentContext());
++  auto handle = gin_helper::CreateHandle(
++      isolate,
++      new WebNotification(service, browser_context, render_frame_host,
++                          std::move(notification_id), std::move(origin),
++                          std::move(document_url),
++                          std::move(service_worker_scope),
++                          std::move(notification_data),
++                          std::move(notification_resources)));
++  if (!handle.IsEmpty()) {
++    SetConstructorPrototype(isolate, constructor, handle);
++    handle->Pin(isolate);
++  }
++  return handle;
++}
++
++void WebNotification::FillObjectTemplate(v8::Isolate* isolate,
++                                         v8::Local<v8::ObjectTemplate> templ) {
++  gin_helper::ObjectTemplateBuilder(isolate, templ)
++      .SetMethod("show", &WebNotification::Show)
++      .SetMethod("suppress", &WebNotification::Suppress)
++      .SetMethod("close", &WebNotification::Close)
++      .SetMethod("click", &WebNotification::Click)
++      .SetMethod("clickAction", &WebNotification::ClickAction)
++      .SetMethod("reply", &WebNotification::Reply)
++      .SetMethod("getServiceWorker", &WebNotification::GetServiceWorker)
++      .SetMethod("isDestroyed", &WebNotification::IsDestroyed)
++      .SetProperty("id", &WebNotification::ID)
++      .SetProperty("persistent", &WebNotification::Persistent)
++      .SetProperty("origin", &WebNotification::Origin)
++      .SetProperty("title", &WebNotification::Title)
++      .SetProperty("body", &WebNotification::Body)
++      .SetProperty("tag", &WebNotification::Tag)
++      .SetProperty("actions", &WebNotification::Actions)
++      .SetProperty("frame", &WebNotification::Frame)
++      .SetProperty("webContents", &WebNotification::WebContents)
++      .SetProperty("documentUrl", &WebNotification::DocumentURL)
++      .SetProperty("serviceWorkerScope", &WebNotification::ServiceWorkerScope)
++      .SetProperty("serviceWorker", &WebNotification::ServiceWorker)
++      .Build();
++}
++
++const char* WebNotification::GetTypeName() {
++  return GetClassName();
++}
++
++void WebNotification::MaybeShowDefault() {
++  if (!suppress_default_)
++    ShowNative();
++}
++
++void WebNotification::Show(gin::Arguments* args) {
++  ShowNative();
++}
++
++void WebNotification::Suppress() {
++  suppress_default_ = true;
++}
++
++void WebNotification::Close(gin::Arguments* args) {
++  bool by_user = true;
++  v8::Local<v8::Value> value;
++  if (args->GetNext(&value) && !value->IsNullOrUndefined()) {
++    gin_helper::Dictionary options;
++    if (!gin::ConvertFromV8(args->isolate(), value, &options)) {
++      args->ThrowTypeError("close options must be an object");
++      return;
++    }
++    options.Get("byUser", &by_user);
++  }
++
++  if (closed_ || destroyed_)
++    return;
++
++  closed_ = true;
++  if (native_notification_) {
++    closing_native_ = true;
++    native_notification_->Dismiss();
++    closing_native_ = false;
++  }
++  DispatchClose(by_user);
++  EmitClose(by_user, by_user ? "user" : "programmatic");
++  Destroy(false);
++}
++
++void WebNotification::Click(gin::Arguments* args) {
++  if (closed_ || destroyed_)
++    return;
++
++  EmitWithoutEvent("click");
++  DispatchClick(std::nullopt, std::nullopt);
++}
++
++void WebNotification::ClickAction(gin::Arguments* args) {
++  v8::Local<v8::Value> value;
++  if (!args->GetNext(&value)) {
++    args->ThrowTypeError("action must be an index or action string");
++    return;
++  }
++
++  std::optional<int> action_index = ResolveAction(args, value);
++  if (!action_index)
++    return;
++
++  EmitWithoutEvent("action", ActionDetails(args->isolate(), *action_index));
++  DispatchClick(action_index, std::nullopt);
++}
++
++void WebNotification::Reply(gin::Arguments* args) {
++  std::u16string reply;
++  if (!args->GetNext(&reply)) {
++    args->ThrowTypeError("reply text must be a string");
++    return;
++  }
++
++  std::optional<int> action_index;
++  v8::Local<v8::Value> value;
++  if (args->GetNext(&value) && !value->IsNullOrUndefined()) {
++    action_index = ResolveAction(args, value);
++    if (!action_index)
++      return;
++  } else {
++    action_index = FirstTextActionIndex();
++  }
++
++  EmitWithoutEvent("reply", ReplyDetails(args->isolate(), reply, action_index));
++  DispatchClick(action_index, reply);
++}
++
++bool WebNotification::IsDestroyed() const {
++  return destroyed_;
++}
++
++v8::Local<v8::Promise> WebNotification::GetServiceWorker(v8::Isolate* isolate) {
++  auto shared_promise =
++      std::make_shared<gin_helper::Promise<v8::Local<v8::Value>>>(isolate);
++  v8::Local<v8::Promise> handle = shared_promise->GetHandle();
++
++  if (!service_worker_scope_) {
++    shared_promise->RejectWithErrorMessage(
++        "Notification was not created by a service worker.");
++    return handle;
++  }
++
++  auto* storage_partition = browser_context_->GetDefaultStoragePartition();
++  auto* service_worker_context = storage_partition->GetServiceWorkerContext();
++  blink::StorageKey storage_key =
++      blink::StorageKey::CreateFirstParty(url::Origin::Create(origin_));
++  service_worker_context->StartWorkerForScope(
++      *service_worker_scope_, storage_key,
++      base::BindOnce(&WebNotification::DidStartWorkerForScope,
++                     weak_factory_.GetWeakPtr(), shared_promise),
++      base::BindOnce(&WebNotification::DidFailToStartWorkerForScope,
++                     weak_factory_.GetWeakPtr(), shared_promise));
++
++  return handle;
++}
++
++std::string WebNotification::ID() const {
++  return notification_id_;
++}
++
++bool WebNotification::Persistent() const {
++  return persistent();
++}
++
++GURL WebNotification::Origin() const {
++  return origin_;
++}
++
++std::u16string WebNotification::Title() const {
++  return notification_data_.title;
++}
++
++std::u16string WebNotification::Body() const {
++  return notification_data_.body;
++}
++
++std::string WebNotification::Tag() const {
++  return notification_data_.tag;
++}
++
++v8::Local<v8::Value> WebNotification::Actions(v8::Isolate* isolate) const {
++  v8::EscapableHandleScope handle_scope(isolate);
++  v8::Local<v8::Array> actions =
++      v8::Array::New(isolate, notification_data_.actions.size());
++  v8::Local<v8::Context> context = isolate->GetCurrentContext();
++  for (size_t i = 0; i < notification_data_.actions.size(); ++i) {
++    actions->Set(context, i, ActionDetails(isolate, static_cast<int>(i))).Check();
++  }
++  return handle_scope.Escape(actions);
++}
++
++v8::Local<v8::Value> WebNotification::Frame(v8::Isolate* isolate) const {
++  if (persistent())
++    return ToUndefined(isolate);
++  content::RenderFrameHost* rfh = content::RenderFrameHost::FromID(frame_id_);
++  auto handle = WebFrameMain::From(isolate, rfh);
++  if (handle.IsEmpty())
++    return ToUndefined(isolate);
++  return handle.ToV8();
++}
++
++v8::Local<v8::Value> WebNotification::WebContents(v8::Isolate* isolate) const {
++  if (persistent())
++    return ToUndefined(isolate);
++  content::RenderFrameHost* rfh = content::RenderFrameHost::FromID(frame_id_);
++  content::WebContents* web_contents =
++      rfh ? content::WebContents::FromRenderFrameHost(rfh) : nullptr;
++  if (!web_contents)
++    return ToUndefined(isolate);
++  auto handle = api::WebContents::FromOrCreate(isolate, web_contents);
++  if (handle.IsEmpty())
++    return ToUndefined(isolate);
++  return handle.ToV8();
++}
++
++v8::Local<v8::Value> WebNotification::DocumentURL(v8::Isolate* isolate) const {
++  if (persistent() || document_url_.is_empty())
++    return ToUndefined(isolate);
++  return gin::ConvertToV8(isolate, document_url_);
++}
++
++v8::Local<v8::Value> WebNotification::ServiceWorkerScope(
++    v8::Isolate* isolate) const {
++  if (!service_worker_scope_)
++    return ToUndefined(isolate);
++  return gin::ConvertToV8(isolate, *service_worker_scope_);
++}
++
++v8::Local<v8::Value> WebNotification::ServiceWorker(v8::Isolate* isolate) const {
++  if (!service_worker_scope_)
++    return ToUndefined(isolate);
++
++  auto* storage_partition = browser_context_->GetDefaultStoragePartition();
++  auto* service_worker_context = storage_partition->GetServiceWorkerContext();
++  const auto& workers = service_worker_context->GetRunningServiceWorkerInfos();
++  for (const auto& [version_id, info] : workers) {
++    if (info.scope == *service_worker_scope_) {
++      auto handle = ServiceWorkerMain::From(
++          isolate, service_worker_context, browser_context_->UniqueId(),
++          storage_partition->GetConfig(), version_id);
++      if (handle.IsEmpty())
++        return ToUndefined(isolate);
++      return handle.ToV8();
++    }
++  }
++  return ToUndefined(isolate);
++}
++
++void WebNotification::ShowNative() {
++  if (displayed_ || closed_ || destroyed_)
++    return;
++
++  auto* presenter = ElectronBrowserClient::Get()->GetNotificationPresenter();
++  if (!presenter) {
++    OnNativeFailed("Notification presenter is not available");
++    return;
++  }
++
++  presenter->CloseNotificationWithId(notification_id_);
++  native_action_to_web_action_index_.clear();
++
++  electron::NotificationOptions options;
++  options.title = notification_data_.title;
++  options.msg = notification_data_.body;
++  options.tag = notification_data_.tag;
++  options.icon_url = notification_data_.icon;
++  options.icon = notification_resources_.notification_icon;
++  options.silent = notification_data_.silent;
++  options.has_reply = false;
++  if (notification_data_.require_interaction)
++    options.timeout_type = u"never";
++
++  for (size_t i = 0; i < notification_data_.actions.size(); ++i) {
++    const auto& action = notification_data_.actions[i];
++    if (action->type == blink::mojom::NotificationActionType::BUTTON) {
++      electron::NotificationAction native_action;
++      native_action.type = u"button";
++      native_action.text = action->title;
++      options.actions.push_back(std::move(native_action));
++      native_action_to_web_action_index_.push_back(static_cast<int>(i));
++    } else if (!options.has_reply) {
++      options.has_reply = true;
++      if (action->placeholder)
++        options.reply_placeholder = *action->placeholder;
++    }
++  }
++
++  auto* delegate = new Delegate(this);
++  auto notification = presenter->CreateNotification(delegate, notification_id_);
++  if (!notification) {
++    delete delegate;
++    OnNativeFailed("Failed to create notification");
++    return;
++  }
++
++  native_notification_ = notification.get();
++  notification->Show(options);
++}
++
++void WebNotification::Destroy(bool emit_close) {
++  if (destroyed_)
++    return;
++
++  destroyed_ = true;
++  if (service_) {
++    service_->UntrackNotification(this);
++    service_ = nullptr;
++  }
++  if (native_notification_) {
++    native_notification_->Destroy();
++    native_notification_ = nullptr;
++  }
++  if (emit_close)
++    EmitClose(false, "destroyed");
++  Unpin();
++}
++
++void WebNotification::CloseFromService(bool dispatch_event) {
++  if (closed_ || destroyed_)
++    return;
++
++  closed_ = true;
++  if (native_notification_) {
++    closing_native_ = true;
++    native_notification_->Dismiss();
++    closing_native_ = false;
++  }
++  if (dispatch_event)
++    DispatchClose(false);
++  EmitClose(false, "programmatic");
++  Destroy(false);
++}
++
++void WebNotification::DetachService() {
++  service_ = nullptr;
++}
++
++void WebNotification::DispatchClick(std::optional<int> action_index,
++                                    std::optional<std::u16string> reply) {
++  if (persistent()) {
++    content::NotificationEventDispatcher::GetInstance()
++        ->DispatchNotificationClickEvent(
++            browser_context_, notification_id_, origin_, action_index,
++            std::move(reply), base::BindOnce(&DispatchComplete));
++  } else {
++    content::NotificationEventDispatcher::GetInstance()
++        ->DispatchNonPersistentClickEvent(notification_id_, base::DoNothing());
++  }
++}
++
++void WebNotification::DispatchClose(bool by_user) {
++  if (persistent()) {
++    content::NotificationEventDispatcher::GetInstance()
++        ->DispatchNotificationCloseEvent(browser_context_, notification_id_,
++                                         origin_, by_user,
++                                         base::BindOnce(&DispatchComplete));
++  } else {
++    content::NotificationEventDispatcher::GetInstance()
++        ->DispatchNonPersistentCloseEvent(notification_id_, base::DoNothing());
++  }
++}
++
++v8::Local<v8::Value> WebNotification::ReplyDetails(
++    v8::Isolate* isolate,
++    const std::u16string& reply,
++    std::optional<int> action_index) const {
++  gin::DataObjectBuilder builder(isolate);
++  builder.Set("text", reply).Set("index", action_index.value_or(-1));
++  if (action_index)
++    builder.Set("action", ActionDetails(isolate, *action_index));
++  return builder.Build();
++}
++
++v8::Local<v8::Value> WebNotification::CloseDetails(
++    v8::Isolate* isolate,
++    bool by_user,
++    const std::string& reason) const {
++  return gin::DataObjectBuilder(isolate)
++      .Set("byUser", by_user)
++      .Set("reason", reason)
++      .Build();
++}
++
++std::optional<int> WebNotification::ResolveAction(
++    gin::Arguments* args,
++    v8::Local<v8::Value> value) const {
++  int index = -1;
++  if (gin::ConvertFromV8(args->isolate(), value, &index)) {
++    if (index >= 0 &&
++        static_cast<size_t>(index) < notification_data_.actions.size()) {
++      return index;
++    }
++    args->ThrowTypeError("action index is out of range");
++    return std::nullopt;
++  }
++
++  std::string action_name;
++  if (gin::ConvertFromV8(args->isolate(), value, &action_name)) {
++    for (size_t i = 0; i < notification_data_.actions.size(); ++i) {
++      if (notification_data_.actions[i]->action == action_name)
++        return static_cast<int>(i);
++    }
++    args->ThrowTypeError("action string does not match any notification action");
++    return std::nullopt;
++  }
++
++  args->ThrowTypeError("action must be an index or action string");
++  return std::nullopt;
++}
++
++v8::Local<v8::Value> WebNotification::ActionDetails(v8::Isolate* isolate,
++                                                    int action_index) const {
++  if (action_index < 0 ||
++      static_cast<size_t>(action_index) >= notification_data_.actions.size()) {
++    return ToUndefined(isolate);
++  }
++
++  const auto& action = notification_data_.actions[action_index];
++  gin::DataObjectBuilder builder(isolate);
++  builder.Set("index", action_index)
++      .Set("type", NotificationActionTypeToString(action->type))
++      .Set("action", action->action)
++      .Set("title", action->title)
++      .Set("icon", action->icon.spec());
++  if (action->placeholder)
++    builder.Set("placeholder", *action->placeholder);
++  return builder.Build();
++}
++
++std::optional<int> WebNotification::FirstTextActionIndex() const {
++  for (size_t i = 0; i < notification_data_.actions.size(); ++i) {
++    if (notification_data_.actions[i]->type ==
++        blink::mojom::NotificationActionType::TEXT) {
++      return static_cast<int>(i);
++    }
++  }
++  return std::nullopt;
++}
++
++void WebNotification::EmitClose(bool by_user, const std::string& reason) {
++  v8::Isolate* isolate = JavascriptEnvironment::GetIsolate();
++  v8::HandleScope handle_scope(isolate);
++  EmitWithoutEvent("close", CloseDetails(isolate, by_user, reason));
++}
++
++void WebNotification::OnNativeDisplayed() {
++  displayed_ = true;
++  EmitWithoutEvent("show");
++}
++
++void WebNotification::OnNativeClicked() {
++  if (closed_ || destroyed_)
++    return;
++  EmitWithoutEvent("click");
++  DispatchClick(std::nullopt, std::nullopt);
++}
++
++void WebNotification::OnNativeAction(int native_action_index,
++                                     int selection_index) {
++  if (native_action_index < 0 ||
++      static_cast<size_t>(native_action_index) >=
++          native_action_to_web_action_index_.size()) {
++    return;
++  }
++
++  int action_index = native_action_to_web_action_index_[native_action_index];
++  v8::Isolate* isolate = JavascriptEnvironment::GetIsolate();
++  v8::HandleScope handle_scope(isolate);
++  EmitWithoutEvent("action", ActionDetails(isolate, action_index));
++  DispatchClick(action_index, std::nullopt);
++}
++
++void WebNotification::OnNativeReplied(const std::string& reply) {
++  std::optional<int> action_index = FirstTextActionIndex();
++  std::u16string reply_text = base::UTF8ToUTF16(reply);
++
++  v8::Isolate* isolate = JavascriptEnvironment::GetIsolate();
++  v8::HandleScope handle_scope(isolate);
++  EmitWithoutEvent("reply", ReplyDetails(isolate, reply_text, action_index));
++  DispatchClick(action_index, reply_text);
++}
++
++void WebNotification::OnNativeClosed(const std::string& reason) {
++  if (closing_native_ || closed_ || destroyed_)
++    return;
++
++  closed_ = true;
++  DispatchClose(true);
++  EmitClose(true, reason.empty() ? "user" : reason);
++  Destroy(false);
++}
++
++void WebNotification::OnNativeFailed(const std::string& error) {
++  v8::Isolate* isolate = JavascriptEnvironment::GetIsolate();
++  v8::HandleScope handle_scope(isolate);
++  EmitWithoutEvent("failed",
++                   gin::DataObjectBuilder(isolate).Set("error", error).Build());
++  Destroy(false);
++}
++
++void WebNotification::OnNativeDestroyed() {
++  native_notification_ = nullptr;
++  if (!destroyed_ && closed_) {
++    Destroy(false);
++  }
++}
++
++void WebNotification::DidStartWorkerForScope(
++    std::shared_ptr<gin_helper::Promise<v8::Local<v8::Value>>> shared_promise,
++    int64_t version_id,
++    content::ChildProcessId process_id,
++    int thread_id,
++    const blink::ServiceWorkerToken& token) {
++  v8::Isolate* isolate = shared_promise->isolate();
++  v8::HandleScope handle_scope(isolate);
++  auto* storage_partition = browser_context_->GetDefaultStoragePartition();
++  auto* service_worker_context = storage_partition->GetServiceWorkerContext();
++  auto service_worker = ServiceWorkerMain::From(
++      isolate, service_worker_context, browser_context_->UniqueId(),
++      storage_partition->GetConfig(), version_id);
++  shared_promise->Resolve(service_worker.ToV8());
++}
++
++void WebNotification::DidFailToStartWorkerForScope(
++    std::shared_ptr<gin_helper::Promise<v8::Local<v8::Value>>> shared_promise,
++    content::StatusCodeResponse status) {
++  shared_promise->RejectWithErrorMessage("Failed to start service worker.");
++}
++
++}  // namespace electron::api
+diff --git a/shell/browser/api/electron_api_web_notification.h b/shell/browser/api/electron_api_web_notification.h
+new file mode 100644
+index 0000000000..ec4d84cdac
+--- /dev/null
++++ b/shell/browser/api/electron_api_web_notification.h
+@@ -0,0 +1,190 @@
++// Copyright (c) 2026 The Electron Authors
++// Use of this source code is governed by the MIT license that can be
++// found in the LICENSE file.
++
++#ifndef ELECTRON_SHELL_BROWSER_API_ELECTRON_API_WEB_NOTIFICATION_H_
++#define ELECTRON_SHELL_BROWSER_API_ELECTRON_API_WEB_NOTIFICATION_H_
++
++#include <cstdint>
++#include <memory>
++#include <optional>
++#include <string>
++#include <vector>
++
++#include "base/memory/raw_ptr.h"
++#include "base/memory/weak_ptr.h"
++#include "content/public/browser/global_routing_id.h"
++#include "content/public/browser/service_worker_context.h"
++#include "content/public/common/child_process_id.h"
++#include "shell/browser/event_emitter_mixin.h"
++#include "shell/browser/notifications/notification_delegate.h"
++#include "shell/common/gin_helper/constructible.h"
++#include "shell/common/gin_helper/pinnable.h"
++#include "shell/common/gin_helper/wrappable.h"
++#include "third_party/blink/public/common/notifications/notification_resources.h"
++#include "third_party/blink/public/common/notifications/platform_notification_data.h"
++#include "third_party/blink/public/common/tokens/tokens.h"
++#include "url/gurl.h"
++
++namespace content {
++class RenderFrameHost;
++class ServiceWorkerContext;
++}  // namespace content
++
++namespace gin {
++class Arguments;
++}  // namespace gin
++
++namespace gin_helper {
++template <typename T>
++class Handle;
++template <typename T>
++class Promise;
++}  // namespace gin_helper
++
++namespace electron {
++
++class ElectronBrowserContext;
++class Notification;
++class NotificationPresenter;
++class PlatformNotificationService;
++
++namespace api {
++
++class WebNotification final
++    : public gin_helper::DeprecatedWrappable<WebNotification>,
++      public gin_helper::Pinnable<WebNotification>,
++      public gin_helper::Constructible<WebNotification>,
++      public gin_helper::EventEmitterMixin<WebNotification> {
++ public:
++  static gin_helper::Handle<WebNotification> New(v8::Isolate* isolate);
++  static gin_helper::Handle<WebNotification> Create(
++      v8::Isolate* isolate,
++      PlatformNotificationService* service,
++      ElectronBrowserContext* browser_context,
++      content::RenderFrameHost* render_frame_host,
++      std::string notification_id,
++      GURL origin,
++      GURL document_url,
++      std::optional<GURL> service_worker_scope,
++      blink::PlatformNotificationData notification_data,
++      blink::NotificationResources notification_resources);
++
++  static void FillObjectTemplate(v8::Isolate*, v8::Local<v8::ObjectTemplate>);
++  static const char* GetClassName() { return "WebNotification"; }
++
++  static gin::DeprecatedWrapperInfo kWrapperInfo;
++  const char* GetTypeName() override;
++
++  WebNotification(const WebNotification&) = delete;
++  WebNotification& operator=(const WebNotification&) = delete;
++
++  const std::string& notification_id() const { return notification_id_; }
++  const GURL& origin() const { return origin_; }
++  bool persistent() const { return service_worker_scope_.has_value(); }
++  bool displayed() const { return displayed_; }
++  bool closed() const { return closed_; }
++
++  void MaybeShowDefault();
++  void CloseFromService(bool dispatch_event);
++  void DetachService();
++
++ protected:
++  WebNotification(PlatformNotificationService* service,
++                  ElectronBrowserContext* browser_context,
++                  content::RenderFrameHost* render_frame_host,
++                  std::string notification_id,
++                  GURL origin,
++                  GURL document_url,
++                  std::optional<GURL> service_worker_scope,
++                  blink::PlatformNotificationData notification_data,
++                  blink::NotificationResources notification_resources);
++  ~WebNotification() override;
++
++ private:
++  class Delegate;
++
++  void Show(gin::Arguments* args);
++  void Suppress();
++  void Close(gin::Arguments* args);
++  void Click(gin::Arguments* args);
++  void ClickAction(gin::Arguments* args);
++  void Reply(gin::Arguments* args);
++  bool IsDestroyed() const;
++  v8::Local<v8::Promise> GetServiceWorker(v8::Isolate* isolate);
++
++  std::string ID() const;
++  bool Persistent() const;
++  GURL Origin() const;
++  std::u16string Title() const;
++  std::u16string Body() const;
++  std::string Tag() const;
++  v8::Local<v8::Value> Actions(v8::Isolate* isolate) const;
++  v8::Local<v8::Value> Frame(v8::Isolate* isolate) const;
++  v8::Local<v8::Value> WebContents(v8::Isolate* isolate) const;
++  v8::Local<v8::Value> DocumentURL(v8::Isolate* isolate) const;
++  v8::Local<v8::Value> ServiceWorkerScope(v8::Isolate* isolate) const;
++  v8::Local<v8::Value> ServiceWorker(v8::Isolate* isolate) const;
++
++  void ShowNative();
++  void Destroy(bool emit_close);
++  void DispatchClick(std::optional<int> action_index,
++                     std::optional<std::u16string> reply);
++  void DispatchClose(bool by_user);
++  v8::Local<v8::Value> ReplyDetails(
++      v8::Isolate* isolate,
++      const std::u16string& reply,
++      std::optional<int> action_index) const;
++  v8::Local<v8::Value> CloseDetails(v8::Isolate* isolate,
++                                    bool by_user,
++                                    const std::string& reason) const;
++  std::optional<int> ResolveAction(gin::Arguments* args,
++                                   v8::Local<v8::Value> value) const;
++  v8::Local<v8::Value> ActionDetails(v8::Isolate* isolate,
++                                     int action_index) const;
++  std::optional<int> FirstTextActionIndex() const;
++  void EmitClose(bool by_user, const std::string& reason);
++
++  void OnNativeDisplayed();
++  void OnNativeClicked();
++  void OnNativeAction(int native_action_index, int selection_index);
++  void OnNativeReplied(const std::string& reply);
++  void OnNativeClosed(const std::string& reason);
++  void OnNativeFailed(const std::string& error);
++  void OnNativeDestroyed();
++
++  void DidStartWorkerForScope(
++      std::shared_ptr<gin_helper::Promise<v8::Local<v8::Value>>> shared_promise,
++      int64_t version_id,
++      content::ChildProcessId process_id,
++      int thread_id,
++      const blink::ServiceWorkerToken& token);
++  void DidFailToStartWorkerForScope(
++      std::shared_ptr<gin_helper::Promise<v8::Local<v8::Value>>> shared_promise,
++      content::StatusCodeResponse status);
++
++  raw_ptr<PlatformNotificationService> service_;
++  raw_ptr<ElectronBrowserContext> browser_context_;
++  content::GlobalRenderFrameHostId frame_id_;
++  const std::string notification_id_;
++  const GURL origin_;
++  const GURL document_url_;
++  const std::optional<GURL> service_worker_scope_;
++  const blink::PlatformNotificationData notification_data_;
++  const blink::NotificationResources notification_resources_;
++
++  raw_ptr<Notification> native_notification_ = nullptr;
++  bool suppress_default_ = false;
++  bool displayed_ = false;
++  bool closed_ = false;
++  bool destroyed_ = false;
++  bool closing_native_ = false;
++  std::vector<int> native_action_to_web_action_index_;
++
++  base::WeakPtrFactory<WebNotification> weak_factory_{this};
++};
++
++}  // namespace api
++}  // namespace electron
++
++#endif  // ELECTRON_SHELL_BROWSER_API_ELECTRON_API_WEB_NOTIFICATION_H_
+diff --git a/shell/browser/electron_browser_client.cc b/shell/browser/electron_browser_client.cc
+index cbba09f966..c938766277 100644
+--- a/shell/browser/electron_browser_client.cc
++++ b/shell/browser/electron_browser_client.cc
+@@ -1217,10 +1217,7 @@ NotificationPresenter* ElectronBrowserClient::GetNotificationPresenter() {
+
+ content::PlatformNotificationService*
+ ElectronBrowserClient::GetPlatformNotificationService() {
+-  if (!notification_service_) {
+-    notification_service_ = std::make_unique<PlatformNotificationService>(this);
+-  }
+-  return notification_service_.get();
++  return nullptr;
+ }
+
+ base::FilePath ElectronBrowserClient::GetDefaultDownloadDirectory() {
+diff --git a/shell/browser/electron_browser_context.cc b/shell/browser/electron_browser_context.cc
+index 46a34bdaef..b53050a170 100644
+--- a/shell/browser/electron_browser_context.cc
++++ b/shell/browser/electron_browser_context.cc
+@@ -57,6 +57,7 @@
+ #include "shell/browser/file_system_access/file_system_access_permission_context_factory.h"
+ #include "shell/browser/media/media_device_id_salt.h"
+ #include "shell/browser/net/resolve_proxy_helper.h"
++#include "shell/browser/notifications/platform_notification_service.h"
+ #include "shell/browser/protocol_registry.h"
+ #include "shell/browser/serial/serial_chooser_context.h"
+ #include "shell/browser/special_storage_policy.h"
+@@ -646,7 +647,9 @@ content::BrowserPluginGuestManager* ElectronBrowserContext::GetGuestManager() {
+
+ content::PlatformNotificationService*
+ ElectronBrowserContext::GetPlatformNotificationService() {
+-  return ElectronBrowserClient::Get()->GetPlatformNotificationService();
++  if (!notification_service_)
++    notification_service_ = std::make_unique<PlatformNotificationService>(this);
++  return notification_service_.get();
+ }
+
+ content::PermissionControllerDelegate*
+diff --git a/shell/browser/electron_browser_context.h b/shell/browser/electron_browser_context.h
+index f27016e35d..d62a817d1e 100644
+--- a/shell/browser/electron_browser_context.h
++++ b/shell/browser/electron_browser_context.h
+@@ -51,6 +51,7 @@ class ElectronDownloadManagerDelegate;
+ class ElectronPermissionManager;
+ class ElectronPreconnectManagerDelegate;
+ class MediaDeviceIDSalt;
++class PlatformNotificationService;
+ class ProtocolRegistry;
+ class ResolveProxyHelper;
+ class WebViewManager;
+@@ -208,6 +209,7 @@ class ElectronBrowserContext : public content::BrowserContext {
+   std::unique_ptr<CookieChangeNotifier> cookie_change_notifier_;
+   std::unique_ptr<PrefService> prefs_;
+   std::unique_ptr<ElectronDownloadManagerDelegate> download_manager_delegate_;
++  std::unique_ptr<PlatformNotificationService> notification_service_;
+   std::unique_ptr<WebViewManager> guest_manager_;
+   std::unique_ptr<ElectronPermissionManager> permission_manager_;
+   std::unique_ptr<MediaDeviceIDSalt> media_device_id_salt_;
+diff --git a/shell/browser/notifications/platform_notification_service.cc b/shell/browser/notifications/platform_notification_service.cc
+index f057ed7d14..40613e4494 100644
+--- a/shell/browser/notifications/platform_notification_service.cc
++++ b/shell/browser/notifications/platform_notification_service.cc
+@@ -4,11 +4,14 @@
+
+ #include "shell/browser/notifications/platform_notification_service.h"
+
+-#include "content/public/browser/notification_event_dispatcher.h"
++#include <set>
++
+ #include "content/public/browser/render_process_host.h"
++#include "shell/browser/api/electron_api_session.h"
++#include "shell/browser/api/electron_api_web_notification.h"
+ #include "shell/browser/electron_browser_client.h"
+-#include "shell/browser/notifications/notification.h"
+-#include "shell/browser/notifications/notification_delegate.h"
++#include "shell/browser/electron_browser_context.h"
++#include "shell/browser/javascript_environment.h"
+ #include "shell/browser/notifications/notification_presenter.h"
+ #include "third_party/blink/public/common/notifications/notification_resources.h"
+ #include "third_party/blink/public/common/notifications/platform_notification_data.h"
+@@ -16,72 +19,16 @@
+
+ namespace electron {
+
+-namespace {
++PlatformNotificationService::PlatformNotificationService(
++    ElectronBrowserContext* browser_context)
++    : browser_context_(browser_context) {}
+
+-void OnWebNotificationAllowed(base::WeakPtr<Notification> notification,
+-                              const SkBitmap& icon,
+-                              const blink::PlatformNotificationData& data,
+-                              bool audio_muted,
+-                              bool allowed) {
+-  if (!notification)
+-    return;
+-  if (allowed) {
+-    electron::NotificationOptions options;
+-    options.title = data.title;
+-    options.msg = data.body;
+-    options.tag = data.tag;
+-    options.icon_url = data.icon;
+-    options.icon = icon;
+-    options.silent = audio_muted ? true : data.silent;
+-    options.has_reply = false;
+-    if (data.require_interaction)
+-      options.timeout_type = u"never";
+-
+-    notification->Show(options);
+-  } else {
+-    notification->Destroy();
++PlatformNotificationService::~PlatformNotificationService() {
++  for (auto& [id, notification] : notifications_) {
++    notification->DetachService();
+   }
+ }
+
+-class NotificationDelegateImpl final : public electron::NotificationDelegate {
+- public:
+-  explicit NotificationDelegateImpl(const std::string& notification_id)
+-      : notification_id_(notification_id) {}
+-
+-  // disable copy
+-  NotificationDelegateImpl(const NotificationDelegateImpl&) = delete;
+-  NotificationDelegateImpl& operator=(const NotificationDelegateImpl&) = delete;
+-
+-  // electron::NotificationDelegate
+-  void NotificationDestroyed() override { delete this; }
+-
+-  void NotificationClick() override {
+-    content::NotificationEventDispatcher::GetInstance()
+-        ->DispatchNonPersistentClickEvent(notification_id_, base::DoNothing());
+-  }
+-
+-  void NotificationClosed(const std::string& reason) override {
+-    content::NotificationEventDispatcher::GetInstance()
+-        ->DispatchNonPersistentCloseEvent(notification_id_, base::DoNothing());
+-  }
+-
+-  void NotificationDisplayed() override {
+-    content::NotificationEventDispatcher::GetInstance()
+-        ->DispatchNonPersistentShowEvent(notification_id_);
+-  }
+-
+- private:
+-  std::string notification_id_;
+-};
+-
+-}  // namespace
+-
+-PlatformNotificationService::PlatformNotificationService(
+-    ElectronBrowserClient* browser_client)
+-    : browser_client_(browser_client) {}
+-
+-PlatformNotificationService::~PlatformNotificationService() = default;
+-
+ void PlatformNotificationService::DisplayNotification(
+     content::RenderFrameHost* render_frame_host,
+     const std::string& notification_id,
+@@ -89,10 +36,6 @@ void PlatformNotificationService::DisplayNotification(
+     const GURL& document_url,
+     const blink::PlatformNotificationData& notification_data,
+     const blink::NotificationResources& notification_resources) {
+-  auto* presenter = browser_client_->GetNotificationPresenter();
+-  if (!presenter)
+-    return;
+-
+   // If a new notification is created with the same tag as an
+   // existing one, replace the old notification with the new one.
+   // The notification_id is generated from the tag, so the only way a
+@@ -100,38 +43,89 @@ void PlatformNotificationService::DisplayNotification(
+   // the same tag is already extant.
+   //
+   // See: https://notifications.spec.whatwg.org/#showing-a-notification
+-  presenter->CloseNotificationWithId(notification_id);
++  CloseNotification(notification_id);
++
++  // Shared worker notifications do not have an associated RenderFrameHost.
++  // Content already checked notification permission for the worker origin
++  // before calling into PlatformNotificationService.
++  if (!render_frame_host) {
++    DispatchWebNotification(nullptr, notification_id, origin, document_url,
++                            std::nullopt, notification_data,
++                            notification_resources);
++    return;
++  }
+
+-  auto* delegate = new NotificationDelegateImpl(notification_id);
++  ElectronBrowserClient::Get()->WebNotificationAllowed(
++      render_frame_host,
++      base::BindOnce(&PlatformNotificationService::OnWebNotificationAllowed,
++                     weak_factory_.GetWeakPtr(), render_frame_host,
++                     notification_id, origin, document_url, notification_data,
++                     notification_resources));
++}
+
+-  auto notification = presenter->CreateNotification(delegate, notification_id);
+-  if (notification) {
+-    browser_client_->WebNotificationAllowed(
+-        render_frame_host,
+-        base::BindRepeating(&OnWebNotificationAllowed, notification,
+-                            notification_resources.notification_icon,
+-                            notification_data));
+-  }
++void PlatformNotificationService::DisplayPersistentNotification(
++    const std::string& notification_id,
++    const GURL& service_worker_scope,
++    const GURL& origin,
++    const blink::PlatformNotificationData& notification_data,
++    const blink::NotificationResources& notification_resources) {
++  ClosePersistentNotification(notification_id);
++  DispatchWebNotification(nullptr, notification_id, origin, GURL(),
++                          service_worker_scope, notification_data,
++                          notification_resources);
+ }
+
+ void PlatformNotificationService::CloseNotification(
+     const std::string& notification_id) {
+-  auto* presenter = browser_client_->GetNotificationPresenter();
++  auto it = notifications_.find(notification_id);
++  if (it != notifications_.end()) {
++    it->second->CloseFromService(true);
++    return;
++  }
++
++  auto* presenter = ElectronBrowserClient::Get()->GetNotificationPresenter();
+   if (!presenter)
+     return;
+   presenter->CloseNotificationWithId(notification_id);
+ }
+
++void PlatformNotificationService::ClosePersistentNotification(
++    const std::string& notification_id) {
++  auto it = notifications_.find(notification_id);
++  if (it != notifications_.end()) {
++    it->second->CloseFromService(false);
++    return;
++  }
++  CloseNotification(notification_id);
++}
++
+ void PlatformNotificationService::GetDisplayedNotifications(
+-    DisplayedNotificationsCallback callback) {}
++    DisplayedNotificationsCallback callback) {
++  std::set<std::string> displayed_notifications;
++  for (const auto& [id, notification] : notifications_) {
++    if (notification->persistent() && notification->displayed())
++      displayed_notifications.insert(id);
++  }
++  std::move(callback).Run(std::move(displayed_notifications),
++                          /* supports_synchronization= */ false);
++}
+
+ void PlatformNotificationService::GetDisplayedNotificationsForOrigin(
+     const GURL& origin,
+-    DisplayedNotificationsCallback callback) {}
++    DisplayedNotificationsCallback callback) {
++  std::set<std::string> displayed_notifications;
++  for (const auto& [id, notification] : notifications_) {
++    if (notification->persistent() && notification->displayed() &&
++        notification->origin() == origin) {
++      displayed_notifications.insert(id);
++    }
++  }
++  std::move(callback).Run(std::move(displayed_notifications),
++                          /* supports_synchronization= */ false);
++}
+
+ int64_t PlatformNotificationService::ReadNextPersistentNotificationId() {
+-  // Electron doesn't support persistent notifications.
+-  return 0;
++  return ++next_persistent_notification_id_;
+ }
+
+ void PlatformNotificationService::RecordNotificationUkmEvent(
+@@ -143,4 +137,67 @@ base::Time PlatformNotificationService::ReadNextTriggerTimestamp() {
+   return base::Time::Max();
+ }
+
++void PlatformNotificationService::TrackNotification(
++    api::WebNotification* notification) {
++  notifications_[notification->notification_id()] = notification;
++}
++
++void PlatformNotificationService::UntrackNotification(
++    api::WebNotification* notification) {
++  auto it = notifications_.find(notification->notification_id());
++  if (it != notifications_.end() && it->second == notification)
++    notifications_.erase(it);
++}
++
++void PlatformNotificationService::OnWebNotificationAllowed(
++    content::RenderFrameHost* render_frame_host,
++    std::string notification_id,
++    GURL origin,
++    GURL document_url,
++    blink::PlatformNotificationData notification_data,
++    blink::NotificationResources notification_resources,
++    bool audio_muted,
++    bool allowed) {
++  if (!allowed)
++    return;
++
++  if (audio_muted)
++    notification_data.silent = true;
++
++  DispatchWebNotification(render_frame_host, std::move(notification_id),
++                          std::move(origin), std::move(document_url),
++                          std::nullopt, std::move(notification_data),
++                          std::move(notification_resources));
++}
++
++void PlatformNotificationService::DispatchWebNotification(
++    content::RenderFrameHost* render_frame_host,
++    std::string notification_id,
++    GURL origin,
++    GURL document_url,
++    std::optional<GURL> service_worker_scope,
++    blink::PlatformNotificationData notification_data,
++    blink::NotificationResources notification_resources) {
++  v8::Isolate* isolate = JavascriptEnvironment::GetIsolate();
++  v8::HandleScope handle_scope(isolate);
++
++  auto notification = api::WebNotification::Create(
++      isolate, this, browser_context_, render_frame_host,
++      std::move(notification_id), std::move(origin), std::move(document_url),
++      std::move(service_worker_scope), std::move(notification_data),
++      std::move(notification_resources));
++  if (notification.IsEmpty())
++    return;
++
++  TrackNotification(notification.get());
++
++  auto* session = api::Session::FromOrCreate(isolate, browser_context_);
++  if (!session || !session->HandleWebNotification(notification.ToV8())) {
++    notification->MaybeShowDefault();
++    return;
++  }
++
++  notification->MaybeShowDefault();
++}
++
+ }  // namespace electron
+diff --git a/shell/browser/notifications/platform_notification_service.h b/shell/browser/notifications/platform_notification_service.h
+index 5ebbf09ca5..ff280a14e5 100644
+--- a/shell/browser/notifications/platform_notification_service.h
++++ b/shell/browser/notifications/platform_notification_service.h
+@@ -5,19 +5,26 @@
+ #ifndef ELECTRON_SHELL_BROWSER_NOTIFICATIONS_PLATFORM_NOTIFICATION_SERVICE_H_
+ #define ELECTRON_SHELL_BROWSER_NOTIFICATIONS_PLATFORM_NOTIFICATION_SERVICE_H_
+
++#include <optional>
+ #include <string>
+
++#include "base/containers/flat_map.h"
+ #include "base/memory/raw_ptr.h"
++#include "base/memory/weak_ptr.h"
+ #include "content/public/browser/platform_notification_service.h"
+
+ namespace electron {
+
+-class ElectronBrowserClient;
++class ElectronBrowserContext;
++
++namespace api {
++class WebNotification;
++}  // namespace api
+
+ class PlatformNotificationService
+     : public content::PlatformNotificationService {
+  public:
+-  explicit PlatformNotificationService(ElectronBrowserClient* browser_client);
++  explicit PlatformNotificationService(ElectronBrowserContext* browser_context);
+   ~PlatformNotificationService() override;
+
+   // disable copy
+@@ -39,9 +46,9 @@ class PlatformNotificationService
+       const GURL& service_worker_scope,
+       const GURL& origin,
+       const blink::PlatformNotificationData& notification_data,
+-      const blink::NotificationResources& notification_resources) override {}
++      const blink::NotificationResources& notification_resources) override;
+   void ClosePersistentNotification(
+-      const std::string& notification_id) override {}
++      const std::string& notification_id) override;
+   void CloseNotification(const std::string& notification_id) override;
+   void GetDisplayedNotifications(
+       DisplayedNotificationsCallback callback) override;
+@@ -54,8 +61,33 @@ class PlatformNotificationService
+   void ScheduleTrigger(base::Time timestamp) override;
+   base::Time ReadNextTriggerTimestamp() override;
+
++ public:
++  void TrackNotification(api::WebNotification* notification);
++  void UntrackNotification(api::WebNotification* notification);
++
+  private:
+-  raw_ptr<ElectronBrowserClient> browser_client_;
++  void OnWebNotificationAllowed(
++      content::RenderFrameHost* render_frame_host,
++      std::string notification_id,
++      GURL origin,
++      GURL document_url,
++      blink::PlatformNotificationData notification_data,
++      blink::NotificationResources notification_resources,
++      bool audio_muted,
++      bool allowed);
++  void DispatchWebNotification(
++      content::RenderFrameHost* render_frame_host,
++      std::string notification_id,
++      GURL origin,
++      GURL document_url,
++      std::optional<GURL> service_worker_scope,
++      blink::PlatformNotificationData notification_data,
++      blink::NotificationResources notification_resources);
++
++  raw_ptr<ElectronBrowserContext> browser_context_;
++  int64_t next_persistent_notification_id_ = 0;
++  base::flat_map<std::string, api::WebNotification*> notifications_;
++  base::WeakPtrFactory<PlatformNotificationService> weak_factory_{this};
+ };
+
+ }  // namespace electron
+diff --git a/spec/api-service-worker-main-spec.ts b/spec/api-service-worker-main-spec.ts
+index 32e99db2ec..511ed407b5 100644
+--- a/spec/api-service-worker-main-spec.ts
++++ b/spec/api-service-worker-main-spec.ts
+@@ -66,6 +66,11 @@ describe('ServiceWorkerMain module', () => {
+   });
+
+   type ServiceWorkerPreloadTarget = 'shadow-realm-global-scope' | 'service-worker-global-scope' | 'both';
++  type IpcMainMessageEvent =
++    | Electron.IpcMainEvent
++    | Electron.IpcMainDedicatedWorkerEvent
++    | Electron.IpcMainServiceWorkerEvent
++    | Electron.IpcMainSharedWorkerEvent;
+   type ServiceWorkerPreloadGlobalProbe = {
+     constructorName: string;
+     navigatorType: string;
+@@ -124,7 +129,7 @@ describe('ServiceWorkerMain module', () => {
+   const collectPreloadGlobalProbes = async (target?: ServiceWorkerPreloadTarget) => {
+     const expectedProbeCount = target === 'both' ? 2 : 1;
+     const probes: ServiceWorkerPreloadGlobalProbe[] = [];
+-    const listener = (_event: Electron.IpcMainServiceWorkerEvent, probe: ServiceWorkerPreloadGlobalProbe) => {
++    const listener = (_event: IpcMainMessageEvent, probe: ServiceWorkerPreloadGlobalProbe) => {
+       probes.push(probe);
+     };
+
+@@ -555,7 +560,7 @@ describe('ServiceWorkerMain module', () => {
+
+     it('keeps service worker global scope preload independent from shadow realm global scope preload failures', async () => {
+       const probes: Array<{ constructorName: string, processContextIsolated: boolean }> = [];
+-      const listener = (_event: Electron.IpcMainServiceWorkerEvent, probe: { constructorName: string, processContextIsolated: boolean }) => {
++      const listener = (_event: IpcMainMessageEvent, probe: { constructorName: string, processContextIsolated: boolean }) => {
+         probes.push(probe);
+       };
+
+diff --git a/spec/api-session-spec.ts b/spec/api-session-spec.ts
+index 1455ddfd90..62f68da69f 100644
+--- a/spec/api-session-spec.ts
++++ b/spec/api-session-spec.ts
+@@ -1944,6 +1944,660 @@ describe('session module', () => {
+     });
+   });
+
++  describe('ses.setWebNotificationHandler(handler)', () => {
++    const sessions: Electron.Session[] = [];
++
++    const createSession = (allowNotifications = true) => {
++      const ses = session.fromPartition(`web-notification-${crypto.randomUUID()}`);
++      sessions.push(ses);
++      ses.setPermissionRequestHandler((_webContents, permission, callback) => {
++        callback(permission === 'notifications' && allowNotifications);
++      });
++      ses.setPermissionCheckHandler((_webContents, permission) => {
++        return permission === 'notifications' && allowNotifications;
++      });
++      return ses;
++    };
++
++    const installQueuedNotificationHandler = (ses: Electron.Session) => {
++      const pendingNotifications: Array<(notification: Electron.WebNotification) => void> = [];
++      const queuedNotifications: Electron.WebNotification[] = [];
++      const nextNotification = () => {
++        const queued = queuedNotifications.shift();
++        if (queued) return Promise.resolve(queued);
++        return new Promise<Electron.WebNotification>((resolve) => {
++          pendingNotifications.push(resolve);
++        });
++      };
++
++      ses.setWebNotificationHandler((notification) => {
++        notification.suppress();
++        const resolve = pendingNotifications.shift();
++        if (resolve) {
++          resolve(notification);
++        } else {
++          queuedNotifications.push(notification);
++        }
++      });
++
++      return nextNotification;
++    };
++
++    afterEach(async () => {
++      for (const ses of sessions) {
++        ses.setWebNotificationHandler(null);
++        ses.setPermissionRequestHandler(null);
++        ses.setPermissionCheckHandler(null);
++        await ses.clearStorageData().catch(() => {});
++      }
++      sessions.length = 0;
++      await closeAllWindows();
++    });
++
++    it('receives and controls notifications created by a frame', async () => {
++      const ses = createSession();
++      const server = http.createServer((_req, res) => {
++        res.setHeader('Content-Type', 'text/html');
++        res.end('<!DOCTYPE html><html><body></body></html>');
++      });
++      defer(() => {
++        server.close();
++      });
++
++      const { url } = await listen(server);
++      const w = new BrowserWindow({ show: false, webPreferences: { session: ses } });
++      await w.loadURL(url);
++
++      const nextNotification = installQueuedNotificationHandler(ses);
++      const clickResult = w.webContents.executeJavaScript(`
++        (async () => {
++          await Notification.requestPermission();
++          return await new Promise(resolve => {
++            const notification = new Notification('Frame title', {
++              body: 'Frame body',
++              tag: 'frame-tag'
++            });
++            notification.onclick = () => resolve('clicked');
++          });
++        })()
++      `);
++
++      const notification = await nextNotification();
++      expect(notification.persistent).to.equal(false);
++      expect(notification.title).to.equal('Frame title');
++      expect(notification.body).to.equal('Frame body');
++      expect(notification.tag).to.equal('frame-tag');
++      expect(notification.origin).to.equal(new URL('/', url).toString());
++      expect(notification.documentUrl).to.equal(new URL('/', url).toString());
++      expect(notification.frame).to.not.equal(undefined);
++      expect(notification.frame!.url).to.equal(new URL('/', url).toString());
++      expect(notification.webContents).to.equal(w.webContents);
++      expect(notification.serviceWorkerScope).to.equal(undefined);
++      expect(notification.serviceWorker).to.equal(undefined);
++
++      notification.click();
++      expect(await clickResult).to.equal('clicked');
++
++      const closeEvent = once(notification, 'close');
++      notification.close({ byUser: false });
++      const [event] = await closeEvent;
++      expect(event.byUser).to.equal(false);
++      expect(event.reason).to.equal('programmatic');
++      expect(notification.isDestroyed()).to.equal(true);
++    });
++
++    it('receives notifications created by a subframe', async () => {
++      const ses = createSession();
++      const server = http.createServer((req, res) => {
++        res.setHeader('Content-Type', 'text/html');
++        if (req.url === '/frame.html') {
++          res.end(`
++            <!DOCTYPE html>
++            <html>
++              <body>
++                <script>
++                  window.addEventListener('message', async () => {
++                    await Notification.requestPermission();
++                    new Notification('Subframe title', {
++                      body: 'Subframe body',
++                      tag: 'subframe-tag'
++                    });
++                    parent.postMessage('subframe-created', '*');
++                  });
++                </script>
++              </body>
++            </html>
++          `);
++          return;
++        }
++
++        res.end('<!DOCTYPE html><html><body><iframe id="child" src="/frame.html"></iframe></body></html>');
++      });
++      defer(() => {
++        server.close();
++      });
++
++      const { url } = await listen(server);
++      const w = new BrowserWindow({ show: false, webPreferences: { session: ses } });
++      const nextNotification = installQueuedNotificationHandler(ses);
++      await w.loadURL(url);
++
++      const created = w.webContents.executeJavaScript(`
++        new Promise(resolve => {
++          window.addEventListener('message', event => {
++            if (event.data === 'subframe-created') resolve(event.data);
++          }, { once: true });
++          document.getElementById('child').contentWindow.postMessage('show', '*');
++        })
++      `);
++
++      const notification = await nextNotification();
++      expect(await created).to.equal('subframe-created');
++      expect(notification.persistent).to.equal(false);
++      expect(notification.title).to.equal('Subframe title');
++      expect(notification.body).to.equal('Subframe body');
++      expect(notification.tag).to.equal('subframe-tag');
++      expect(notification.origin).to.equal(new URL('/', url).toString());
++      expect(notification.documentUrl).to.equal(new URL('/frame.html', url).toString());
++      expect(notification.frame).to.not.equal(undefined);
++      expect(notification.frame!.url).to.equal(new URL('/frame.html', url).toString());
++      expect(notification.webContents).to.equal(w.webContents);
++      expect(notification.serviceWorkerScope).to.equal(undefined);
++      expect(notification.serviceWorker).to.equal(undefined);
++
++      notification.close({ byUser: false });
++    });
++
++    it('receives notifications created by dedicated workers', async () => {
++      const ses = createSession();
++      const server = http.createServer((req, res) => {
++        if (req.url === '/dedicated-worker.js') {
++          res.setHeader('Content-Type', 'text/javascript');
++          res.end(`
++            self.onmessage = () => {
++              const notification = new Notification('Dedicated worker title', {
++                body: 'Dedicated worker body',
++                tag: 'dedicated-worker-tag'
++              });
++              notification.onclick = () => self.postMessage({ type: 'click' });
++              notification.onclose = () => self.postMessage({ type: 'close' });
++              self.postMessage({ type: 'created' });
++            };
++          `);
++          return;
++        }
++
++        res.setHeader('Content-Type', 'text/html');
++        res.end('<!DOCTYPE html><html><body></body></html>');
++      });
++      defer(() => {
++        server.close();
++      });
++
++      const { url } = await listen(server);
++      const w = new BrowserWindow({ show: false, webPreferences: { session: ses } });
++      const nextNotification = installQueuedNotificationHandler(ses);
++      await w.loadURL(url);
++
++      const created = w.webContents.executeJavaScript(`
++        (async () => {
++          await Notification.requestPermission();
++          window.dedicatedNotificationWorker = new Worker('/dedicated-worker.js');
++          return await new Promise(resolve => {
++            window.dedicatedNotificationWorker.onmessage = event => {
++              if (event.data.type === 'created') resolve(event.data);
++            };
++            window.dedicatedNotificationWorker.postMessage('show');
++          });
++        })()
++      `);
++
++      expect(await created).to.deep.equal({ type: 'created' });
++      const notification = await nextNotification();
++      expect(notification.persistent).to.equal(false);
++      expect(notification.title).to.equal('Dedicated worker title');
++      expect(notification.body).to.equal('Dedicated worker body');
++      expect(notification.tag).to.equal('dedicated-worker-tag');
++      expect(notification.origin).to.equal(new URL('/', url).toString());
++      expect(notification.documentUrl).to.equal(undefined);
++      expect(notification.frame).to.not.equal(undefined);
++      expect(notification.frame!.url).to.equal(new URL('/', url).toString());
++      expect(notification.webContents).to.equal(w.webContents);
++      expect(notification.serviceWorkerScope).to.equal(undefined);
++      expect(notification.serviceWorker).to.equal(undefined);
++
++      const clickResult = w.webContents.executeJavaScript(`
++        new Promise(resolve => {
++          window.dedicatedNotificationWorker.onmessage = event => {
++            if (event.data.type === 'click') resolve(event.data);
++          };
++        })
++      `);
++      const clickEvent = once(notification, 'click');
++      notification.click();
++      await clickEvent;
++      expect(await clickResult).to.deep.equal({ type: 'click' });
++
++      notification.close({ byUser: false });
++    });
++
++    it('receives notifications created by shared workers', async () => {
++      const ses = createSession();
++      const server = http.createServer((req, res) => {
++        if (req.url === '/shared-worker.js') {
++          res.setHeader('Content-Type', 'text/javascript');
++          res.end(`
++            self.onconnect = event => {
++              const port = event.ports[0];
++              port.onmessage = () => {
++                try {
++                  const notification = new Notification('Shared worker title', {
++                    body: 'Shared worker body',
++                    tag: 'shared-worker-tag'
++                  });
++                  notification.onclick = () => port.postMessage({ type: 'click' });
++                  notification.onclose = () => port.postMessage({ type: 'close' });
++                  port.postMessage({
++                    type: 'created',
++                    permission: Notification.permission
++                  });
++                } catch (error) {
++                  port.postMessage({
++                    type: 'error',
++                    name: error.name,
++                    message: error.message,
++                    permission: Notification.permission
++                  });
++                }
++              };
++              port.start();
++              port.postMessage({
++                type: 'ready',
++                permission: Notification.permission
++              });
++            };
++          `);
++          return;
++        }
++
++        res.setHeader('Content-Type', 'text/html');
++        res.end('<!DOCTYPE html><html><body></body></html>');
++      });
++      defer(() => {
++        server.close();
++      });
++
++      const { url } = await listen(server);
++      const w = new BrowserWindow({ show: false, webPreferences: { session: ses } });
++      const nextNotification = installQueuedNotificationHandler(ses);
++      await w.loadURL(url);
++
++      const workerName = `shared-worker-notification-${crypto.randomUUID()}`;
++      const created = w.webContents.executeJavaScript(`
++        (async () => {
++          window.sharedNotificationWorker = new SharedWorker(
++            '/shared-worker.js',
++            ${JSON.stringify(workerName)}
++          );
++          const port = window.sharedNotificationWorker.port;
++          return await new Promise(resolve => {
++            const timeout = setTimeout(() => {
++              resolve({
++                type: 'timeout',
++                permission: Notification.permission
++              });
++            }, 5000);
++            port.onmessage = event => {
++              if (event.data.type === 'ready') {
++                port.postMessage('show');
++                return;
++              }
++              if (event.data.type === 'created' || event.data.type === 'error') {
++                clearTimeout(timeout);
++                resolve(event.data);
++              }
++            };
++            port.start();
++          });
++        })()
++      `);
++
++      expect(await created).to.deep.equal({
++        type: 'created',
++        permission: 'granted'
++      });
++      const notification = await nextNotification();
++      expect(notification.persistent).to.equal(false);
++      expect(notification.title).to.equal('Shared worker title');
++      expect(notification.body).to.equal('Shared worker body');
++      expect(notification.tag).to.equal('shared-worker-tag');
++      expect(notification.origin).to.equal(new URL('/', url).toString());
++      expect(notification.documentUrl).to.equal(undefined);
++      expect(notification.frame).to.equal(undefined);
++      expect(notification.webContents).to.equal(undefined);
++      expect(notification.serviceWorkerScope).to.equal(undefined);
++      expect(notification.serviceWorker).to.equal(undefined);
++
++      const clickResult = w.webContents.executeJavaScript(`
++        new Promise(resolve => {
++          window.sharedNotificationWorker.port.onmessage = event => {
++            if (event.data.type === 'click') resolve(event.data);
++          };
++        })
++      `);
++      const clickEvent = once(notification, 'click');
++      notification.click();
++      await clickEvent;
++      expect(await clickResult).to.deep.equal({ type: 'click' });
++
++      notification.close({ byUser: false });
++    });
++
++    it('does not invoke the handler when notification permission is denied', async () => {
++      const ses = createSession(false);
++      const server = http.createServer((_req, res) => {
++        res.setHeader('Content-Type', 'text/html');
++        res.end('<!DOCTYPE html><html><body></body></html>');
++      });
++      defer(() => {
++        server.close();
++      });
++
++      const { url } = await listen(server);
++      const w = new BrowserWindow({ show: false, webPreferences: { session: ses } });
++      await w.loadURL(url);
++
++      let handled = false;
++      ses.setWebNotificationHandler((notification) => {
++        notification.suppress();
++        handled = true;
++      });
++
++      const result = await w.webContents.executeJavaScript(`
++        (async () => {
++          const permission = await Notification.requestPermission();
++          let error = null;
++          try {
++            new Notification('Denied title');
++          } catch (e) {
++            error = e.name;
++          }
++          return { permission, error };
++        })()
++      `);
++
++      expect(result.permission).to.equal('denied');
++      await setTimeout(100);
++      expect(handled).to.equal(false);
++    });
++
++    it('closes the previous non-persistent notification with the same tag', async () => {
++      const ses = createSession();
++      const server = http.createServer((_req, res) => {
++        res.setHeader('Content-Type', 'text/html');
++        res.end('<!DOCTYPE html><html><body></body></html>');
++      });
++      defer(() => {
++        server.close();
++      });
++
++      const { url } = await listen(server);
++      const w = new BrowserWindow({ show: false, webPreferences: { session: ses } });
++      const nextNotification = installQueuedNotificationHandler(ses);
++      await w.loadURL(url);
++
++      await w.webContents.executeJavaScript(`
++        (async () => {
++          await Notification.requestPermission();
++          new Notification('First tagged title', { tag: 'same-tag' });
++        })()
++      `);
++      const firstNotification = await nextNotification();
++      const firstCloseEvent = once(firstNotification, 'close');
++
++      await w.webContents.executeJavaScript(`
++        new Notification('Second tagged title', { tag: 'same-tag' })
++      `);
++      const secondNotification = await nextNotification();
++      const [closeDetails] = await firstCloseEvent;
++
++      expect(closeDetails.byUser).to.equal(false);
++      expect(closeDetails.reason).to.equal('programmatic');
++      expect(firstNotification.isDestroyed()).to.equal(true);
++      expect(secondNotification.title).to.equal('Second tagged title');
++      expect(secondNotification.tag).to.equal('same-tag');
++
++      secondNotification.close({ byUser: false });
++    });
++
++    it('receives and controls persistent notifications created by a service worker', async () => {
++      const ses = createSession();
++      const server = http.createServer((req, res) => {
++        if (req.url === '/service-worker.js') {
++          res.setHeader('Content-Type', 'text/javascript');
++          res.end(`
++            async function postNotificationMessage(message) {
++              const clients = await self.clients.matchAll({
++                type: 'window',
++                includeUncontrolled: true
++              });
++              for (const client of clients) {
++                client.postMessage(message);
++              }
++            }
++
++            self.addEventListener('notificationclick', event => {
++              event.waitUntil(postNotificationMessage({
++                type: 'click',
++                action: event.action || '',
++                reply: event.reply || null,
++                title: event.notification.title,
++                tag: event.notification.tag
++              }));
++            });
++
++            self.addEventListener('notificationclose', event => {
++              event.waitUntil(postNotificationMessage({
++                type: 'close',
++                title: event.notification.title,
++                tag: event.notification.tag
++              }));
++            });
++          `);
++          return;
++        }
++
++        res.setHeader('Content-Type', 'text/html');
++        res.end('<!DOCTYPE html><html><body></body></html>');
++      });
++      defer(() => {
++        server.close();
++      });
++
++      const { url } = await listen(server);
++      const w = new BrowserWindow({ show: false, webPreferences: { session: ses } });
++      await w.loadURL(url);
++
++      const nextNotification = installQueuedNotificationHandler(ses);
++
++      await w.webContents.executeJavaScript(`
++        (async () => {
++          await Notification.requestPermission();
++          await navigator.serviceWorker.register('/service-worker.js');
++          await navigator.serviceWorker.ready;
++        })()
++      `);
++
++      const showPersistentNotification = async (tag: string) => {
++        const notificationPromise = nextNotification();
++        await w.webContents.executeJavaScript(`
++          (async () => {
++            const registration = await navigator.serviceWorker.ready;
++            await registration.showNotification('Service worker title', {
++              body: 'Service worker body',
++              tag: ${JSON.stringify(tag)},
++              actions: [
++                { action: 'open', title: 'Open' },
++                {
++                  action: 'reply',
++                  title: 'Reply',
++                  type: 'text',
++                  placeholder: 'Reply here'
++                }
++              ]
++            });
++          })()
++        `);
++        const notification = await notificationPromise;
++        if (notification.persistent !== true)
++          throw new Error('Expected a persistent service worker notification');
++        return notification;
++      };
++
++      const nextServiceWorkerMessage = (type: string, tag: string) => {
++        return w.webContents.executeJavaScript(`
++          new Promise(resolve => {
++            const handler = event => {
++              if (event.data.type === ${JSON.stringify(type)} &&
++                  event.data.tag === ${JSON.stringify(tag)}) {
++                navigator.serviceWorker.removeEventListener('message', handler);
++                resolve(event.data);
++              }
++            };
++            navigator.serviceWorker.addEventListener('message', handler);
++          })
++        `);
++      };
++
++      const actionNotification = await showPersistentNotification('action-tag');
++      expect(actionNotification.persistent).to.equal(true);
++      expect(actionNotification.title).to.equal('Service worker title');
++      expect(actionNotification.body).to.equal('Service worker body');
++      expect(actionNotification.tag).to.equal('action-tag');
++      expect(actionNotification.origin).to.equal(new URL('/', url).toString());
++      expect(actionNotification.documentUrl).to.equal(undefined);
++      expect(actionNotification.frame).to.equal(undefined);
++      expect(actionNotification.webContents).to.equal(undefined);
++      expect(actionNotification.serviceWorkerScope).to.equal(new URL('/', url).toString());
++      expect(actionNotification.actions).to.deep.equal([
++        {
++          index: 0,
++          type: 'button',
++          action: 'open',
++          title: 'Open',
++          icon: ''
++        },
++        {
++          index: 1,
++          type: 'text',
++          action: 'reply',
++          title: 'Reply',
++          icon: '',
++          placeholder: 'Reply here'
++        }
++      ]);
++      expect(await actionNotification.getServiceWorker()).to.not.equal(undefined);
++
++      const bodyNotification = await showPersistentNotification('body-tag');
++      const bodyClickEvent = once(bodyNotification, 'click');
++      const bodyClickMessage = nextServiceWorkerMessage('click', 'body-tag');
++      bodyNotification.click();
++      await bodyClickEvent;
++      expect(await bodyClickMessage).to.deep.equal({
++        type: 'click',
++        action: '',
++        reply: null,
++        title: 'Service worker title',
++        tag: 'body-tag'
++      });
++
++      const actionEvent = once(actionNotification, 'action');
++      const actionMessage = nextServiceWorkerMessage('click', 'action-tag');
++      actionNotification.clickAction('open');
++      const [actionDetails] = await actionEvent;
++      expect({
++        index: actionDetails.index,
++        type: actionDetails.type,
++        action: actionDetails.action,
++        title: actionDetails.title,
++        icon: actionDetails.icon
++      }).to.deep.equal(actionNotification.actions[0]);
++      expect(await actionMessage).to.deep.equal({
++        type: 'click',
++        action: 'open',
++        reply: null,
++        title: 'Service worker title',
++        tag: 'action-tag'
++      });
++
++      const indexActionNotification = await showPersistentNotification('index-action-tag');
++      const indexActionEvent = once(indexActionNotification, 'action');
++      const indexActionMessage = nextServiceWorkerMessage('click', 'index-action-tag');
++      indexActionNotification.clickAction(0);
++      const [indexActionDetails] = await indexActionEvent;
++      expect({
++        index: indexActionDetails.index,
++        type: indexActionDetails.type,
++        action: indexActionDetails.action,
++        title: indexActionDetails.title,
++        icon: indexActionDetails.icon
++      }).to.deep.equal(indexActionNotification.actions[0]);
++      expect(await indexActionMessage).to.deep.equal({
++        type: 'click',
++        action: 'open',
++        reply: null,
++        title: 'Service worker title',
++        tag: 'index-action-tag'
++      });
++
++      const replyNotification = await showPersistentNotification('reply-tag');
++      const replyEvent = once(replyNotification, 'reply');
++      const replyMessage = nextServiceWorkerMessage('click', 'reply-tag');
++      replyNotification.reply('hello', 'reply');
++      const [replyDetails] = await replyEvent;
++      expect(replyDetails.text).to.equal('hello');
++      expect(replyDetails.index).to.equal(1);
++      expect(replyDetails.action).to.deep.equal(replyNotification.actions[1]);
++      expect(await replyMessage).to.deep.equal({
++        type: 'click',
++        action: 'reply',
++        reply: 'hello',
++        title: 'Service worker title',
++        tag: 'reply-tag'
++      });
++
++      const defaultReplyNotification = await showPersistentNotification('default-reply-tag');
++      const defaultReplyEvent = once(defaultReplyNotification, 'reply');
++      const defaultReplyMessage = nextServiceWorkerMessage('click', 'default-reply-tag');
++      defaultReplyNotification.reply('default hello');
++      const [defaultReplyDetails] = await defaultReplyEvent;
++      expect(defaultReplyDetails.text).to.equal('default hello');
++      expect(defaultReplyDetails.index).to.equal(1);
++      expect(defaultReplyDetails.action).to.deep.equal(defaultReplyNotification.actions[1]);
++      expect(await defaultReplyMessage).to.deep.equal({
++        type: 'click',
++        action: 'reply',
++        reply: 'default hello',
++        title: 'Service worker title',
++        tag: 'default-reply-tag'
++      });
++
++      const closeNotification = await showPersistentNotification('close-tag');
++      const closeEvent = once(closeNotification, 'close');
++      const closeMessage = nextServiceWorkerMessage('close', 'close-tag');
++      closeNotification.close({ byUser: true });
++      const [closeDetails] = await closeEvent;
++      expect(closeDetails.byUser).to.equal(true);
++      expect(closeDetails.reason).to.equal('user');
++      expect(await closeMessage).to.deep.equal({
++        type: 'close',
++        title: 'Service worker title',
++        tag: 'close-tag'
++      });
++      expect(closeNotification.isDestroyed()).to.equal(true);
++    });
++  });
++
+   describe('ses.setPermissionCheckHandler(handler)', () => {
+     afterEach(closeAllWindows);
+     it('details provides requestingURL for mainFrame', async () => {
+diff --git a/spec/ts-smoke/electron/main.ts b/spec/ts-smoke/electron/main.ts
+index ce232eaaa6..e9fa320a1f 100644
+--- a/spec/ts-smoke/electron/main.ts
++++ b/spec/ts-smoke/electron/main.ts
+@@ -102,6 +102,80 @@ const sharedMemoryScopedPayload = SharedMemory.withAllocator(
+ );
+ sharedMemoryRawChannel.send(sharedMemoryScopedPayload);
+
++function checkWebNotificationTypes(notification: Electron.WebNotification) {
++  notification.on('action', (details) => {
++    const actionEvent: Electron.WebNotificationActionEvent = details;
++    const index: number = details.index;
++    console.log(actionEvent.action, index);
++  });
++  notification.on('reply', (details) => {
++    const replyEvent: Electron.WebNotificationReplyEvent = details;
++    const text: string = details.text;
++    console.log(replyEvent.index, text);
++  });
++  notification.on('close', (details) => {
++    const closeEvent: Electron.WebNotificationCloseEvent = details;
++    const byUser: boolean = details.byUser;
++    console.log(closeEvent.reason, byUser);
++  });
++  notification.on('failed', (details) => {
++    const failedEvent: Electron.WebNotificationFailedEvent = details;
++    const error: string = details.error;
++    console.log(failedEvent.error, error);
++  });
++
++  if (notification.persistent === true) {
++    const serviceWorkerNotification: Electron.WebServiceWorkerNotification = notification;
++    const persistent: true = serviceWorkerNotification.persistent;
++    const documentUrl: undefined = serviceWorkerNotification.documentUrl;
++    const frame: undefined = serviceWorkerNotification.frame;
++    const serviceWorker: Electron.ServiceWorkerMain | undefined = serviceWorkerNotification.serviceWorker;
++    const serviceWorkerScope: string = serviceWorkerNotification.serviceWorkerScope;
++    const webContentsForPersistent: undefined = serviceWorkerNotification.webContents;
++    const serviceWorkerPromise: Promise<Electron.ServiceWorkerMain> =
++      serviceWorkerNotification.getServiceWorker();
++    console.log(
++      persistent,
++      documentUrl,
++      frame,
++      serviceWorker,
++      serviceWorkerScope,
++      webContentsForPersistent,
++      serviceWorkerPromise
++    );
++  } else {
++    const persistent: false = notification.persistent;
++    const serviceWorker: undefined = notification.serviceWorker;
++    const serviceWorkerScope: undefined = notification.serviceWorkerScope;
++    // @ts-expect-error Service worker resolution is only available on persistent notifications.
++    notification.getServiceWorker();
++    console.log(persistent, serviceWorker, serviceWorkerScope);
++  }
++}
++console.log(checkWebNotificationTypes);
++
++function checkWebFrameNotificationTypes(notification: Electron.WebFrameNotification) {
++  const persistent: false = notification.persistent;
++  const documentUrl: string = notification.documentUrl;
++  const frame: Electron.WebFrameMain = notification.frame;
++  const serviceWorker: undefined = notification.serviceWorker;
++  const serviceWorkerScope: undefined = notification.serviceWorkerScope;
++  const webContentsForFrame: Electron.WebContents = notification.webContents;
++  console.log(persistent, documentUrl, frame, serviceWorker, serviceWorkerScope, webContentsForFrame);
++}
++console.log(checkWebFrameNotificationTypes);
++
++function checkWebWorkerNotificationTypes(notification: Electron.WebWorkerNotification) {
++  const persistent: false = notification.persistent;
++  const documentUrl: undefined = notification.documentUrl;
++  const frame: Electron.WebFrameMain | undefined = notification.frame;
++  const serviceWorker: undefined = notification.serviceWorker;
++  const serviceWorkerScope: undefined = notification.serviceWorkerScope;
++  const webContentsForWorker: Electron.WebContents | undefined = notification.webContents;
++  console.log(persistent, documentUrl, frame, serviceWorker, serviceWorkerScope, webContentsForWorker);
++}
++console.log(checkWebWorkerNotificationTypes);
++
+ // Quick start
+ // https://github.com/electron/electron/blob/main/docs/tutorial/quick-start.md
