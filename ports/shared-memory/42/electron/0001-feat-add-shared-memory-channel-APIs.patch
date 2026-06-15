@@ -4560,7 +4560,7 @@ index 0000000000..39aff2235b
 --- /dev/null
 +++ b/shell/browser/api/electron_api_shared_memory_pool.cc
 @@ -0,0 +1,105 @@
-+// Copyright (c) 2026 SOFTCAMP
++// Copyright (c) 2026 Electron Port Workspace contributors
 +// Use of this source code is governed by the MIT license that can be
 +// found in the LICENSE file.
 +
@@ -5214,7 +5214,7 @@ index 0000000000..becb2a0a47
 --- /dev/null
 +++ b/shell/common/api/electron_api_shared_memory.cc
 @@ -0,0 +1,769 @@
-+// Copyright (c) 2026 SOFTCAMP
++// Copyright (c) 2026 Electron Port Workspace contributors
 +// Use of this source code is governed by the MIT license that can be
 +// found in the LICENSE file.
 +
@@ -5989,7 +5989,7 @@ index 0000000000..dade0ba166
 --- /dev/null
 +++ b/shell/common/api/electron_api_shared_memory.h
 @@ -0,0 +1,54 @@
-+// Copyright (c) 2026 SOFTCAMP
++// Copyright (c) 2026 Electron Port Workspace contributors
 +// Use of this source code is governed by the MIT license that can be
 +// found in the LICENSE file.
 +
@@ -9002,4 +9002,3 @@ index abe9ccecdb..5d0ab24c21 100644
      _linkedBinding(name: 'electron_browser_shared_worker_main'): SharedWorkerMainBinding;
 -- 
 2.53.0
-
