@@ -22,10 +22,9 @@ tags are assigned in Electron's `wrappable_pointer_tags.h`.
 
 Export source:
 
-- Chromium base: `58b612a872f04c6a68fce0bfa26b9bb92cb4787a`
-- Chromium head: `75c8f62795dbdfb387884f8b86548f1087daa246`
-- Electron base: `ea9ee25884e24f0cdbe7fede3c5509f467a768cf`
-- Electron head: `dd0247591d3eb732b5d9a911ca7e614e24da8da2`
+- Chromium range: none
+- Electron base: `ef7c22501aab03d45e1eba30205c6a4b45241a43`
+- Electron head: `fe865b21c188c0525a960101bc6fabe5eb996062`
 
 Use:
 
@@ -36,7 +35,6 @@ C:\work\electron\scripts\port-bundle.ps1 undo worker-runtime -Target 42 -SrcRoot
 
 Validation performed before export:
 
-- `npm run create-typescript-definitions`
-- `npm run test -- --skipYarnInstall --runners=main --grep "isReturnValueSet|WorkerMain module"`
-- `e --config=42-release build -local_jobs 20 -t electron`
-- `C:\work\electron\scripts\build-dev-electron-npm.ps1 -Target 42 --include-widevine-cdm --widevine-license-ack`
+- `e build --no-remote -t electron -local_jobs 20`
+- `env -u ELECTRON_RUN_AS_NODE npm run test -- --skipYarnInstall --runners=main --grep "closing a WebContents with an active dedicated worker"`
+- `env -u ELECTRON_RUN_AS_NODE npm run test -- --skipYarnInstall --runners=main --grep "WorkerMain module"`
