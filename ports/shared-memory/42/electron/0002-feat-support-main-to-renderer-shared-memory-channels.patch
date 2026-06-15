@@ -1,0 +1,1043 @@
+From a52b066270142fcb65ce8d418fdacf94fbbb33bf Mon Sep 17 00:00:00 2001
+From: Jung-Kwang Lee <ntoskrnl7@gmail.com>
+Date: Mon, 15 Jun 2026 00:47:36 +0900
+Subject: [PATCH] feat: support main to renderer shared memory channels
+
+---
+ docs/api/shared-memory.md       |  28 +-
+ lib/common/api/shared-memory.ts | 481 ++++++++++++++++++++++++--------
+ spec/api-shared-memory-spec.ts  | 139 ++++++++-
+ 3 files changed, 521 insertions(+), 127 deletions(-)
+
+diff --git a/docs/api/shared-memory.md b/docs/api/shared-memory.md
+index 0f3f92b91e..128bdc4327 100644
+--- a/docs/api/shared-memory.md
++++ b/docs/api/shared-memory.md
+@@ -47,9 +47,9 @@ Returns [`SharedMemoryPoolStats | null`](structures/shared-memory-pool-stats.md)
+ Current allocation counters for `pool`, or `null` if the pool is not registered
+ in the current process.
+
+-The counters describe allocations made by the current process. If a renderer is
+-the producer, call this method in that renderer to inspect renderer-side pool
+-usage.
++The counters describe allocations made by the current process. Call this method
++in the process that allocates payloads for the counters relevant to that
++producer.
+
+ ### `SharedMemory.createChannel(pool, options)` _Experimental_
+
+@@ -58,9 +58,11 @@ usage.
+
+ Creates a sending `SharedMemoryChannel` endpoint backed by `pool`.
+
+-The current implementation is intended for renderer-to-main streaming. Create
+-the sending endpoint in the renderer and create a matching receiving endpoint in
+-the main process with `SharedMemory.acceptChannel`.
++Create the sending endpoint in either the main process or the renderer process.
++Create a matching receiving endpoint in the peer process with
++`SharedMemory.acceptChannel` and the same channel `name`. When the sending
++endpoint is created in the main process, Electron delivers channel wakeups to the
++renderer frame that was used to create `pool`.
+
+ When `copyFallback` is omitted or set to `throw`, and no ring slot options are
+ provided, this method does not allocate copy-fallback ring storage. This is the
+@@ -85,14 +87,16 @@ Returns `SharedMemoryChannel` - The sending channel endpoint.
+   * `maxTagSize` number (optional) - Maximum encoded tag metadata length for
+     copy-fallback rings. Default is `1024`.
+
+-Creates a receiving `SharedMemoryChannel` endpoint in the main process. The
+-endpoint accepts ring descriptors announced by a renderer endpoint with the same
+-pool id and channel name.
++Creates a receiving `SharedMemoryChannel` endpoint in the main process or the
++renderer process. The endpoint accepts ring descriptors and shared-backed
++payload notifications announced by a sending endpoint with the same pool id and
++channel name.
+
+ Returns `SharedMemoryChannel` - The opened channel endpoint.
+
+ > [!NOTE]
+-> This method is only available in the main process.
++> This method is available in the main and renderer processes. Use it in the
++> process that receives messages.
+
+ ### `SharedMemory.openChannel(pool, descriptor[, options])` _Experimental_
+
+@@ -351,6 +355,10 @@ acknowledgement path. The fire-and-forget `send` method keeps the fastest
+ notification path and does not wait for this acknowledgement. Unlike `send`,
+ `sendAndWait` does not transfer ownership away from the sender.
+
++> [!NOTE]
++> `sendAndWait` is currently implemented only for renderer-to-main channels. Use
++> `send()` for main-to-renderer channels.
++
+ #### `channel.setMessageHandler(handler)` _Experimental_
+
+ * `handler` Function\<Promise\<void\> | void\> | null
+diff --git a/lib/common/api/shared-memory.ts b/lib/common/api/shared-memory.ts
+index 0c7586f052..fb4d454458 100644
+--- a/lib/common/api/shared-memory.ts
++++ b/lib/common/api/shared-memory.ts
+@@ -234,7 +234,12 @@ type BrowserSharedMemoryBinding = {
+ type SharedMemoryIpcRenderer = NodeJS.IpcRendererImpl & {
+   sendSharedMemoryChannelMessage?(channelId: number, payloadId: number, byteLength: number): void;
+   sendSharedMemoryChannelTaggedMessage?(channelId: number, payloadId: number, tag: number, byteLength: number): void;
+-  sendSharedMemoryChannelMessages?(channelId: number, payloadIds: number[], tags: number[], byteLengths: number[]): void;
++  sendSharedMemoryChannelMessages?(
++    channelId: number,
++    payloadIds: number[],
++    tags: number[],
++    byteLengths: number[]
++  ): void;
+ };
+
+ const markerKey = '__electronSharedMemoryDescriptor__';
+@@ -244,6 +249,7 @@ const channelSharedDoorbell = '__electron_shared_memory_channel_shared_readable_
+ const channelFastRegisterDoorbell = '__electron_shared_memory_channel_fast_register__';
+ const channelSharedPayloadRegisterDoorbell = '__electron_shared_memory_channel_shared_payload_register__';
+ const channelSharedPayloadDoorbell = '__electron_shared_memory_channel_shared_payload__';
++const channelSharedPayloadBatchDoorbell = '__electron_shared_memory_channel_shared_payload_batch__';
+ const channelSharedPayloadWaitDoorbell = '__electron_shared_memory_channel_shared_payload_wait__';
+ const channelSharedPayloadAckDoorbell = '__electron_shared_memory_channel_shared_payload_ack__';
+ const channelSharedPayloadReleaseDoorbell = '__electron_shared_memory_channel_shared_payload_release__';
+@@ -258,6 +264,7 @@ let hasNativeChannelMessages: boolean | undefined;
+ let mainChannelListenerInstalled = false;
+ let rendererAckListenerInstalled = false;
+ let rendererReleaseListenerInstalled = false;
++let rendererChannelListenerInstalled = false;
+ let nextFastChannelId = 1;
+ let nextWaitId = 1;
+
+@@ -268,8 +275,10 @@ const acceptedChannels = new Map<string, SharedMemoryChannel>();
+ const fastChannels = new Map<string, SharedMemoryChannel>();
+ const fastChannelEvents = new Map<string, any>();
+ const rendererChannels = new Map<number, SharedMemoryChannel>();
++const browserChannels = new Map<number, SharedMemoryChannel>();
+ const pendingWaits = new Map<number, { resolve: () => void; reject: (error: Error) => void }>();
+ const pendingPayloadReleases = new Map<string, { senderFrame: any; channelId: number; payloadIds: number[] }>();
++const poolTargetFrames = new Map<string, Electron.WebFrameMain>();
+ const sharedAllocatorScopes: SharedAllocatorScope[] = [];
+
+ const OriginalArrayBuffer = globalThis.ArrayBuffer;
+@@ -356,6 +365,23 @@ const getFrameChannelKey = (event: any, channelId: number) => {
+   return `${senderId}:0:${channelId}`;
+ };
+
++const getLocalFrameChannelKey = (channelId: number) => `local:${channelId}`;
++
++const getPoolTargetFrame = (pool: SharedMemoryPool) => {
++  const frame = poolTargetFrames.get(pool.id);
++  if (!frame || typeof (frame as any)._sendInternal !== 'function') {
++    throw new Error('SharedMemoryChannel main-process sender requires a pool created for a target frame');
++  }
++  if (typeof frame.isDestroyed === 'function' && frame.isDestroyed()) {
++    throw new Error('SharedMemoryChannel target frame has been destroyed');
++  }
++  return frame as Electron.WebFrameMain & { _sendInternal(channel: string, ...args: any[]): void };
++};
++
++const sendToPoolTargetFrame = (pool: SharedMemoryPool, channel: string, ...args: any[]) => {
++  getPoolTargetFrame(pool)._sendInternal(channel, ...args);
++};
++
+ const nextPowerOfTwo = (value: number) => {
+   let size = 1;
+   while (size < value) size *= 2;
+@@ -425,10 +451,7 @@ const isPlainObject = (value: any): value is Record<string, any> => {
+   return prototype === Object.prototype || prototype === null;
+ };
+
+-const addDirectRetainedSharedAllocatorObject = (
+-  value: any,
+-  retainedObjects: Set<object>
+-) => {
++const addDirectRetainedSharedAllocatorObject = (value: any, retainedObjects: Set<object>) => {
+   if (isArrayBuffer(value)) {
+     if (bufferDescriptors.has(value)) {
+       retainedObjects.add(value);
+@@ -486,7 +509,7 @@ const addRetainedSharedAllocatorObjects = (
+ };
+
+ const getSharedAllocatorObjectBuffer = (value: ArrayBuffer | ArrayBufferView) => {
+-  return isArrayBuffer(value) ? value : value.buffer as ArrayBuffer;
++  return isArrayBuffer(value) ? value : (value.buffer as ArrayBuffer);
+ };
+
+ const recordSharedAllocatorScopeAllocation = (
+@@ -673,10 +696,15 @@ const registerAllocatedObject = (
+   if (!options.channel) return undefined;
+   const payloadDescriptor = descriptor ?? describe(value);
+   if (payloadDescriptor && payloadDescriptor.poolId === options.channel.pool.id) {
+-    const buffer = isArrayBuffer(value) ? value : value.buffer as ArrayBuffer;
++    const buffer = isArrayBuffer(value) ? value : (value.buffer as ArrayBuffer);
+     const payloadId = channelAllocationPayloadIds.get(buffer);
+     const capacityDescriptor = channelAllocationCapacityDescriptors.get(buffer) ?? payloadDescriptor;
+-    const registration = options.channel._registerSharedPayloadObject(value, payloadDescriptor, capacityDescriptor, payloadId);
++    const registration = options.channel._registerSharedPayloadObject(
++      value,
++      payloadDescriptor,
++      capacityDescriptor,
++      payloadId
++    );
+     channelAllocationPayloadIds.set(buffer, registration.payloadId);
+     channelAllocationCapacityDescriptors.set(buffer, capacityDescriptor);
+     recordSharedAllocatorScopeAllocation(options.channel, value, registration.payloadId);
+@@ -744,12 +772,13 @@ const allocateBuffer = (
+     return null;
+   }
+
+-  const descriptor = allocationByteLength === byteLength
+-    ? result.descriptor
+-    : {
+-        ...result.descriptor,
+-        byteLength
+-      };
++  const descriptor =
++    allocationByteLength === byteLength
++      ? result.descriptor
++      : {
++          ...result.descriptor,
++          byteLength
++        };
+   const buffer = allocationByteLength === byteLength ? result.buffer : commonBinding.view(descriptor);
+   if (!buffer) {
+     if (options.onOverflow === 'throw') {
+@@ -800,9 +829,7 @@ const makeArrayBufferConstructor = () => {
+   return PatchedArrayBuffer as unknown as ArrayBufferConstructor;
+ };
+
+-const makeTypedArrayConstructor = (
+-  name: (typeof typedArrayConstructors)[number]
+-) => {
++const makeTypedArrayConstructor = (name: (typeof typedArrayConstructors)[number]) => {
+   const OriginalConstructor = OriginalTypedArrayConstructors.get(name);
+   const bytesPerElement = OriginalConstructor.BYTES_PER_ELEMENT as number;
+
+@@ -1070,24 +1097,27 @@ const installRendererAckListener = () => {
+ const installRendererReleaseListener = () => {
+   if (rendererReleaseListenerInstalled || process.type !== 'renderer') return;
+   rendererReleaseListenerInstalled = true;
+-  getRendererInternalIpc().on(channelSharedPayloadReleaseDoorbell, (_event: any, channelId: number, payloadIds: any) => {
+-    if (!Number.isSafeInteger(channelId) || channelId <= 0) return;
+-    const channel = rendererChannels.get(channelId);
+-    if (!channel) return;
++  getRendererInternalIpc().on(
++    channelSharedPayloadReleaseDoorbell,
++    (_event: any, channelId: number, payloadIds: any) => {
++      if (!Number.isSafeInteger(channelId) || channelId <= 0) return;
++      const channel = rendererChannels.get(channelId);
++      if (!channel) return;
+
+-    if (Array.isArray(payloadIds)) {
+-      for (const payloadId of payloadIds) {
+-        if (Number.isSafeInteger(payloadId) && payloadId > 0) {
+-          channel._releaseTransferredPayload(payloadId);
++      if (Array.isArray(payloadIds)) {
++        for (const payloadId of payloadIds) {
++          if (Number.isSafeInteger(payloadId) && payloadId > 0) {
++            channel._releaseTransferredPayload(payloadId);
++          }
+         }
++        return;
+       }
+-      return;
+-    }
+
+-    if (Number.isSafeInteger(payloadIds) && payloadIds > 0) {
+-      channel._releaseTransferredPayload(payloadIds);
++      if (Number.isSafeInteger(payloadIds) && payloadIds > 0) {
++        channel._releaseTransferredPayload(payloadIds);
++      }
+     }
+-  });
++  );
+ };
+
+ const sendWaitAck = (event: any, waitId: number | undefined, error?: unknown) => {
+@@ -1101,21 +1131,26 @@ const sendWaitAck = (event: any, waitId: number | undefined, error?: unknown) =>
+
+ const queuePayloadRelease = (event: any, channelId: number, payloadId: number) => {
+   const senderFrame = event?.senderFrame;
+-  if (!senderFrame || typeof senderFrame._sendInternal !== 'function') return;
+-  const key = getFrameChannelKey(event, channelId);
++  const canSendToSenderFrame = senderFrame && typeof senderFrame._sendInternal === 'function';
++  if (!canSendToSenderFrame && process.type !== 'renderer') return;
++  const key = canSendToSenderFrame ? getFrameChannelKey(event, channelId) : getLocalFrameChannelKey(channelId);
+   let pending = pendingPayloadReleases.get(key);
+   if (!pending) {
+-    pending = { senderFrame, channelId, payloadIds: [] };
++    pending = { senderFrame: canSendToSenderFrame ? senderFrame : undefined, channelId, payloadIds: [] };
+     pendingPayloadReleases.set(key, pending);
+     queueMicrotask(() => {
+       const batch = pendingPayloadReleases.get(key);
+       if (!batch) return;
+       pendingPayloadReleases.delete(key);
+       try {
+-        batch.senderFrame._sendInternal(channelSharedPayloadReleaseDoorbell, batch.channelId, batch.payloadIds);
++        if (batch.senderFrame) {
++          batch.senderFrame._sendInternal(channelSharedPayloadReleaseDoorbell, batch.channelId, batch.payloadIds);
++        } else {
++          getRendererIpc().send(false, channelSharedPayloadReleaseDoorbell, [batch.channelId, batch.payloadIds]);
++        }
+       } catch {
+-        // The sender frame may have gone away; the renderer channel will be
+-        // destroyed with that frame.
++        // The peer may have gone away; its local channel state will be destroyed
++        // with that process/frame.
+       }
+     });
+   }
+@@ -1130,6 +1165,7 @@ const createPool = async (options: {
+   const size = options.size ?? defaultPoolSize;
+   const maxAllocationSize = options.maxAllocationSize ?? size;
+   const id = await getBrowserBinding().createPool(options.frame, size, maxAllocationSize);
++  poolTargetFrames.set(id, options.frame);
+   return {
+     id,
+     size,
+@@ -1144,11 +1180,7 @@ const getPoolStats = (pool: SharedMemoryPool): SharedMemoryPoolStats | null => {
+   return commonBinding.getPoolStats(pool);
+ };
+
+-const withAllocator = <T>(
+-  pool: SharedMemoryPool,
+-  fn: () => T,
+-  allocatorOptions: SharedAllocatorOptions = {}
+-): T => {
++const withAllocator = <T>(pool: SharedMemoryPool, fn: () => T, allocatorOptions: SharedAllocatorOptions = {}): T => {
+   const options = { ...defaultOptions(pool), ...allocatorOptions };
+   if (allocatorOptions.channel && allocatorOptions.onOverflow === undefined) {
+     options.onOverflow = 'throw';
+@@ -1158,9 +1190,7 @@ const withAllocator = <T>(
+   }
+   const scope = options.channel ? { channel: options.channel, allocations: [] } : undefined;
+   const savedConstructors = new Map<string, any>();
+-  const constructorContext = options.arrayBuffer || options.typedArrays
+-    ? { pool, options }
+-    : undefined;
++  const constructorContext = options.arrayBuffer || options.typedArrays ? { pool, options } : undefined;
+   if (constructorContext) {
+     sharedAllocatorConstructorContexts.push(constructorContext);
+   }
+@@ -1385,7 +1415,14 @@ const installMainChannelListener = () => {
+   );
+   ipcMain.on(
+     channelSharedPayloadWaitDoorbell,
+-    (event: any, channelId: number, payloadId: number, tag: SharedMemoryChannelTag, waitId: number, byteLength?: number) => {
++    (
++      event: any,
++      channelId: number,
++      payloadId: number,
++      tag: SharedMemoryChannelTag,
++      waitId: number,
++      byteLength?: number
++    ) => {
+       if (
+         !Number.isSafeInteger(channelId) ||
+         channelId <= 0 ||
+@@ -1404,6 +1441,119 @@ const installMainChannelListener = () => {
+       channel._emitRegisteredSharedMessage(event, channelId, payloadId, tag, byteLength, waitId);
+     }
+   );
++  ipcMain.on(channelSharedPayloadReleaseDoorbell, (_event: any, channelId: number, payloadIds: any) => {
++    if (!Number.isSafeInteger(channelId) || channelId <= 0) return;
++    const channel = browserChannels.get(channelId);
++    if (!channel) return;
++
++    if (Array.isArray(payloadIds)) {
++      for (const payloadId of payloadIds) {
++        if (Number.isSafeInteger(payloadId) && payloadId > 0) {
++          channel._releaseTransferredPayload(payloadId);
++        }
++      }
++      return;
++    }
++
++    if (Number.isSafeInteger(payloadIds) && payloadIds > 0) {
++      channel._releaseTransferredPayload(payloadIds);
++    }
++  });
++};
++
++const installRendererChannelListener = () => {
++  if (rendererChannelListenerInstalled || process.type !== 'renderer') return;
++  rendererChannelListenerInstalled = true;
++  const ipc = getRendererInternalIpc();
++
++  ipc.on(
++    channelFastRegisterDoorbell,
++    (event: any, channelId: number, poolId: string, name: string, descriptor?: SharedMemoryChannelDescriptor) => {
++      if (
++        !Number.isSafeInteger(channelId) ||
++        channelId <= 0 ||
++        typeof poolId !== 'string' ||
++        typeof name !== 'string'
++      ) {
++        return;
++      }
++      const channel = acceptedChannels.get(getChannelKey(poolId, name));
++      if (!channel) return;
++
++      if (descriptor && descriptor.poolId === poolId && descriptor.name === name && Array.isArray(descriptor.rings)) {
++        channel._acceptDescriptor(descriptor);
++      }
++
++      const key = getLocalFrameChannelKey(channelId);
++      fastChannels.set(key, channel);
++      fastChannelEvents.set(key, event);
++
++      if (descriptor) {
++        channel._drain(event);
++      }
++    }
++  );
++
++  ipc.on(channelDoorbell, (event: any, descriptor: SharedMemoryChannelDescriptor) => {
++    if (!descriptor || typeof descriptor.poolId !== 'string' || typeof descriptor.name !== 'string') {
++      return;
++    }
++    const channel = acceptedChannels.get(getChannelKey(descriptor.poolId, descriptor.name));
++    if (!channel) return;
++    channel._acceptDescriptor(descriptor);
++    channel._drain(event);
++  });
++
++  ipc.on(
++    channelSharedPayloadRegisterDoorbell,
++    (
++      event: any,
++      channelId: number,
++      payloadId: number,
++      descriptor: SharedMemoryDescriptor,
++      delivery?: SharedMemoryChannelDelivery
++    ) => {
++      if (
++        !Number.isSafeInteger(channelId) ||
++        channelId <= 0 ||
++        !Number.isSafeInteger(payloadId) ||
++        payloadId <= 0 ||
++        !isPlainObject(descriptor)
++      ) {
++        return;
++      }
++      const key = getLocalFrameChannelKey(channelId);
++      const channel = fastChannels.get(key);
++      if (!channel) return;
++      channel._registerSharedPayloadForKey(event, channelId, key, payloadId, descriptor, delivery);
++    }
++  );
++
++  ipc.on(
++    channelSharedPayloadDoorbell,
++    (event: any, channelId: number, payloadId: number, tag: SharedMemoryChannelTag, byteLength?: number) => {
++      if (!Number.isSafeInteger(channelId) || channelId <= 0 || !Number.isSafeInteger(payloadId) || payloadId <= 0) {
++        return;
++      }
++      const key = getLocalFrameChannelKey(channelId);
++      const channel = fastChannels.get(key);
++      if (!channel) return;
++      channel._emitRegisteredSharedMessageForKey(event, channelId, key, payloadId, tag, byteLength);
++    }
++  );
++
++  ipc.on(
++    channelSharedPayloadBatchDoorbell,
++    (event: any, channelId: number, payloadIds: any[], tags: any[], byteLengths?: any[]) => {
++      if (!Number.isSafeInteger(channelId) || channelId <= 0) {
++        return;
++      }
++      const key = getLocalFrameChannelKey(channelId);
++      const channel = fastChannels.get(key);
++      if (!channel) return;
++      dispatchRegisteredSharedBatch(event, channel, channelId, key, payloadIds, tags, byteLengths);
++    }
++  );
+ };
+
+ export const _dispatchSharedMemoryChannelMessage = (
+@@ -1602,6 +1752,7 @@ class SharedMemoryChannel {
+   #lastSharedBufferPayload?: ArrayBuffer;
+   #pendingSharedPayloadMessages: PendingSharedPayloadMessage[] = [];
+   #pendingSharedPayloadFlushScheduled = false;
++  #senderActivated = false;
+   #allocator?: ChannelAllocatorState;
+   #views?: Map<number, SharedMemoryViewConstructor>;
+   #messageHandler?: SharedMemoryChannelMessageHandler;
+@@ -1621,6 +1772,7 @@ class SharedMemoryChannel {
+       delivery?: SharedMemoryChannelDelivery;
+       allocator?: NormalizedSharedMemoryChannelAllocatorOptions;
+       views?: Map<number, SharedMemoryViewConstructor>;
++      sender?: boolean;
+     } = {}
+   ) {
+     const delivery = normalizeChannelDelivery(options.delivery);
+@@ -1642,10 +1794,8 @@ class SharedMemoryChannel {
+     for (const ring of this.descriptor.rings) {
+       commonBinding.openRing(ring);
+     }
+-    if (process.type === 'renderer') {
+-      rendererChannels.set(this.#fastChannelId, this);
+-      installRendererReleaseListener();
+-      this.initializeAllocator(options.allocator);
++    if (options.sender) {
++      this.activateSender(options.allocator);
+     }
+   }
+
+@@ -1836,8 +1986,8 @@ class SharedMemoryChannel {
+   /**
+    * Closes this local channel endpoint.
+    *
+-   * Closing prevents future `send()` calls and unregisters accepted main-process
+-   * receivers. Shared-memory ring mappings remain valid until their V8 backing
++   * Closing prevents future `send()` calls and unregisters accepted receivers.
++   * Shared-memory ring mappings remain valid until their V8 backing
+    * stores and native process mappings are released.
+    */
+   close() {
+@@ -1856,6 +2006,7 @@ class SharedMemoryChannel {
+       }
+     });
+     rendererChannels.delete(this.#fastChannelId);
++    browserChannels.delete(this.#fastChannelId);
+     this.#sharedPayloadObjectIds = new WeakMap<object, number>();
+     this.#sharedPayloadIds.clear();
+     this.#sharedPayloadStates.clear();
+@@ -1872,6 +2023,7 @@ class SharedMemoryChannel {
+     this.#lastSharedBufferPayload = undefined;
+     this.#pendingSharedPayloadMessages = [];
+     this.#pendingSharedPayloadFlushScheduled = false;
++    this.#senderActivated = false;
+     this.#messageHandler = undefined;
+     this.#errorHandler = undefined;
+     this.#dropHandler = undefined;
+@@ -1940,13 +2092,30 @@ class SharedMemoryChannel {
+     payloadId: number,
+     descriptor: SharedMemoryDescriptor,
+     delivery?: SharedMemoryChannelDelivery
++  ) {
++    this._registerSharedPayloadForKey(
++      event,
++      channelId,
++      getFrameChannelKey(event, channelId),
++      payloadId,
++      descriptor,
++      delivery
++    );
++  }
++
++  _registerSharedPayloadForKey(
++    _event: any,
++    _channelId: number,
++    frameChannelKey: string,
++    payloadId: number,
++    descriptor: SharedMemoryDescriptor,
++    delivery?: SharedMemoryChannelDelivery
+   ) {
+     if (descriptor.poolId !== this.pool.id) {
+       this.emitError(new Error('SharedMemoryChannel received a payload from a different pool'));
+       return;
+     }
+
+-    const frameChannelKey = getFrameChannelKey(event, channelId);
+     let descriptors = this.#sharedPayloadDescriptorsByFrame.get(frameChannelKey);
+     if (!descriptors) {
+       descriptors = new Map<number, SharedMemoryDescriptor>();
+@@ -2038,11 +2207,7 @@ class SharedMemoryChannel {
+     return this.registerSharedPayloadObject(data, descriptor, capacityDescriptor, payloadId);
+   }
+
+-  _attachKnownSharedPayloadObject(
+-    data: ArrayBuffer | ArrayBufferView,
+-    payloadId: number,
+-    skipChannelMarker = false
+-  ) {
++  _attachKnownSharedPayloadObject(data: ArrayBuffer | ArrayBufferView, payloadId: number, skipChannelMarker = false) {
+     this.#sharedPayloadObjectIds.set(data, payloadId);
+     if (skipChannelMarker) return;
+     setChannelPayloadObjectInfo(data, {
+@@ -2051,14 +2216,27 @@ class SharedMemoryChannel {
+     });
+   }
+
++  private activateSender(options?: NormalizedSharedMemoryChannelAllocatorOptions) {
++    if (this.#senderActivated) return;
++    this.#senderActivated = true;
++    if (process.type === 'renderer') {
++      rendererChannels.set(this.#fastChannelId, this);
++      installRendererReleaseListener();
++    } else if (process.type === 'browser') {
++      browserChannels.set(this.#fastChannelId, this);
++      installMainChannelListener();
++    }
++    this.initializeAllocator(options);
++  }
++
+   private initializeAllocator(options?: NormalizedSharedMemoryChannelAllocatorOptions) {
+     if (!options) return;
+
+-    const configuredClasses = (options.classes && options.classes.length > 0
+-      ? options.classes
+-      : buildAutoAllocatorClasses(this.pool)).filter((slotClass) => slotClass.size <= this.pool.maxAllocationSize);
+-    const classes = configuredClasses
+-      .map((slotClass): ChannelAllocatorClass => ({
++    const configuredClasses = (
++      options.classes && options.classes.length > 0 ? options.classes : buildAutoAllocatorClasses(this.pool)
++    ).filter((slotClass) => slotClass.size <= this.pool.maxAllocationSize);
++    const classes = configuredClasses.map(
++      (slotClass): ChannelAllocatorClass => ({
+         size: slotClass.size,
+         slots: [],
+         freeSlots: [],
+@@ -2066,7 +2244,8 @@ class SharedMemoryChannel {
+         misses: 0,
+         largerFallbacks: 0,
+         dynamicFallbacks: 0
+-      }));
++      })
++    );
+
+     if (classes.length === 0) return;
+
+@@ -2191,9 +2370,8 @@ class SharedMemoryChannel {
+       };
+       slot.descriptors.set(byteLength, descriptor);
+     }
+-    let buffer: ArrayBuffer | undefined = byteLength === slot.capacity
+-      ? slot.capacityBuffer
+-      : slot.buffers.get(byteLength);
++    let buffer: ArrayBuffer | undefined =
++      byteLength === slot.capacity ? slot.capacityBuffer : slot.buffers.get(byteLength);
+     if (!buffer) {
+       const mappedBuffer = commonBinding.view(descriptor);
+       if (!mappedBuffer) {
+@@ -2315,7 +2493,9 @@ class SharedMemoryChannel {
+         return this.#lastSharedBufferPayload;
+       }
+       const descriptor = this.#lastSharedPayloadDescriptors?.get(payloadId);
+-      const payload = descriptor ? this.getSharedPayloadBuffer(frameChannelKey, payloadId, descriptor, byteLength) : undefined;
++      const payload = descriptor
++        ? this.getSharedPayloadBuffer(frameChannelKey, payloadId, descriptor, byteLength)
++        : undefined;
+       if (payload) {
+         this.#lastSharedBufferPayloadId = payloadId;
+         this.#lastSharedBufferByteLength = byteLength ?? 0;
+@@ -2327,11 +2507,13 @@ class SharedMemoryChannel {
+     const descriptors = this.#sharedPayloadDescriptorsByFrame.get(frameChannelKey);
+     if (!descriptors) return undefined;
+     const descriptor = descriptors.get(payloadId);
+-    const payload = descriptor ? this.getSharedPayloadBuffer(frameChannelKey, payloadId, descriptor, byteLength) : undefined;
++    const payload = descriptor
++      ? this.getSharedPayloadBuffer(frameChannelKey, payloadId, descriptor, byteLength)
++      : undefined;
+     this.#lastSharedBufferFrameChannelKey = frameChannelKey;
+     this.#lastSharedPayloadDescriptors = descriptors;
+     this.#lastSharedBufferPayloadId = payload ? payloadId : 0;
+-    this.#lastSharedBufferByteLength = payload ? byteLength ?? 0 : 0;
++    this.#lastSharedBufferByteLength = payload ? (byteLength ?? 0) : 0;
+     this.#lastSharedBufferPayload = payload;
+     return payload;
+   }
+@@ -2343,16 +2525,21 @@ class SharedMemoryChannel {
+     byteLength?: number
+   ): ArrayBuffer | undefined {
+     const logicalByteLength = byteLength ?? descriptor.byteLength;
+-    if (!Number.isSafeInteger(logicalByteLength) || logicalByteLength < 0 || logicalByteLength > descriptor.byteLength) {
++    if (
++      !Number.isSafeInteger(logicalByteLength) ||
++      logicalByteLength < 0 ||
++      logicalByteLength > descriptor.byteLength
++    ) {
+       return undefined;
+     }
+
+-    const logicalDescriptor = logicalByteLength === descriptor.byteLength
+-      ? descriptor
+-      : {
+-          ...descriptor,
+-          byteLength: logicalByteLength
+-        };
++    const logicalDescriptor =
++      logicalByteLength === descriptor.byteLength
++        ? descriptor
++        : {
++            ...descriptor,
++            byteLength: logicalByteLength
++          };
+     const cacheKey = `${payloadId}:${logicalByteLength}`;
+     let payloads = this.#sharedBufferCacheByFrame.get(frameChannelKey);
+     let payload = payloads?.get(cacheKey);
+@@ -2565,6 +2752,9 @@ class SharedMemoryChannel {
+   private notifyReadable() {
+     if (process.type === 'renderer') {
+       getRendererIpc().send(false, channelDoorbell, [this.descriptor]);
++    } else if (process.type === 'browser') {
++      this.ensureFastRegistered();
++      sendToPoolTargetFrame(this.pool, channelDoorbell, this.descriptor);
+     }
+   }
+
+@@ -2584,7 +2774,12 @@ class SharedMemoryChannel {
+   }
+
+   private notifySharedPayloadIdOrdered(payloadId: number, byteLength: number, tag: number | null) {
+-    getRendererIpc().send(false, channelSharedPayloadDoorbell, [this.#fastChannelId, payloadId, tag, byteLength]);
++    if (process.type === 'renderer') {
++      getRendererIpc().send(false, channelSharedPayloadDoorbell, [this.#fastChannelId, payloadId, tag, byteLength]);
++    } else if (process.type === 'browser') {
++      this.ensureFastRegistered();
++      sendToPoolTargetFrame(this.pool, channelSharedPayloadDoorbell, this.#fastChannelId, payloadId, tag, byteLength);
++    }
+   }
+
+   private flushSharedPayloadMessages() {
+@@ -2607,6 +2802,12 @@ class SharedMemoryChannel {
+   }
+
+   private notifySharedPayloadIdImmediate(payloadId: number, byteLength: number, tag: number | null) {
++    if (process.type === 'browser') {
++      this.ensureFastRegistered();
++      sendToPoolTargetFrame(this.pool, channelSharedPayloadDoorbell, this.#fastChannelId, payloadId, tag, byteLength);
++      return;
++    }
++
+     const ipc = getRendererIpc();
+     if (hasNativeChannelMessage === undefined) {
+       hasNativeChannelMessage = typeof ipc.sendSharedMemoryChannelMessage === 'function';
+@@ -2624,6 +2825,28 @@ class SharedMemoryChannel {
+   }
+
+   private notifySharedPayloadIdsImmediate(messages: PendingSharedPayloadMessage[]) {
++    if (process.type === 'browser') {
++      this.ensureFastRegistered();
++      const payloadIds = new Array<number>(messages.length);
++      const tags = new Array<number>(messages.length);
++      const byteLengths = new Array<number>(messages.length);
++      for (let i = 0; i < messages.length; ++i) {
++        const message = messages[i];
++        payloadIds[i] = message.payloadId;
++        tags[i] = encodeBatchTag(message.tag);
++        byteLengths[i] = message.byteLength;
++      }
++      sendToPoolTargetFrame(
++        this.pool,
++        channelSharedPayloadBatchDoorbell,
++        this.#fastChannelId,
++        payloadIds,
++        tags,
++        byteLengths
++      );
++      return;
++    }
++
+     const ipc = getRendererIpc();
+     if (hasNativeChannelMessages === undefined) {
+       hasNativeChannelMessages = typeof ipc.sendSharedMemoryChannelMessages === 'function';
+@@ -2653,35 +2876,53 @@ class SharedMemoryChannel {
+     tag: number | null,
+     waitId?: number
+   ) {
+-    if (process.type === 'renderer') {
+-      const { payloadId, registered } = this.registerSharedPayloadObject(data, descriptor);
+-      if (waitId !== undefined) {
+-        this.flushSharedPayloadMessages();
+-        getRendererIpc().send(false, channelSharedPayloadWaitDoorbell, [
+-          this.#fastChannelId,
+-          payloadId,
+-          tag,
+-          waitId,
+-          descriptor.byteLength
+-        ]);
+-        return true;
+-      } else {
+-        if (registered) {
+-          this.markPayloadObjectInFlight(data, payloadId);
+-          this.consumePayloadRegistrationPending(payloadId);
+-          this.notifySharedPayloadIdOrdered(payloadId, descriptor.byteLength, tag);
+-          return true;
+-        }
++    const { payloadId, registered } = this.registerSharedPayloadObject(data, descriptor);
++    if (waitId !== undefined) {
++      if (process.type !== 'renderer') {
++        throw new Error('SharedMemoryChannel.sendAndWait() is only implemented from renderer to main');
++      }
++      this.flushSharedPayloadMessages();
++      getRendererIpc().send(false, channelSharedPayloadWaitDoorbell, [
++        this.#fastChannelId,
++        payloadId,
++        tag,
++        waitId,
++        descriptor.byteLength
++      ]);
++      return true;
++    } else {
++      if (registered) {
+         this.markPayloadObjectInFlight(data, payloadId);
+-        return this.notifySharedPayloadId(payloadId, descriptor.byteLength, tag);
++        this.consumePayloadRegistrationPending(payloadId);
++        this.notifySharedPayloadIdOrdered(payloadId, descriptor.byteLength, tag);
++        return true;
+       }
++      this.markPayloadObjectInFlight(data, payloadId);
++      return this.notifySharedPayloadId(payloadId, descriptor.byteLength, tag);
+     }
+-    return true;
+   }
+
+-  private ensureFastRegistered(ipc = getRendererIpc()) {
++  private ensureFastRegistered(ipc?: SharedMemoryIpcRenderer) {
+     if (this.#fastRegistered) return;
+-    ipc.send(false, channelFastRegisterDoorbell, [this.#fastChannelId, this.pool.id, this.name]);
++    this.activateSender();
++    if (process.type === 'renderer') {
++      (ipc ?? getRendererIpc()).send(false, channelFastRegisterDoorbell, [
++        this.#fastChannelId,
++        this.pool.id,
++        this.name
++      ]);
++    } else if (process.type === 'browser') {
++      sendToPoolTargetFrame(
++        this.pool,
++        channelFastRegisterDoorbell,
++        this.#fastChannelId,
++        this.pool.id,
++        this.name,
++        this.descriptor
++      );
++    } else {
++      throw new Error('SharedMemoryChannel sender notifications are only implemented between renderer and main');
++    }
+     this.#fastRegistered = true;
+   }
+
+@@ -2697,7 +2938,7 @@ class SharedMemoryChannel {
+     if (descriptor.poolId !== this.pool.id) {
+       throw new TypeError('SharedMemoryChannel payload must be backed by the channel pool');
+     }
+-    const ipc = getRendererIpc();
++    const ipc = process.type === 'renderer' ? getRendererIpc() : undefined;
+     this.ensureFastRegistered(ipc);
+
+     const key = channelPayloadCacheKey(capacityDescriptor);
+@@ -2730,12 +2971,23 @@ class SharedMemoryChannel {
+     if (state && state.registeredDescriptorKey !== descriptorKey) {
+       state.registeredDescriptorKey = descriptorKey;
+       state.registrationPending = true;
+-      ipc.send(false, channelSharedPayloadRegisterDoorbell, [
+-        this.#fastChannelId,
+-        payloadId,
+-        capacityDescriptor,
+-        this.delivery
+-      ]);
++      if (process.type === 'renderer') {
++        ipc!.send(false, channelSharedPayloadRegisterDoorbell, [
++          this.#fastChannelId,
++          payloadId,
++          capacityDescriptor,
++          this.delivery
++        ]);
++      } else {
++        sendToPoolTargetFrame(
++          this.pool,
++          channelSharedPayloadRegisterDoorbell,
++          this.#fastChannelId,
++          payloadId,
++          capacityDescriptor,
++          this.delivery
++        );
++      }
+       registered = true;
+     }
+     this.#sharedPayloadObjectIds.set(data, payloadId);
+@@ -2784,7 +3036,10 @@ const createChannel = (pool: SharedMemoryPool, channelOptions: SharedMemoryChann
+     name: options.name,
+     rings: createRings(pool, options)
+   };
+-  return new SharedMemoryChannel(pool, descriptor, options);
++  return new SharedMemoryChannel(pool, descriptor, {
++    ...options,
++    sender: true
++  });
+ };
+
+ const acceptChannel = (
+@@ -2802,14 +3057,18 @@ const acceptChannel = (
+     | 'views'
+   >
+ ) => {
+-  if (process.type !== 'browser') {
+-    throw new Error('SharedMemory.acceptChannel() is only available in the main process');
++  if (process.type !== 'browser' && process.type !== 'renderer') {
++    throw new Error('SharedMemory.acceptChannel() is only available in the main and renderer processes');
+   }
+   if (!channelOptions || typeof channelOptions.name !== 'string' || channelOptions.name.length === 0) {
+     throw new TypeError('SharedMemory.acceptChannel() requires a non-empty name');
+   }
+
+-  installMainChannelListener();
++  if (process.type === 'browser') {
++    installMainChannelListener();
++  } else {
++    installRendererChannelListener();
++  }
+   const descriptor = {
+     poolId: pool.id,
+     name: channelOptions.name,
+diff --git a/spec/api-shared-memory-spec.ts b/spec/api-shared-memory-spec.ts
+index e8f802145f..25005ac95a 100644
+--- a/spec/api-shared-memory-spec.ts
++++ b/spec/api-shared-memory-spec.ts
+@@ -85,12 +85,16 @@ describe('SharedMemory module', () => {
+       allocationCount: 0
+     });
+
+-    SharedMemory.withAllocator(pool, () => {
+-      const first = new Uint8Array(5);
+-      const second = new Uint8Array(9);
+-      expect(first.byteLength).to.equal(5);
+-      expect(second.byteLength).to.equal(9);
+-    }, { onOverflow: 'throw' });
++    SharedMemory.withAllocator(
++      pool,
++      () => {
++        const first = new Uint8Array(5);
++        const second = new Uint8Array(9);
++        expect(first.byteLength).to.equal(5);
++        expect(second.byteLength).to.equal(9);
++      },
++      { onOverflow: 'throw' }
++    );
+
+     expect(SharedMemory.getPoolStats(pool)).to.deep.equal({
+       id: pool.id,
+@@ -330,6 +334,129 @@ describe('SharedMemory module', () => {
+     });
+   });
+
++  it('streams main-process payloads through a shared-memory channel', async () => {
++    const { SharedMemory } = require('electron') as any;
++    const w = await makeWindow();
++    const pool = await SharedMemory.createPool({
++      frame: w.webContents.mainFrame,
++      size: 1024 * 1024,
++      maxAllocationSize: 1024
++    });
++
++    await w.webContents.executeJavaScript(`
++      (() => {
++        const { ipcRenderer, SharedMemory } = require('electron');
++        const pool = ${JSON.stringify(pool)};
++        const channel = SharedMemory.acceptChannel(pool, { name: 'stream-main-basic' });
++        channel.setErrorHandler(error => {
++          ipcRenderer.send('shared-memory-chunk', { error: error.message });
++        });
++        channel.setMessageHandler((message) => {
++          ipcRenderer.send('shared-memory-chunk', {
++            dataIsArrayBuffer: message.data instanceof ArrayBuffer,
++            viewIsUint8Array: message.view() instanceof Uint8Array,
++            bytes: Array.from(message.view()),
++            tag: message.tag,
++            shared: SharedMemory.isSharedBacked(message.data)
++          });
++        });
++      })()
++    `);
++
++    const received = new Promise<any>((resolve) => {
++      ipcMain.once('shared-memory-chunk', (_event, payload) => resolve(payload));
++    });
++
++    const channel = SharedMemory.createChannel(pool, {
++      name: 'stream-main-basic',
++      classes: [{ slotSize: 16, slotCount: 4 }],
++      overflow: 'drop-newest',
++      copyFallback: 'allow'
++    });
++
++    expect(channel.send(new Uint8Array([50, 60, 70, 80]), 17)).to.equal(true);
++
++    expect(await received).to.deep.equal({
++      dataIsArrayBuffer: true,
++      viewIsUint8Array: true,
++      bytes: [50, 60, 70, 80],
++      tag: 17,
++      shared: true
++    });
++  });
++
++  it('returns borrowed main-process channel payloads after renderer release', async () => {
++    const { SharedMemory } = require('electron') as any;
++    const w = await makeWindow();
++    const pool = await SharedMemory.createPool({
++      frame: w.webContents.mainFrame,
++      size: 1024 * 1024,
++      maxAllocationSize: 1024
++    });
++
++    await w.webContents.executeJavaScript(`
++      (() => {
++        const { ipcRenderer, SharedMemory } = require('electron');
++        const pool = ${JSON.stringify(pool)};
++        const channel = SharedMemory.acceptChannel(pool, { name: 'stream-main-borrow' });
++        let retainedLease = null;
++        ipcRenderer.on('release-main-borrowed-message', () => {
++          retainedLease.release();
++          ipcRenderer.send('shared-memory-release');
++        });
++        channel.setErrorHandler(error => {
++          ipcRenderer.send('shared-memory-chunk', { error: error.message });
++        });
++        channel.setMessageHandler((message) => {
++          retainedLease = message.retain();
++          ipcRenderer.send('shared-memory-chunk', {
++            bytes: Array.from(message.view()),
++            tag: message.tag,
++            shared: SharedMemory.isSharedBacked(message.data)
++          });
++        });
++      })()
++    `);
++
++    const received = new Promise<any>((resolve) => {
++      ipcMain.once('shared-memory-chunk', (_event, payload) => resolve(payload));
++    });
++    const released = new Promise<void>((resolve) => {
++      ipcMain.once('shared-memory-release', () => resolve());
++    });
++
++    const channel = SharedMemory.createChannel(pool, {
++      name: 'stream-main-borrow',
++      ownership: 'borrow'
++    });
++    const data = SharedMemory.withAllocator(
++      pool,
++      () => {
++        const payload = new Uint8Array(4);
++        payload.set([91, 92, 93, 94]);
++        return payload;
++      },
++      { channel }
++    );
++
++    expect(channel.send(data, 23)).to.equal(true);
++
++    expect(await received).to.deep.equal({
++      bytes: [91, 92, 93, 94],
++      tag: 23,
++      shared: true
++    });
++    expect(SharedMemory.isSharedBacked(data)).to.equal(true);
++
++    w.webContents.send('release-main-borrowed-message');
++    await released;
++    for (let i = 0; i < 20 && SharedMemory.isSharedBacked(data); ++i) {
++      await new Promise((resolve) => setImmediate(resolve));
++    }
++
++    expect(SharedMemory.isSharedBacked(data)).to.equal(false);
++  });
++
+   it('creates lazy message views from numeric tag mappings', async () => {
+     const { SharedMemory } = require('electron') as any;
+     const w = await makeWindow();
+--
+2.53.0

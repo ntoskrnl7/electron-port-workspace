@@ -51,3 +51,22 @@ During the 42.3.x integration the main semantic conflict was in
 `worker-runtime` service-worker helpers (`GetCurrent`, `process_metrics`, and
 `MarkServiceWorkerPreloadRealmInitialized`) and adds the shared-memory
 `RegisterSharedMemoryPool` override.
+
+## Main-to-renderer channel follow-up
+
+`0002-feat-support-main-to-renderer-shared-memory-channels.patch` extends
+`SharedMemoryChannel` so the process that calls `SharedMemory.createChannel()`
+is the producer and the peer process can call `SharedMemory.acceptChannel()`.
+This keeps the existing renderer-to-main API shape and adds main-to-renderer
+`send()` support without a public direction option.
+
+The follow-up also keeps `sendAndWait()` scoped to renderer-to-main channels,
+adds renderer-side channel acceptance, routes main sender wakeups through the
+pool's target `WebFrameMain`, and returns borrowed main-process payloads after
+the renderer releases the message.
+
+Validated on Electron 42.4.0 with:
+
+```bash
+env -u ELECTRON_RUN_AS_NODE npm run test -- --skipYarnInstall --runners=main --grep "SharedMemory module"
+```
