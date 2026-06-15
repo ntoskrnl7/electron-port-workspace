@@ -1,0 +1,306 @@
+From 79be0b7bacf613e6789841d23feef5691790ceeb Mon Sep 17 00:00:00 2001
+From: Jung-Kwang Lee <ntoskrnl7@gmail.com>
+Date: Fri, 12 Jun 2026 23:06:14 +0900
+Subject: [PATCH] fix: support wasm streaming with node integration
+
+---
+ lib/node/asar-fs-wrapper.ts |   2 +-
+ lib/node/init.ts            |  57 +++++++++++++++++++-
+ lib/worker/init.ts          |  56 ++++++++++++++++++++
+ spec/chromium-spec.ts       | 103 ++++++++++++++++++++++++++++++++++++
+ 4 files changed, 216 insertions(+), 2 deletions(-)
+
+diff --git a/lib/node/asar-fs-wrapper.ts b/lib/node/asar-fs-wrapper.ts
+index af19733ea6..56011933e0 100644
+--- a/lib/node/asar-fs-wrapper.ts
++++ b/lib/node/asar-fs-wrapper.ts
+@@ -15,7 +15,7 @@ const Promise: PromiseConstructor = global.Promise;
+ const envNoAsar = process.env.ELECTRON_NO_ASAR && process.type !== 'browser' && process.type !== 'renderer';
+ const isAsarDisabled = () => process.noAsar || envNoAsar;
+
+-const internalBinding = process.internalBinding!;
++export const internalBinding = process.internalBinding!;
+ delete process.internalBinding;
+
+ const nextTick = (functionToCall: Function, args: any[] = []) => {
+diff --git a/lib/node/init.ts b/lib/node/init.ts
+index b9ef80900f..896e563a77 100644
+--- a/lib/node/init.ts
++++ b/lib/node/init.ts
+@@ -1,9 +1,16 @@
+ /* eslint-disable import/newline-after-import */
+ /* eslint-disable import/order */
+ // Initialize ASAR support in fs module.
+-import { wrapFsWithAsar } from './asar-fs-wrapper';
++import { internalBinding, wrapFsWithAsar } from './asar-fs-wrapper';
+ wrapFsWithAsar(require('fs'));
+
++interface WasmStreamingState {
++  setURL: (url: string) => void;
++  push: (chunk: ArrayBuffer | ArrayBufferView) => void;
++  finish: () => void;
++  abort: (error: unknown) => void;
++}
++
+ // See ElectronRendererClient::DidCreateScriptContext.
+ if ((globalThis as any).blinkfetch) {
+   const keys = ['fetch', 'Response', 'FormData', 'Request', 'Headers', 'EventSource'];
+@@ -11,6 +18,54 @@ if ((globalThis as any).blinkfetch) {
+     (globalThis as any)[key] = (globalThis as any)[`blink${key}`];
+     delete (globalThis as any)[`blink${key}`];
+   }
++
++  const BlinkResponse = Response;
++  const resolvePromise = Promise.resolve.bind(Promise) as <T>(
++    value: T | PromiseLike<T>
++  ) => Promise<Awaited<T>>;
++
++  internalBinding('wasm_web_api').setImplementation(
++    (streamState: WasmStreamingState, source: Response | Promise<Response>) => {
++      (async () => {
++        const response = await resolvePromise(source);
++        if (!(response instanceof BlinkResponse)) {
++          throw new TypeError('WebAssembly response must be a Response or a Promise resolving to a Response');
++        }
++
++        const contentType = response.headers.get('Content-Type');
++        if (contentType?.toLowerCase() !== 'application/wasm') {
++          throw new TypeError(`WebAssembly response has unsupported MIME type '${contentType}'`);
++        }
++
++        if (!response.ok) {
++          throw new TypeError(`WebAssembly response has status code ${response.status}`);
++        }
++
++        if (response.bodyUsed) {
++          throw new TypeError('WebAssembly response body has already been used');
++        }
++
++        if (response.url) {
++          streamState.setURL(response.url);
++        }
++
++        const reader = response.body?.getReader();
++        if (reader) {
++          while (true) {
++            const { done, value } = await reader.read();
++            if (done) {
++              break;
++            }
++            streamState.push(value);
++          }
++        }
++      })().then(() => {
++        streamState.finish();
++      }, error => {
++        streamState.abort(error);
++      });
++    }
++  );
+ }
+
+ // Hook child_process.fork.
+diff --git a/lib/worker/init.ts b/lib/worker/init.ts
+index 4c231a24f1..054aa59c0b 100644
+--- a/lib/worker/init.ts
++++ b/lib/worker/init.ts
+@@ -1,6 +1,14 @@
+ import * as path from 'path';
+
++interface WasmStreamingState {
++  setURL: (url: string) => void;
++  push: (chunk: ArrayBuffer | ArrayBufferView) => void;
++  finish: () => void;
++  abort: (error: unknown) => void;
++}
++
+ const Module = require('module') as NodeJS.ModuleInternal;
++const internalBinding = process.internalBinding!;
+
+ // We modified the original process.argv to let node.js load the
+ // init.js, we need to restore it here.
+@@ -27,6 +35,54 @@ if ((globalThis as any).blinkfetch) {
+     (globalThis as any)[key] = (globalThis as any)[`blink${key}`];
+     delete (globalThis as any)[`blink${key}`];
+   }
++
++  const BlinkResponse = Response;
++  const resolvePromise = Promise.resolve.bind(Promise) as <T>(
++    value: T | PromiseLike<T>
++  ) => Promise<Awaited<T>>;
++
++  internalBinding('wasm_web_api').setImplementation(
++    (streamState: WasmStreamingState, source: Response | Promise<Response>) => {
++      (async () => {
++        const response = await resolvePromise(source);
++        if (!(response instanceof BlinkResponse)) {
++          throw new TypeError('WebAssembly response must be a Response or a Promise resolving to a Response');
++        }
++
++        const contentType = response.headers.get('Content-Type');
++        if (contentType?.toLowerCase() !== 'application/wasm') {
++          throw new TypeError(`WebAssembly response has unsupported MIME type '${contentType}'`);
++        }
++
++        if (!response.ok) {
++          throw new TypeError(`WebAssembly response has status code ${response.status}`);
++        }
++
++        if (response.bodyUsed) {
++          throw new TypeError('WebAssembly response body has already been used');
++        }
++
++        if (response.url) {
++          streamState.setURL(response.url);
++        }
++
++        const reader = response.body?.getReader();
++        if (reader) {
++          while (true) {
++            const { done, value } = await reader.read();
++            if (done) {
++              break;
++            }
++            streamState.push(value);
++          }
++        }
++      })().then(() => {
++        streamState.finish();
++      }, error => {
++        streamState.abort(error);
++      });
++    }
++  );
+ }
+
+ // Set the __filename to the path of html file if it is file: protocol.
+diff --git a/spec/chromium-spec.ts b/spec/chromium-spec.ts
+index e450c06a5f..c765521263 100644
+--- a/spec/chromium-spec.ts
++++ b/spec/chromium-spec.ts
+@@ -413,6 +413,27 @@ describe('web security', () => {
+   });
+
+   describe('wasm-eval csp', () => {
++    const wasmStreamingTestScript = `
++      (async () => {
++        const wasmBin = new Uint8Array([0, 97, 115, 109, 1, 0, 0, 0]);
++        const OriginalResponse = Response;
++        const makeResponse = (contentType = 'application/wasm') => new OriginalResponse(wasmBin, {
++          headers: { 'Content-Type': contentType }
++        });
++        globalThis.Response = class FakeResponse {};
++        globalThis.Promise = class FakePromise {
++          static resolve() {
++            throw new Error('global Promise.resolve was replaced');
++          }
++        };
++        const module = await WebAssembly.compileStreaming(makeResponse());
++        const { instance } = await WebAssembly.instantiateStreaming(makeResponse('APPLICATION/WASM'), {});
++        return module instanceof WebAssembly.Module &&
++          instance instanceof WebAssembly.Instance &&
++          !(new OriginalResponse() instanceof Response);
++      })()
++    `;
++
+     async function loadWasm(csp: string) {
+       const w = new BrowserWindow({
+         show: false,
+@@ -439,6 +460,40 @@ describe('web security', () => {
+       return (await w.webContents.executeJavaScript('loadWasm()')).trim();
+     }
+
++    async function withRenderProcessGoneGuard<T> (
++      window: BrowserWindow,
++      action: () => Promise<T>,
++      message: string
++    ) {
++      return await new Promise<T>((resolve, reject) => {
++        const onRenderProcessGone = (_event: Electron.Event, details: Electron.RenderProcessGoneDetails) => {
++          reject(new Error(`${message}: ${details.reason}`));
++        };
++        window.webContents.once('render-process-gone', onRenderProcessGone);
++        action().then(resolve, reject).finally(() => {
++          window.webContents.removeListener('render-process-gone', onRenderProcessGone);
++        });
++      });
++    }
++
++    it('supports wasm streaming compilation with nodeIntegration enabled', async () => {
++      const w = new BrowserWindow({
++        show: false,
++        webPreferences: {
++          nodeIntegration: true,
++          contextIsolation: false
++        }
++      });
++
++      await w.loadURL('data:text/html;charset=utf-8,<p>wasm streaming</p>');
++      const result = await withRenderProcessGoneGuard(
++        w,
++        () => w.webContents.executeJavaScript(wasmStreamingTestScript),
++        'renderer exited while compiling streaming wasm'
++      );
++      expect(result).to.equal(true);
++    });
++
+     it('wasm codegen is disallowed by default', async () => {
+       const r = await loadWasm('');
+       expect(r).to.equal(
+@@ -1839,6 +1894,54 @@ describe('chromium features', () => {
+       expect(data).to.equal('function function function function function');
+     });
+
++    it('Worker supports wasm streaming compilation with nodeIntegrationInWorker', async () => {
++      const w = new BrowserWindow({
++        show: false,
++        webPreferences: {
++          nodeIntegration: true,
++          nodeIntegrationInWorker: true,
++          contextIsolation: false
++        }
++      });
++
++      await w.loadURL(`file://${fixturesPath}/pages/blank.html`);
++      const data = await w.webContents.executeJavaScript(`
++        new Promise((resolve) => {
++          const worker = new Worker(URL.createObjectURL(new Blob([\`
++            const wasmBin = new Uint8Array([0, 97, 115, 109, 1, 0, 0, 0]);
++            const OriginalResponse = Response;
++            const makeResponse = (contentType = 'application/wasm') => new OriginalResponse(wasmBin, {
++              headers: { 'Content-Type': contentType }
++            });
++            globalThis.Response = class FakeResponse {};
++            globalThis.Promise = class FakePromise {
++              static resolve() {
++                throw new Error('global Promise.resolve was replaced');
++              }
++            };
++            (async () => {
++              const module = await WebAssembly.compileStreaming(makeResponse());
++              const { instance } = await WebAssembly.instantiateStreaming(makeResponse('APPLICATION/WASM'), {});
++              postMessage(
++                module instanceof WebAssembly.Module &&
++                instance instanceof WebAssembly.Instance &&
++                !(new OriginalResponse() instanceof Response)
++              );
++            })().catch(error => postMessage(error.message));
++          \`], { type: 'text/javascript' })));
++          worker.onmessage = event => {
++            resolve(event.data);
++            worker.terminate();
++          };
++          worker.onerror = event => {
++            resolve(event.message);
++            worker.terminate();
++          };
++        })
++      `);
++      expect(data).to.equal(true);
++    });
++
+     it('AudioWorklet keeps node integration across pooled worker threads', async () => {
+       // Regression test for https://github.com/electron/electron/issues/41263.
+       // Blink pools the AudioWorklet backing thread (Chromium CL:5270028) so
+--
+2.53.0
