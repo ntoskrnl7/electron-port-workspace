@@ -97,6 +97,17 @@ index 8672211976053..5194300387703 100644
    params->is_installed = IsInstalled(status_);
    params->script_url_to_skip_throttling = updated_script_url_;
    params->main_script_load_params = std::move(main_script_load_params_);
+@@ -2582,8 +2584,7 @@ void ServiceWorkerVersion::StartWorkerInternal() {
+   params->ukm_source_id = ukm_source_id_;
+   params->storage_key = key_;
+-
++
+-  if (BrowserContext* browser_context =
+-          context_->wrapper()->browser_context()) {
++  if (browser_context) {
+     params->electron_preload_data =
+         browser_client->GetServiceWorkerStartupData(browser_context, scope_);
+   }
 diff --git a/content/browser/worker_host/shared_worker_host.cc b/content/browser/worker_host/shared_worker_host.cc
 index 6f9f06b1e4afd..37bce787b0814 100644
 --- a/content/browser/worker_host/shared_worker_host.cc
