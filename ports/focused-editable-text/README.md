@@ -40,6 +40,13 @@ Modes:
 - `value`: Chromium's focused `TextInputState.value` snapshot when available.
 - `surrounding`: Blink surrounding-selection text.
 
+DOM-backed `full` snapshots use block-aware contenteditable text, so
+paragraph-like DOM such as `<p>` and `<br>` is exposed with line breaks in
+`text`, including empty block lines. Callers can also pass `html: true` to
+receive the focused contenteditable host's raw `innerHTML` in `html`, or
+`html: { maxLength, inlineStyles }` to bound the HTML snapshot and optionally
+copy computed styles into inline `style` attributes.
+
 Watcher options default to `mode: 'surrounding'`, `maxLength: 100000`, and
 `throttleMs: 50`. Each watcher owns its own options and can be closed
 independently. The watcher remains active even when the returned object is not

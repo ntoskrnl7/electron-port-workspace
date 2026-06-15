@@ -1,0 +1,361 @@
+From a9eed87a2e9c886cdd10f64d940c942e3294374c Mon Sep 17 00:00:00 2001
+From: Jung-Kwang Lee <ntoskrnl7@gmail.com>
+Date: Sat, 13 Jun 2026 05:00:41 +0900
+Subject: [PATCH] fix: preserve focused editable empty lines and inline html
+ styles
+
+---
+ .../focused-editable-text-html-options.md     |  8 +-
+ .../focused-editable-text-options.md          |  4 +-
+ .../focused-editable-text-watch-options.md    |  4 +-
+ docs/api/web-contents.md                      |  7 +-
+ script/fix-preload-typescript-definitions.mjs | 14 +++
+ .../browser/api/electron_api_web_contents.cc  | 63 +++++++++++-
+ spec/api-web-contents-spec.ts                 | 99 +++++++++++++++++++
+ 7 files changed, 187 insertions(+), 12 deletions(-)
+
+diff --git a/docs/api/structures/focused-editable-text-html-options.md b/docs/api/structures/focused-editable-text-html-options.md
+index b17146cb2d..123701bb5f 100644
+--- a/docs/api/structures/focused-editable-text-html-options.md
++++ b/docs/api/structures/focused-editable-text-html-options.md
+@@ -2,8 +2,14 @@
+
+ * `maxLength` number (optional) - Maximum number of UTF-16 code units to return
+   in `html`. Must be between `1` and `1000000`. Default is `100000`.
++* `inlineStyles` boolean (optional) - Whether to copy each element's computed
++  style into its `style` attribute in the returned `html`. Default is `false`.
+
+-This object configures the raw HTML snapshot returned by
++This object configures the HTML snapshot returned by
+ `webContents.getFocusedEditableText()` and `webContents.watchFocusedEditableText()`.
+ The top-level `maxLength` option limits `text`; `html.maxLength` only limits
+ `html`.
++By default, `html` is the focused contenteditable host's raw `innerHTML`.
++When `inlineStyles` is `true`, Electron returns a cloned HTML snapshot with
++computed styles inlined on each element. This can make class-based styling
++portable, but it can also produce much larger HTML.
+diff --git a/docs/api/structures/focused-editable-text-options.md b/docs/api/structures/focused-editable-text-options.md
+index edb099f155..07fcee1b9d 100644
+--- a/docs/api/structures/focused-editable-text-options.md
++++ b/docs/api/structures/focused-editable-text-options.md
+@@ -19,4 +19,6 @@ the current selection if the text is longer than `maxLength`.
+ For contenteditable and `designMode` editors, `full` uses a best-effort
+ block-aware text serializer so elements such as `<p>`, `<div>`, and `<br>` are
+ represented with line breaks in `text`. `html` is raw DOM `innerHTML` for the
+-focused editable host; it is not sanitized or normalized.
++focused editable host by default; it is not sanitized or normalized. Pass
++`html: { inlineStyles: true }` to return a cloned HTML snapshot with computed
++styles inlined on each element.
+diff --git a/docs/api/structures/focused-editable-text-watch-options.md b/docs/api/structures/focused-editable-text-watch-options.md
+index 2f7bee51dd..4bf57e994a 100644
+--- a/docs/api/structures/focused-editable-text-watch-options.md
++++ b/docs/api/structures/focused-editable-text-watch-options.md
+@@ -10,8 +10,8 @@ Extends the mode-specific `FocusedEditableTextOptions` union with
+   in `text`. Must be between `1` and `1000000`. Default is `100000`.
+ * `html` boolean | [FocusedEditableTextHtmlOptions](focused-editable-text-html-options.md) (optional) -
+   Set to `true` to include the focused contenteditable host's raw `innerHTML`
+-  in `html`, or pass options to configure the HTML snapshot. Only valid when
+-  `mode` is `full`. Default is `false`.
++  in `html`, or pass options such as `inlineStyles` to configure the HTML
++  snapshot. Only valid when `mode` is `full`. Default is `false`.
+ * `throttleMs` number (optional) - Minimum interval between callback deliveries
+   for a watcher, in milliseconds. Must be between `0` and `60000`. Default is
+   `50`.
+diff --git a/docs/api/web-contents.md b/docs/api/web-contents.md
+index a4b5a23fcc..8ae5dd69df 100644
+--- a/docs/api/web-contents.md
++++ b/docs/api/web-contents.md
+@@ -1275,9 +1275,10 @@ For contenteditable editors whose visual paragraphs are represented by DOM
+ structure rather than literal newline text nodes, `full` mode returns a
+ best-effort block-aware text snapshot. Pass `html: true` to include the focused
+ editable host's raw `innerHTML` in `html`, or pass
+-`html: { maxLength: number }` to limit that HTML snapshot. The top-level
+-`maxLength` option limits `text`; `html.maxLength` only limits `html`. `html`
+-is only valid with `full` mode.
++`html: { maxLength: number }` to limit that HTML snapshot. Pass
++`html: { inlineStyles: true }` to return a cloned HTML snapshot with computed
++styles inlined on each element. The top-level `maxLength` option limits `text`;
++`html.maxLength` only limits `html`. `html` is only valid with `full` mode.
+
+ #### `contents.watchFocusedEditableText([options, ]callback)` _Experimental_
+
+diff --git a/script/fix-preload-typescript-definitions.mjs b/script/fix-preload-typescript-definitions.mjs
+index 0c16c98d69..2ce3ecd94b 100644
+--- a/script/fix-preload-typescript-definitions.mjs
++++ b/script/fix-preload-typescript-definitions.mjs
+@@ -557,6 +557,19 @@ const focusedEditableTextOptions = `  type FocusedEditableTextOptions = ({
+     mode: ('surrounding');
+   });`;
+
++const focusedEditableTextHtmlOptions = `  interface FocusedEditableTextHtmlOptions {
++    /**
++     * Whether to copy each element's computed style into its \`style\`
++     * attribute in the returned \`html\`. Default is \`false\`.
++     */
++    inlineStyles?: boolean;
++    /**
++     * Maximum number of UTF-16 code units to return in \`html\`. Must be between
++     * \`1\` and \`1000000\`. Default is \`100000\`.
++     */
++    maxLength?: number;
++  }`;
++
+ const focusedEditableTextWatchOptions = `  type FocusedEditableTextWatchOptions = ({
+
+     // Docs: https://electronjs.org/docs/api/structures/focused-editable-text-watch-options
+@@ -671,6 +684,7 @@ definitions = replaceGeneratedInterface(definitions, 'AllocatorStats', allocator
+ definitions = replaceGeneratedInterface(definitions, 'AcceptChannelOptions', acceptChannelOptions);
+ definitions = replaceGeneratedInterface(definitions, 'OpenChannelOptions', openChannelOptions);
+ definitions = replaceGeneratedInterface(definitions, 'FocusedEditableTextOptions', focusedEditableTextOptions);
++definitions = replaceGeneratedInterface(definitions, 'FocusedEditableTextHtmlOptions', focusedEditableTextHtmlOptions);
+ definitions = replaceGeneratedInterface(definitions, 'FocusedEditableTextWatchOptions', focusedEditableTextWatchOptions);
+
+ definitions = definitions.replace(
+diff --git a/shell/browser/api/electron_api_web_contents.cc b/shell/browser/api/electron_api_web_contents.cc
+index 155e25bfa0..7fe024bd5c 100644
+--- a/shell/browser/api/electron_api_web_contents.cc
++++ b/shell/browser/api/electron_api_web_contents.cc
+@@ -2304,6 +2304,7 @@ struct FocusedEditableTextOptions {
+   uint32_t max_length = kDefaultFocusedEditableTextMaxLength;
+   bool include_html = false;
+   uint32_t max_html_length = kDefaultFocusedEditableTextMaxLength;
++  bool inline_html_styles = false;
+ };
+
+ struct FocusedEditableTextWatchOptions {
+@@ -2566,6 +2567,17 @@ bool ParseFocusedEditableTextOptionsDictionary(
+         }
+         options->max_html_length = static_cast<uint32_t>(max_html_length);
+       }
++
++      if (html_options.Has("inlineStyles")) {
++        v8::Local<v8::Value> inline_styles_value;
++        if (!html_options.Get("inlineStyles", &inline_styles_value) ||
++            !inline_styles_value->IsBoolean()) {
++          *error = "html.inlineStyles must be a boolean";
++          return false;
++        }
++        options->inline_html_styles =
++            inline_styles_value.As<v8::Boolean>()->Value();
++      }
+     } else {
+       *error = "html must be a boolean or an object";
+       return false;
+@@ -2884,6 +2896,7 @@ std::u16string CreateFocusedEditableTextDomScript(
+   const maxLength = %u;
+   const includeHtml = %s;
+   const maxHtmlLength = %u;
++  const inlineHtmlStyles = %s;
+
+   const clampHtml = (html) => {
+     if (!includeHtml || typeof html !== 'string') return {};
+@@ -2896,6 +2909,38 @@ std::u16string CreateFocusedEditableTextDomScript(
+     };
+   };
+
++  const inlineComputedStyles = (source, target) => {
++    if (!(source instanceof Element) || !(target instanceof Element)) return;
++    const style = getComputedStyle(source);
++    const declarations = [];
++    for (const property of style) {
++      const value = style.getPropertyValue(property);
++      if (!value) continue;
++      const priority = style.getPropertyPriority(property);
++      declarations.push(`${property}: ${value}${priority ? ' !important' : ''};`);
++    }
++    if (declarations.length > 0) {
++      target.setAttribute('style', declarations.join(' '));
++    }
++  };
++
++  const createHtmlSnapshot = (host) => {
++    if (!(host instanceof Element)) return undefined;
++    if (!inlineHtmlStyles) return host.innerHTML;
++
++    const clone = host.cloneNode(true);
++    inlineComputedStyles(host, clone);
++    const sourceWalker = document.createTreeWalker(host, NodeFilter.SHOW_ELEMENT);
++    const cloneWalker = document.createTreeWalker(clone, NodeFilter.SHOW_ELEMENT);
++    while (true) {
++      const source = sourceWalker.nextNode();
++      const target = cloneWalker.nextNode();
++      if (!source || !target) break;
++      inlineComputedStyles(source, target);
++    }
++    return clone.innerHTML;
++  };
++
+   const clamp = (text, start, end, extra = {}) => {
+     start = Math.max(0, Math.min(start, text.length));
+     end = Math.max(0, Math.min(end, text.length));
+@@ -2978,8 +3023,9 @@ std::u16string CreateFocusedEditableTextDomScript(
+     'table-header-group', 'table-footer-group'
+   ]);
+
+-  const appendNewline = (state) => {
+-    if (state.text && !state.text.endsWith('\n')) state.text += '\n';
++  const appendNewline = (state, force = false) => {
++    if (!force && (!state.text || state.text.endsWith('\n'))) return;
++    state.text += '\n';
+   };
+
+   const isHiddenElement = (element) => {
+@@ -3012,13 +3058,17 @@ std::u16string CreateFocusedEditableTextDomScript(
+       if (node.nodeType === Node.ELEMENT_NODE) {
+         if (isHiddenElement(node)) return;
+         if (node.localName === 'br') {
+-          appendNewline(state);
++          appendNewline(state, true);
+           return;
+         }
+
+         const isBlock = !isRoot && isBlockElement(node);
+         if (isBlock) appendNewline(state);
++        const textLengthAfterBlockStart = state.text.length;
+         for (const child of node.childNodes) visit(child);
++        if (isBlock && state.text.length === textLengthAfterBlockStart) {
++          appendNewline(state, true);
++        }
+         if (isBlock) appendNewline(state);
+         return;
+       }
+@@ -3070,7 +3120,7 @@ std::u16string CreateFocusedEditableTextDomScript(
+   beforeEnd.selectNodeContents(host);
+   beforeEnd.setEnd(range.endContainer, range.endOffset);
+
+-  const html = host instanceof Element ? host.innerHTML : undefined;
++  const html = createHtmlSnapshot(host);
+   return clamp(
+     serializeRendered(host),
+     serializeRendered(beforeStart.cloneContents()).length,
+@@ -3082,7 +3132,10 @@ std::u16string CreateFocusedEditableTextDomScript(
+                                               options.max_length,
+                                               options.include_html ? "true"
+                                                                    : "false",
+-                                              options.max_html_length));
++                                              options.max_html_length,
++                                              options.inline_html_styles
++                                                  ? "true"
++                                                  : "false"));
+ }
+
+ void OnFocusedEditableTextDomResult(
+diff --git a/spec/api-web-contents-spec.ts b/spec/api-web-contents-spec.ts
+index 0814e9297d..1e3de2ac60 100644
+--- a/spec/api-web-contents-spec.ts
++++ b/spec/api-web-contents-spec.ts
+@@ -1692,6 +1692,102 @@ describe('webContents module', () => {
+       expect(truncated.isHtmlPartial).to.be.true();
+     });
+
++    it('preserves empty contenteditable block lines in full text', async () => {
++      const w = new BrowserWindow({ show: false, width: 400, height: 300 });
++      const html = [
++        '<!DOCTYPE html>',
++        '<div id="editor" contenteditable="true">',
++        '<p>aaa</p><p></p><p>bbb</p><p><br></p><p>ccc</p>',
++        '<div>ddd<br><br>eee</div>',
++        '</div>'
++      ].join('');
++      await w.loadURL(
++        `data:text/html;charset=utf-8,${encodeURIComponent(html)}`
++      );
++
++      await w.webContents.executeJavaScript(`
++        const editor = document.getElementById('editor');
++        const bbb = editor.querySelectorAll('p')[2].firstChild;
++        const range = document.createRange();
++        range.setStart(bbb, 1);
++        range.collapse(true);
++        const selection = getSelection();
++        selection.removeAllRanges();
++        selection.addRange(range);
++        editor.focus();
++      `);
++
++      await waitUntil(async () => {
++        const info = await w.webContents.getFocusedEditableText();
++        return info?.text === 'aaa\n\nbbb\n\nccc\nddd\n\neee';
++      });
++
++      const info = await w.webContents.getFocusedEditableText();
++      expect(info).to.not.equal(null);
++      if (info === null) {
++        throw new Error('Expected focused editable text');
++      }
++
++      expect(info.text).to.equal('aaa\n\nbbb\n\nccc\nddd\n\neee');
++      expect(info.selection).to.deep.equal({
++        isCollapsed: true,
++        start: 'aaa\n\nb'.length,
++        end: 'aaa\n\nb'.length
++      });
++    });
++
++    it('can inline computed styles in contenteditable html snapshots', async () => {
++      const w = new BrowserWindow({ show: false, width: 400, height: 300 });
++      await w.loadURL(
++        `data:text/html;charset=utf-8,${encodeURIComponent(`
++        <!DOCTYPE html>
++        <style>
++          #editor .important {
++            color: rgb(255, 0, 0);
++            font-weight: 700;
++          }
++        </style>
++        <div id="editor" contenteditable="true"><p class="important">alpha</p></div>
++      `)}`
++      );
++
++      await w.webContents.executeJavaScript(`
++        const editor = document.getElementById('editor');
++        const text = editor.querySelector('p').firstChild;
++        const range = document.createRange();
++        range.setStart(text, 0);
++        range.collapse(true);
++        const selection = getSelection();
++        selection.removeAllRanges();
++        selection.addRange(range);
++        editor.focus();
++      `);
++
++      await waitUntil(async () => {
++        const info = await w.webContents.getFocusedEditableText({
++          html: {
++            inlineStyles: true
++          }
++        });
++        return info?.html?.includes('style=') ?? false;
++      });
++
++      const info = await w.webContents.getFocusedEditableText({
++        html: {
++          inlineStyles: true
++        }
++      });
++      expect(info).to.not.equal(null);
++      if (info === null) {
++        throw new Error('Expected focused editable text');
++      }
++
++      expect(info.html).to.include('class="important"');
++      expect(info.html).to.include('style=');
++      expect(info.html).to.include('color: rgb(255, 0, 0)');
++      expect(info.html).to.include('font-weight: 700');
++    });
++
+     it('keeps selection offsets relative to truncated text', async () => {
+       const w = new BrowserWindow({ show: false, width: 400, height: 300 });
+       await w.loadURL(
+@@ -1781,6 +1877,9 @@ describe('webContents module', () => {
+       await expect(
+         w.webContents.getFocusedEditableText({ html: { maxLength: 0 } } as any)
+       ).to.eventually.be.rejectedWith('html.maxLength must be between 1 and 1000000');
++      await expect(
++        w.webContents.getFocusedEditableText({ html: { inlineStyles: 'yes' } } as any)
++      ).to.eventually.be.rejectedWith('html.inlineStyles must be a boolean');
+       await expect(
+         w.webContents.getFocusedEditableText({ html: 'yes' } as any)
+       ).to.eventually.be.rejectedWith('html must be a boolean or an object');
+--
+2.53.0

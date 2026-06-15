@@ -1,0 +1,503 @@
+From e7d4bad341a1d909a4841a72986f6c4f027898d2 Mon Sep 17 00:00:00 2001
+From: Jung-Kwang Lee <ntoskrnl7@gmail.com>
+Date: Sat, 13 Jun 2026 02:20:07 +0900
+Subject: fix: use structured focused editable html options
+
+---
+ .../focused-editable-text-html-options.md     |   9 +
+ .../focused-editable-text-options.md          |  11 +-
+ .../focused-editable-text-watch-options.md    |   8 +-
+ docs/api/structures/focused-editable-text.md  |   4 +-
+ docs/api/web-contents.md                      |  10 +-
+ script/fix-preload-typescript-definitions.mjs | 166 ++++++++++++++++++
+ .../browser/api/electron_api_web_contents.cc  |  58 ++++--
+ spec/api-web-contents-spec.ts                 |  43 ++++-
+ spec/ts-smoke/electron/main.ts                |  22 +++
+ 9 files changed, 302 insertions(+), 29 deletions(-)
+ create mode 100644 docs/api/structures/focused-editable-text-html-options.md
+
+diff --git a/docs/api/structures/focused-editable-text-html-options.md b/docs/api/structures/focused-editable-text-html-options.md
+new file mode 100644
+index 0000000000..b17146cb2d
+--- /dev/null
++++ b/docs/api/structures/focused-editable-text-html-options.md
+@@ -0,0 +1,9 @@
++# FocusedEditableTextHtmlOptions Object
++
++* `maxLength` number (optional) - Maximum number of UTF-16 code units to return
++  in `html`. Must be between `1` and `1000000`. Default is `100000`.
++
++This object configures the raw HTML snapshot returned by
++`webContents.getFocusedEditableText()` and `webContents.watchFocusedEditableText()`.
++The top-level `maxLength` option limits `text`; `html.maxLength` only limits
++`html`.
+diff --git a/docs/api/structures/focused-editable-text-options.md b/docs/api/structures/focused-editable-text-options.md
+index e57d2b61c4..edb099f155 100644
+--- a/docs/api/structures/focused-editable-text-options.md
++++ b/docs/api/structures/focused-editable-text-options.md
+@@ -4,12 +4,11 @@
+   `surrounding`, or `full`. Default is `full`.
+ * `maxLength` number (optional) - Maximum number of UTF-16 code units to return
+   in `text`. Must be between `1` and `1000000`. Default is `100000`.
+-* `includeHtml` boolean (optional) - Whether to include the focused
+-  contenteditable host's raw `innerHTML` in `html` for DOM-backed `full`
+-  snapshots. Default is `false`.
+-* `maxHtmlLength` number (optional) - Maximum number of UTF-16 code units to
+-  return in `html` when `includeHtml` is `true`. Must be between `1` and
+-  `1000000`. Default is `100000`.
++* `html` boolean | [FocusedEditableTextHtmlOptions](focused-editable-text-html-options.md) (optional) -
++  Set to `true` to include the focused contenteditable host's raw `innerHTML`
++  in `html`, or pass options to configure the HTML snapshot. Only valid when
++  `mode` is `full`, or when `mode` is omitted because `full` is the default.
++  Default is `false`.
+
+ When `mode` is `value`, Electron reads Chromium's current focused input value
+ snapshot when available. When `mode` is `surrounding`, Electron reads text
+diff --git a/docs/api/structures/focused-editable-text-watch-options.md b/docs/api/structures/focused-editable-text-watch-options.md
+index 332af5c271..2f7bee51dd 100644
+--- a/docs/api/structures/focused-editable-text-watch-options.md
++++ b/docs/api/structures/focused-editable-text-watch-options.md
+@@ -1,11 +1,17 @@
+ # FocusedEditableTextWatchOptions Object
+
+-Extends `FocusedEditableTextOptions`.
++Extends the mode-specific `FocusedEditableTextOptions` union with
++`throttleMs`. The watcher default `mode` is `surrounding`, so `html` requires
++`mode: 'full'` when used with this object.
+
+ * `mode` string (optional) - The text range to read. Can be `value`,
+   `surrounding`, or `full`. Default is `surrounding`.
+ * `maxLength` number (optional) - Maximum number of UTF-16 code units to return
+   in `text`. Must be between `1` and `1000000`. Default is `100000`.
++* `html` boolean | [FocusedEditableTextHtmlOptions](focused-editable-text-html-options.md) (optional) -
++  Set to `true` to include the focused contenteditable host's raw `innerHTML`
++  in `html`, or pass options to configure the HTML snapshot. Only valid when
++  `mode` is `full`. Default is `false`.
+ * `throttleMs` number (optional) - Minimum interval between callback deliveries
+   for a watcher, in milliseconds. Must be between `0` and `60000`. Default is
+   `50`.
+diff --git a/docs/api/structures/focused-editable-text.md b/docs/api/structures/focused-editable-text.md
+index c130fcad13..c57eb9c4bc 100644
+--- a/docs/api/structures/focused-editable-text.md
++++ b/docs/api/structures/focused-editable-text.md
+@@ -28,9 +28,9 @@
+ * `isPartial` boolean - Whether `text` is a partial snapshot of the focused
+   editable text.
+ * `html` string (optional) - The focused contenteditable host's raw `innerHTML`
+-  when requested with `includeHtml: true`.
++  when requested with `html: true` or `html` options.
+ * `isHtmlPartial` boolean (optional) - Whether `html` was truncated to
+-  `maxHtmlLength`.
++  `html.maxLength`.
+
+ `selection.start` and `selection.end` are UTF-16 offsets into `text`, so
+ `text.slice(selection.start, selection.end)` returns the selected text.
+diff --git a/docs/api/web-contents.md b/docs/api/web-contents.md
+index 9de368a1c8..a4b5a23fcc 100644
+--- a/docs/api/web-contents.md
++++ b/docs/api/web-contents.md
+@@ -1273,8 +1273,11 @@ focused DOM control. Empty text controls resolve with `text: ''` rather than
+
+ For contenteditable editors whose visual paragraphs are represented by DOM
+ structure rather than literal newline text nodes, `full` mode returns a
+-best-effort block-aware text snapshot. Pass `includeHtml: true` to include the
+-focused editable host's raw `innerHTML` in `html`.
++best-effort block-aware text snapshot. Pass `html: true` to include the focused
++editable host's raw `innerHTML` in `html`, or pass
++`html: { maxLength: number }` to limit that HTML snapshot. The top-level
++`maxLength` option limits `text`; `html.maxLength` only limits `html`. `html`
++is only valid with `full` mode.
+
+ #### `contents.watchFocusedEditableText([options, ]callback)` _Experimental_
+
+@@ -1293,6 +1296,9 @@ watcher is created, and then again when Electron observes input state, caret,
+ selection, composition, or focus changes that may affect the focused editable
+ text snapshot.
+
++When using `html` with a watcher, pass `mode: 'full'` explicitly. The watcher
++default mode is `surrounding`.
++
+ Each watcher owns its own `options`, so multiple callers can watch the same
+ WebContents with different `mode`, `maxLength`, or `throttleMs` values without
+ overwriting each other. Call
+diff --git a/script/fix-preload-typescript-definitions.mjs b/script/fix-preload-typescript-definitions.mjs
+index 966341618b..0c16c98d69 100644
+--- a/script/fix-preload-typescript-definitions.mjs
++++ b/script/fix-preload-typescript-definitions.mjs
+@@ -484,6 +484,170 @@ const openChannelOptions = `  interface OpenChannelOptions<TViews = undefined> {
+     maxTagSize?: number;
+   }`;
+
++const focusedEditableTextOptions = `  type FocusedEditableTextOptions = ({
++
++    // Docs: https://electronjs.org/docs/api/structures/focused-editable-text-options
++
++    /**
++     * Set to \`true\` to include the focused contenteditable host's raw
++     * \`innerHTML\` in \`html\`, or pass options to configure the HTML snapshot.
++     * Only valid when \`mode\` is \`full\`, or when \`mode\` is omitted because
++     * \`full\` is the default.
++     */
++    html: (true) | (FocusedEditableTextHtmlOptions);
++    /**
++     * Maximum number of UTF-16 code units to return in \`text\`. Must be between
++     * \`1\` and \`1000000\`. Default is \`100000\`.
++     */
++    maxLength?: number;
++    /**
++     * The text range to read. Can be \`full\`. Default is \`full\`.
++     */
++    mode?: ('full');
++  } | {
++
++    // Docs: https://electronjs.org/docs/api/structures/focused-editable-text-options
++
++    /**
++     * Set to \`false\` or omit to skip the HTML snapshot. Default is \`false\`.
++     */
++    html?: false;
++    /**
++     * Maximum number of UTF-16 code units to return in \`text\`. Must be between
++     * \`1\` and \`1000000\`. Default is \`100000\`.
++     */
++    maxLength?: number;
++    /**
++     * The text range to read. Can be \`full\`. Default is \`full\`.
++     */
++    mode?: ('full');
++  } | {
++
++    // Docs: https://electronjs.org/docs/api/structures/focused-editable-text-options
++
++    /**
++     * HTML snapshots are only valid with \`mode: 'full'\`.
++     */
++    html?: never;
++    /**
++     * Maximum number of UTF-16 code units to return in \`text\`. Must be between
++     * \`1\` and \`1000000\`. Default is \`100000\`.
++     */
++    maxLength?: number;
++    /**
++     * The text range to read.
++     */
++    mode: ('value');
++  } | {
++
++    // Docs: https://electronjs.org/docs/api/structures/focused-editable-text-options
++
++    /**
++     * HTML snapshots are only valid with \`mode: 'full'\`.
++     */
++    html?: never;
++    /**
++     * Maximum number of UTF-16 code units to return in \`text\`. Must be between
++     * \`1\` and \`1000000\`. Default is \`100000\`.
++     */
++    maxLength?: number;
++    /**
++     * The text range to read.
++     */
++    mode: ('surrounding');
++  });`;
++
++const focusedEditableTextWatchOptions = `  type FocusedEditableTextWatchOptions = ({
++
++    // Docs: https://electronjs.org/docs/api/structures/focused-editable-text-watch-options
++
++    /**
++     * HTML snapshots are only valid with \`mode: 'full'\`.
++     */
++    html?: never;
++    /**
++     * Maximum number of UTF-16 code units to return in \`text\`. Must be between
++     * \`1\` and \`1000000\`. Default is \`100000\`.
++     */
++    maxLength?: number;
++    /**
++     * The text range to read. Can be \`surrounding\`. Default is \`surrounding\`.
++     */
++    mode?: ('surrounding');
++    /**
++     * Minimum interval between callback deliveries for a watcher, in milliseconds.
++     * Must be between \`0\` and \`60000\`. Default is \`50\`.
++     */
++    throttleMs?: number;
++  } | {
++
++    // Docs: https://electronjs.org/docs/api/structures/focused-editable-text-watch-options
++
++    /**
++     * HTML snapshots are only valid with \`mode: 'full'\`.
++     */
++    html?: never;
++    /**
++     * Maximum number of UTF-16 code units to return in \`text\`. Must be between
++     * \`1\` and \`1000000\`. Default is \`100000\`.
++     */
++    maxLength?: number;
++    /**
++     * The text range to read.
++     */
++    mode: ('value');
++    /**
++     * Minimum interval between callback deliveries for a watcher, in milliseconds.
++     * Must be between \`0\` and \`60000\`. Default is \`50\`.
++     */
++    throttleMs?: number;
++  } | {
++
++    // Docs: https://electronjs.org/docs/api/structures/focused-editable-text-watch-options
++
++    /**
++     * Set to \`true\` to include the focused contenteditable host's raw
++     * \`innerHTML\` in \`html\`, or pass options to configure the HTML snapshot.
++     */
++    html: (true) | (FocusedEditableTextHtmlOptions);
++    /**
++     * Maximum number of UTF-16 code units to return in \`text\`. Must be between
++     * \`1\` and \`1000000\`. Default is \`100000\`.
++     */
++    maxLength?: number;
++    /**
++     * The text range to read.
++     */
++    mode: ('full');
++    /**
++     * Minimum interval between callback deliveries for a watcher, in milliseconds.
++     * Must be between \`0\` and \`60000\`. Default is \`50\`.
++     */
++    throttleMs?: number;
++  } | {
++
++    // Docs: https://electronjs.org/docs/api/structures/focused-editable-text-watch-options
++
++    /**
++     * Set to \`false\` or omit to skip the HTML snapshot. Default is \`false\`.
++     */
++    html?: false;
++    /**
++     * Maximum number of UTF-16 code units to return in \`text\`. Must be between
++     * \`1\` and \`1000000\`. Default is \`100000\`.
++     */
++    maxLength?: number;
++    /**
++     * The text range to read.
++     */
++    mode: ('full');
++    /**
++     * Minimum interval between callback deliveries for a watcher, in milliseconds.
++     * Must be between \`0\` and \`60000\`. Default is \`50\`.
++     */
++    throttleMs?: number;
++  });`;
++
+ function replaceGeneratedInterface(source, name, replacement) {
+   const pattern = new RegExp(String.raw`^  interface ${name}(?: extends [^{]+)? \{[\s\S]*?^  \}`, 'm');
+   if (pattern.test(source)) {
+@@ -506,6 +670,8 @@ definitions = replaceGeneratedInterface(definitions, 'SharedMemoryChannelOptions
+ definitions = replaceGeneratedInterface(definitions, 'AllocatorStats', allocatorStats);
+ definitions = replaceGeneratedInterface(definitions, 'AcceptChannelOptions', acceptChannelOptions);
+ definitions = replaceGeneratedInterface(definitions, 'OpenChannelOptions', openChannelOptions);
++definitions = replaceGeneratedInterface(definitions, 'FocusedEditableTextOptions', focusedEditableTextOptions);
++definitions = replaceGeneratedInterface(definitions, 'FocusedEditableTextWatchOptions', focusedEditableTextWatchOptions);
+
+ definitions = definitions.replace(
+   '    acceptChannel(pool: SharedMemoryPool, options: AcceptChannelOptions): SharedMemoryChannel;',
+diff --git a/shell/browser/api/electron_api_web_contents.cc b/shell/browser/api/electron_api_web_contents.cc
+index 97aed0974d..155e25bfa0 100644
+--- a/shell/browser/api/electron_api_web_contents.cc
++++ b/shell/browser/api/electron_api_web_contents.cc
+@@ -2503,6 +2503,8 @@ bool ParseFocusedEditableTextOptionsDictionary(
+     const gin_helper::Dictionary& dict,
+     FocusedEditableTextOptions* options,
+     std::string* error) {
++  const bool html_present = dict.Has("html");
++
+   if (dict.Has("mode")) {
+     std::string mode;
+     if (!dict.Get("mode", &mode)) {
+@@ -2521,26 +2523,58 @@ bool ParseFocusedEditableTextOptionsDictionary(
+     }
+   }
+
+-  if (dict.Has("includeHtml") &&
+-      !dict.Get("includeHtml", &options->include_html)) {
+-    *error = "includeHtml must be a boolean";
++  if (dict.Has("includeHtml")) {
++    *error = "includeHtml is not supported; use html instead";
+     return false;
+   }
+
+   if (dict.Has("maxHtmlLength")) {
+-    int max_html_length = 0;
+-    if (!dict.Get("maxHtmlLength", &max_html_length)) {
+-      *error = "maxHtmlLength must be an integer";
++    *error = "maxHtmlLength is not supported; use html.maxLength instead";
++    return false;
++  }
++
++  if (html_present) {
++    v8::Local<v8::Value> html_value;
++    if (!dict.Get("html", &html_value)) {
++      *error = "html must be a boolean or an object";
+       return false;
+     }
+-    if (max_html_length < 1 ||
+-        static_cast<uint32_t>(max_html_length) >
+-            kMaxFocusedEditableTextMaxLength) {
+-      *error = base::StringPrintf("maxHtmlLength must be between 1 and %u",
+-                                  kMaxFocusedEditableTextMaxLength);
++
++    if (html_value->IsBoolean()) {
++      options->include_html = html_value.As<v8::Boolean>()->Value();
++    } else if (html_value->IsObject() && !html_value->IsArray()) {
++      options->include_html = true;
++      gin_helper::Dictionary html_options;
++      if (!dict.Get("html", &html_options)) {
++        *error = "html must be a boolean or an object";
++        return false;
++      }
++
++      if (html_options.Has("maxLength")) {
++        int max_html_length = 0;
++        if (!html_options.Get("maxLength", &max_html_length)) {
++          *error = "html.maxLength must be an integer";
++          return false;
++        }
++        if (max_html_length < 1 ||
++            static_cast<uint32_t>(max_html_length) >
++                kMaxFocusedEditableTextMaxLength) {
++          *error = base::StringPrintf(
++              "html.maxLength must be between 1 and %u",
++              kMaxFocusedEditableTextMaxLength);
++          return false;
++        }
++        options->max_html_length = static_cast<uint32_t>(max_html_length);
++      }
++    } else {
++      *error = "html must be a boolean or an object";
+       return false;
+     }
+-    options->max_html_length = static_cast<uint32_t>(max_html_length);
++  }
++
++  if (options->mode != FocusedEditableTextMode::kFull && html_present) {
++    *error = "html is only valid when mode is 'full'";
++    return false;
+   }
+
+   if (dict.Has("maxLength")) {
+diff --git a/spec/api-web-contents-spec.ts b/spec/api-web-contents-spec.ts
+index 5b9030eef1..0814e9297d 100644
+--- a/spec/api-web-contents-spec.ts
++++ b/spec/api-web-contents-spec.ts
+@@ -1653,13 +1653,13 @@ describe('webContents module', () => {
+
+       await waitUntil(async () => {
+         const info = await w.webContents.getFocusedEditableText({
+-          includeHtml: true
++          html: true
+         });
+         return info?.text === 'alpha\nbravo charlie';
+       });
+
+       const info = await w.webContents.getFocusedEditableText({
+-        includeHtml: true
++        html: true
+       });
+       expect(info).to.not.equal(null);
+       if (info === null) {
+@@ -1680,8 +1680,9 @@ describe('webContents module', () => {
+       expect(info.isPartial).to.be.false();
+
+       const truncated = await w.webContents.getFocusedEditableText({
+-        includeHtml: true,
+-        maxHtmlLength: 12
++        html: {
++          maxLength: 12
++        }
+       });
+       expect(truncated).to.not.equal(null);
+       if (truncated === null) {
+@@ -1772,8 +1773,23 @@ describe('webContents module', () => {
+         w.webContents.getFocusedEditableText({ maxLength: 0 })
+       ).to.eventually.be.rejectedWith('maxLength must be between 1 and 1000000');
+       await expect(
+-        w.webContents.getFocusedEditableText({ maxHtmlLength: 0 })
+-      ).to.eventually.be.rejectedWith('maxHtmlLength must be between 1 and 1000000');
++        w.webContents.getFocusedEditableText({ includeHtml: true } as any)
++      ).to.eventually.be.rejectedWith('includeHtml is not supported; use html instead');
++      await expect(
++        w.webContents.getFocusedEditableText({ maxHtmlLength: 10 } as any)
++      ).to.eventually.be.rejectedWith('maxHtmlLength is not supported; use html.maxLength instead');
++      await expect(
++        w.webContents.getFocusedEditableText({ html: { maxLength: 0 } } as any)
++      ).to.eventually.be.rejectedWith('html.maxLength must be between 1 and 1000000');
++      await expect(
++        w.webContents.getFocusedEditableText({ html: 'yes' } as any)
++      ).to.eventually.be.rejectedWith('html must be a boolean or an object');
++      await expect(
++        w.webContents.getFocusedEditableText({ mode: 'value', html: true } as any)
++      ).to.eventually.be.rejectedWith("html is only valid when mode is 'full'");
++      await expect(
++        w.webContents.getFocusedEditableText({ mode: 'surrounding', html: { maxLength: 10 } } as any)
++      ).to.eventually.be.rejectedWith("html is only valid when mode is 'full'");
+     });
+   });
+
+@@ -2372,6 +2388,21 @@ describe('webContents module', () => {
+       expect(() => {
+         w.webContents.watchFocusedEditableText({ maxLength: 0 }, () => {});
+       }).to.throw('maxLength must be between 1 and 1000000');
++      expect(() => {
++        w.webContents.watchFocusedEditableText({ includeHtml: true } as any, () => {});
++      }).to.throw('includeHtml is not supported; use html instead');
++      expect(() => {
++        w.webContents.watchFocusedEditableText({ maxHtmlLength: 10 } as any, () => {});
++      }).to.throw('maxHtmlLength is not supported; use html.maxLength instead');
++      expect(() => {
++        w.webContents.watchFocusedEditableText({ mode: 'full', html: { maxLength: 0 } } as any, () => {});
++      }).to.throw('html.maxLength must be between 1 and 1000000');
++      expect(() => {
++        w.webContents.watchFocusedEditableText({ html: true } as any, () => {});
++      }).to.throw("html is only valid when mode is 'full'");
++      expect(() => {
++        w.webContents.watchFocusedEditableText({ mode: 'value', html: { maxLength: 10 } } as any, () => {});
++      }).to.throw("html is only valid when mode is 'full'");
+       expect(() => {
+         w.webContents.watchFocusedEditableText({ throttleMs: -1 }, () => {});
+       }).to.throw('throttleMs must be between 0 and 60000');
+diff --git a/spec/ts-smoke/electron/main.ts b/spec/ts-smoke/electron/main.ts
+index e9fa320a1f..892f0f16ed 100644
+--- a/spec/ts-smoke/electron/main.ts
++++ b/spec/ts-smoke/electron/main.ts
+@@ -328,6 +328,28 @@ app.whenReady().then(() => {
+   mainWindow.webContents.executeJavaScript('return true;', true);
+   mainWindow.webContents.executeJavaScript('return true;', true).then((result: boolean) => console.log(result));
+   mainWindow.webContents.insertText('blah, blah, blah');
++  mainWindow.webContents.getFocusedEditableText();
++  mainWindow.webContents.getFocusedEditableText({ html: true });
++  mainWindow.webContents.getFocusedEditableText({ mode: 'full', html: { maxLength: 1000 } });
++  mainWindow.webContents.getFocusedEditableText({ mode: 'full', html: false });
++  // @ts-expect-error includeHtml was replaced by html.
++  mainWindow.webContents.getFocusedEditableText({ includeHtml: true });
++  // @ts-expect-error maxHtmlLength was replaced by html.maxLength.
++  mainWindow.webContents.getFocusedEditableText({ maxHtmlLength: 1000 });
++  mainWindow.webContents.getFocusedEditableText({ mode: 'value', maxLength: 1000 });
++  mainWindow.webContents.getFocusedEditableText({ mode: 'surrounding', maxLength: 1000 });
++  // @ts-expect-error HTML snapshots are only valid with full focused editable text snapshots.
++  mainWindow.webContents.getFocusedEditableText({ mode: 'value', html: true });
++  // @ts-expect-error HTML snapshots are only valid with full focused editable text snapshots.
++  mainWindow.webContents.getFocusedEditableText({ mode: 'surrounding', html: { maxLength: 1000 } });
++  mainWindow.webContents.watchFocusedEditableText((info) => console.log(info?.text));
++  mainWindow.webContents.watchFocusedEditableText({ mode: 'full', html: true }, (info) => console.log(info?.html));
++  mainWindow.webContents.watchFocusedEditableText({ mode: 'full', html: { maxLength: 1000 } }, (info) => console.log(info?.html));
++  mainWindow.webContents.watchFocusedEditableText({ mode: 'value', throttleMs: 0 }, (info) => console.log(info?.text));
++  // @ts-expect-error Watchers default to surrounding mode, so HTML snapshots require mode: 'full'.
++  mainWindow.webContents.watchFocusedEditableText({ html: true }, (info) => console.log(info?.html));
++  // @ts-expect-error HTML snapshots are only valid with full focused editable text snapshots.
++  mainWindow.webContents.watchFocusedEditableText({ mode: 'value', html: { maxLength: 1000 } }, (info) => console.log(info?.html));
+   mainWindow.webContents.startDrag({ file: '/path/to/img.png', icon: nativeImage.createFromPath('/path/to/icon.png') });
+   mainWindow.webContents.findInPage('blah');
+   mainWindow.webContents.findInPage('blah', {

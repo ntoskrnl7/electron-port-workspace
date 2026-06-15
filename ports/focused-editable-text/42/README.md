@@ -31,9 +31,13 @@ This bundle contains:
   contenteditable editing, and invalid input rejection
 - initially empty text control normalization, including empty `<textarea>`
   elements in iframes
+- block-aware contenteditable text snapshots with structural line breaks, raw
+  focused-host HTML snapshots, HTML truncation metadata, empty block line
+  preservation, and optional computed-style inlining for HTML snapshots
 - Specs covering no editable focus, password input snapshots, input value mode,
-  empty textarea value mode, contenteditable full mode, truncation, surrounding
-  mode, and invalid options
+  empty textarea value mode, contenteditable full mode, block-aware
+  contenteditable text and HTML, empty block lines, inline-styled HTML
+  snapshots, truncation, surrounding mode, and invalid options
 - Specs covering watcher initial callback, updates, close, independent watcher
   options, callback lifetime without retaining the return object,
   password input snapshots, focus-loss nulls, and invalid watcher options
