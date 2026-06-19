@@ -27,10 +27,18 @@ Notes:
   both.
 - `0009` aligns preload startup data typing with Electron 42.3.x renderer
   startup data so the rebased bundle applies cleanly to `v42.3.3`.
+- `0010` scopes pushed and lazily loaded frame startup data to the frame
+  preloads that can actually run in that document. This keeps sandboxed
+  `allow-scripts` initial-empty subframes from crashing when they need an
+  opted-in preload, while preserving the existing `nodeIntegrationInSubFrames`
+  Node global exposure rules.
 
 This target was regenerated against a clean `v42.3.3` Electron tree after
 `print-request-handler` and `widevine-cdm` were applied, matching the CI apply
 order used by `electron-port-release.yml`.
+
+`0010` was added against Electron `v42.4.1` after validating the sandboxed
+subframe initialization and subframe Node global exposure specs.
 
 Patch directories:
 

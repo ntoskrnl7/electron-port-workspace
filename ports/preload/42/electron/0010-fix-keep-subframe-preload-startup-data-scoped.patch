@@ -1,0 +1,435 @@
+From abed3be8cf292f2e059e5382171c9ad57f5434c3 Mon Sep 17 00:00:00 2001
+From: Jung-Kwang Lee <ntoskrnl7@gmail.com>
+Date: Thu, 18 Jun 2026 20:48:44 +0900
+Subject: fix: keep subframe preload startup data scoped
+
+---
+ lib/renderer/init.ts                          |  2 +-
+ .../browser/api/electron_api_web_contents.cc  | 19 +++++-
+ shell/browser/electron_browser_client.cc      | 21 +++++-
+ shell/browser/renderer_startup_data.cc        | 37 ++++++++++-
+ shell/browser/renderer_startup_data.h         |  9 ++-
+ shell/common/api/api.mojom                    |  6 +-
+ .../electron_sandboxed_renderer_client.cc     | 41 ++++++++++++
+ shell/renderer/renderer_client_base.cc        | 15 ++++-
+ spec/api-subframe-spec.ts                     | 66 +++++++++++++++++++
+ spec/fixtures/empty-preload.js                |  1 +
+ 10 files changed, 206 insertions(+), 11 deletions(-)
+ create mode 100644 spec/fixtures/empty-preload.js
+
+diff --git a/lib/renderer/init.ts b/lib/renderer/init.ts
+index 88a5dc0795..d20808c65d 100644
+--- a/lib/renderer/init.ts
++++ b/lib/renderer/init.ts
+@@ -131,7 +131,7 @@ if (shouldExposeNodeGlobals) {
+ // next tick after init returns, which is before any async ESM preload
+ // finishes executing, leaving its code with no `process` (#46142). So we
+ // instead schedule the deletion explicitly once preloads are loaded.
+-const shouldDeleteRendererNodeGlobals = !nodeIntegration && !process.contextIsolated;
++const shouldDeleteRendererNodeGlobals = !shouldExposeNodeGlobals && !process.contextIsolated;
+
+ const { appCodeLoaded } = process;
+ delete process.appCodeLoaded;
+diff --git a/shell/browser/api/electron_api_web_contents.cc b/shell/browser/api/electron_api_web_contents.cc
+index 7fe024bd5c..11d1d7129f 100644
+--- a/shell/browser/api/electron_api_web_contents.cc
++++ b/shell/browser/api/electron_api_web_contents.cc
+@@ -5246,8 +5246,16 @@ void WebContents::MaybeSendRendererStartupData(
+   // that will actually compile the sandbox bundle.
+   const GURL& url = navigation_handle->GetURL();
+   bool main_frame = navigation_handle->IsInMainFrame();
+-  bool allow_subframes =
++  bool allow_legacy_subframe_preload =
+       web_prefs && web_prefs->AllowsNodeIntegrationInSubFrames();
++  bool allow_session_subframe_preloads = false;
++  if (auto* session_prefs = SessionPreferences::FromBrowserContext(
++          web_contents()->GetBrowserContext())) {
++    allow_session_subframe_preloads =
++        session_prefs->HasFramePreloadScriptInSubFrames();
++  }
++  bool allow_subframes =
++      allow_legacy_subframe_preload || allow_session_subframe_preloads;
+   bool is_devtools_like =
+       url.SchemeIs("devtools") || url.SchemeIs("chrome-extension");
+   if (!main_frame && !allow_subframes && !is_devtools_like)
+@@ -5268,12 +5276,17 @@ void WebContents::MaybeSendRendererStartupData(
+     // parked waiting on us here — we haven't sent CommitNavigation yet — so
+     // unlike the old sync IPC handler this can't amplify under contention.
+     ScopedAllowBlockingForElectron allow_blocking;
++    renderer_startup_data::FramePreloadOptions frame_options;
++    frame_options.is_main_frame = main_frame;
++    frame_options.allow_legacy_subframe_preload = allow_legacy_subframe_preload;
+     data = renderer_startup_data::Build(rfh->GetBrowserContext(),
+-                                        PreloadScript::ScriptType::kWebFrame);
++                                        PreloadScript::ScriptType::kWebFrame,
++                                        std::nullopt, frame_options);
+     std::optional<base::FilePath> preload;
+     if (web_prefs)
+       preload = web_prefs->GetPreloadPath();
+-    if (preload && preload->IsAbsolute()) {
++    if (preload && preload->IsAbsolute() &&
++        (main_frame || allow_legacy_subframe_preload)) {
+       auto ps = mojom::PreloadScriptData::New();
+       ps->id = preload_code_cache::IdForWebPreferencesPreload(*preload);
+       ps->file_path = preload->AsUTF8Unsafe();
+diff --git a/shell/browser/electron_browser_client.cc b/shell/browser/electron_browser_client.cc
+index e04ba2623d..e84a6cb278 100644
+--- a/shell/browser/electron_browser_client.cc
++++ b/shell/browser/electron_browser_client.cc
+@@ -306,6 +306,9 @@ class ElectronPreloadScriptLoader : public mojom::ElectronPreloadScriptLoader {
+
+   void LoadPreloadScripts(const std::string& type,
+                           const std::string& injection_point,
++                          bool is_main_frame,
++                          bool is_initial_empty_document,
++                          bool allow_legacy_subframe_preload,
+                           LoadPreloadScriptsCallback callback) override {
+     auto empty_data = [] {
+       auto data = mojom::RendererStartupData::New();
+@@ -324,6 +327,16 @@ class ElectronPreloadScriptLoader : public mojom::ElectronPreloadScriptLoader {
+       return;
+     }
+
++    std::optional<renderer_startup_data::FramePreloadOptions>
++        frame_preload_options;
++    if (*script_type == PreloadScript::ScriptType::kWebFrame) {
++      renderer_startup_data::FramePreloadOptions options;
++      options.is_main_frame = is_main_frame;
++      options.is_initial_empty_document = is_initial_empty_document;
++      options.allow_legacy_subframe_preload = allow_legacy_subframe_preload;
++      frame_preload_options = options;
++    }
++
+     mojom::RendererStartupDataPtr data;
+     {
+       ScopedAllowBlockingForElectron allow_blocking;
+@@ -331,7 +344,8 @@ class ElectronPreloadScriptLoader : public mojom::ElectronPreloadScriptLoader {
+           browser_context_, *script_type,
+           *script_type == PreloadScript::ScriptType::kDedicatedWorker
+               ? dedicated_worker_injection_point
+-              : std::nullopt);
++              : std::nullopt,
++          frame_preload_options);
+     }
+
+     std::move(callback).Run(std::move(data));
+@@ -914,8 +928,11 @@ ElectronBrowserClient::GetExtraCreateNewWindowReplyData(
+   mojom::RendererStartupDataPtr data;
+   {
+     ScopedAllowBlockingForElectron allow_blocking;
++    renderer_startup_data::FramePreloadOptions frame_options;
++    frame_options.is_main_frame = true;
+     data = renderer_startup_data::Build(web_contents->GetBrowserContext(),
+-                                        PreloadScript::ScriptType::kWebFrame);
++                                        PreloadScript::ScriptType::kWebFrame,
++                                        std::nullopt, frame_options);
+     std::optional<base::FilePath> preload;
+     if (web_prefs)
+       preload = web_prefs->GetPreloadPath();
+diff --git a/shell/browser/renderer_startup_data.cc b/shell/browser/renderer_startup_data.cc
+index 01b2eebd0e..dd22a5c13f 100644
+--- a/shell/browser/renderer_startup_data.cc
++++ b/shell/browser/renderer_startup_data.cc
+@@ -78,13 +78,43 @@ std::optional<std::string> ServiceWorkerTargetToString(
+   }
+ }
+
++bool FramePreloadMatches(const PreloadScript& script,
++                         const FramePreloadOptions& options) {
++  DCHECK_EQ(script.script_type, PreloadScript::ScriptType::kWebFrame);
++
++  bool matches_scope = false;
++  if (!script.has_frame_scope) {
++    matches_scope =
++        options.is_main_frame || options.allow_legacy_subframe_preload;
++  } else {
++    switch (script.frame_scope) {
++      case PreloadScript::FrameScope::kMain:
++        matches_scope = options.is_main_frame;
++        break;
++      case PreloadScript::FrameScope::kSubFrames:
++        matches_scope = !options.is_main_frame;
++        break;
++      case PreloadScript::FrameScope::kAll:
++        matches_scope = true;
++        break;
++    }
++  }
++
++  if (!matches_scope)
++    return false;
++  if (options.is_initial_empty_document)
++    return script.run_in_initial_empty_document;
++  return true;
++}
++
+ }  // namespace
+
+ mojom::RendererStartupDataPtr Build(
+     content::BrowserContext* browser_context,
+     PreloadScript::ScriptType type,
+     std::optional<PreloadScript::DedicatedWorkerInjectionPoint>
+-        dedicated_worker_injection_point) {
++        dedicated_worker_injection_point,
++    std::optional<FramePreloadOptions> frame_preload_options) {
+   auto data = mojom::RendererStartupData::New();
+
+   auto* session_prefs = SessionPreferences::FromBrowserContext(browser_context);
+@@ -92,6 +122,11 @@ mojom::RendererStartupDataPtr Build(
+     for (const auto& script : session_prefs->preload_scripts()) {
+       if (script.script_type != type)
+         continue;
++      if (type == PreloadScript::ScriptType::kWebFrame &&
++          frame_preload_options &&
++          !FramePreloadMatches(script, *frame_preload_options)) {
++        continue;
++      }
+       if (type == PreloadScript::ScriptType::kDedicatedWorker &&
+           dedicated_worker_injection_point) {
+         const auto expected =
+diff --git a/shell/browser/renderer_startup_data.h b/shell/browser/renderer_startup_data.h
+index 95d25e087e..3d6b3601f0 100644
+--- a/shell/browser/renderer_startup_data.h
++++ b/shell/browser/renderer_startup_data.h
+@@ -16,6 +16,12 @@ class BrowserContext;
+
+ namespace electron::renderer_startup_data {
+
++struct FramePreloadOptions {
++  bool is_main_frame = true;
++  bool is_initial_empty_document = false;
++  bool allow_legacy_subframe_preload = false;
++};
++
+ // Builds a RendererStartupData for the given session containing the registered
+ // preload scripts of |type| (kWebFrame for the per-frame ElectronFrameStartup
+ // push, or kServiceWorker for the GetServiceWorkerStartupData blob), the
+@@ -25,7 +31,8 @@ mojom::RendererStartupDataPtr Build(
+     content::BrowserContext* browser_context,
+     PreloadScript::ScriptType type,
+     std::optional<PreloadScript::DedicatedWorkerInjectionPoint>
+-        dedicated_worker_injection_point = std::nullopt);
++        dedicated_worker_injection_point = std::nullopt,
++    std::optional<FramePreloadOptions> frame_preload_options = std::nullopt);
+
+ }  // namespace electron::renderer_startup_data
+
+diff --git a/shell/common/api/api.mojom b/shell/common/api/api.mojom
+index 4b0b674923..23a15fc01d 100644
+--- a/shell/common/api/api.mojom
++++ b/shell/common/api/api.mojom
+@@ -51,7 +51,11 @@ struct WebPolicyCheckDetails {
+
+ interface ElectronPreloadScriptLoader {
+   [Sync]
+-  LoadPreloadScripts(string type, string injection_point)
++  LoadPreloadScripts(string type,
++                     string injection_point,
++                     bool is_main_frame,
++                     bool is_initial_empty_document,
++                     bool allow_legacy_subframe_preload)
+       => (RendererStartupData data);
+ };
+
+diff --git a/shell/renderer/electron_sandboxed_renderer_client.cc b/shell/renderer/electron_sandboxed_renderer_client.cc
+index d89bddf439..d9f5790503 100644
+--- a/shell/renderer/electron_sandboxed_renderer_client.cc
++++ b/shell/renderer/electron_sandboxed_renderer_client.cc
+@@ -12,6 +12,7 @@
+ #include "base/process/process_metrics.h"
+ #include "components/cdm/renderer/key_system_support_update.h"
+ #include "content/public/renderer/render_frame.h"
++#include "mojo/public/cpp/bindings/remote.h"
+ #include "shell/common/api/electron_bindings.h"
+ #include "shell/common/application_info.h"
+ #include "shell/common/gin_helper/dictionary.h"
+@@ -24,11 +25,14 @@
+ #include "shell/renderer/preload_realm_context.h"
+ #include "shell/renderer/preload_utils.h"
+ #include "shell/renderer/service_worker_data.h"
++#include "third_party/blink/public/common/thread_safe_browser_interface_broker_proxy.h"
+ #include "third_party/blink/public/common/web_preferences/web_preferences.h"
++#include "third_party/blink/public/platform/platform.h"
+ #include "third_party/blink/public/platform/scheduler/web_agent_group_scheduler.h"
+ #include "third_party/blink/public/web/blink.h"
+ #include "third_party/blink/public/web/web_document.h"
+ #include "third_party/electron_node/src/node_binding.h"
++#include "url/gurl.h"
+
+ namespace electron {
+
+@@ -60,6 +64,41 @@ void InvokeEmitProcessEvent(v8::Isolate* const isolate,
+       callback->Call(context, callback, std::size(args), std::data(args));
+ }
+
++bool EnsureInitialEmptySubframeStartupData(content::RenderFrame* render_frame) {
++  auto* api_service = ElectronApiServiceImpl::Get(render_frame);
++  if (!api_service)
++    return false;
++  if (api_service->startup_data())
++    return true;
++
++  const bool is_initial_empty_subframe =
++      !render_frame->IsMainFrame() &&
++      GURL{render_frame->GetWebFrame()->GetDocument().Url()}.IsAboutBlank();
++  if (!is_initial_empty_subframe)
++    return false;
++
++  mojo::Remote<mojom::ElectronPreloadScriptLoader> loader;
++  blink::Platform::Current()->GetBrowserInterfaceBroker()->GetInterface(
++      loader.BindNewPipeAndPassReceiver());
++
++  mojom::RendererStartupDataPtr startup_data;
++  const auto prefs = render_frame->GetBlinkPreferences();
++  if (!loader->LoadPreloadScripts(
++          "frame", /*injection_point=*/"", render_frame->IsMainFrame(),
++          /*is_initial_empty_document=*/true,
++          prefs.node_integration_in_sub_frames,
++          &startup_data)) {
++    return false;
++  }
++  if (!startup_data)
++    return false;
++  if (startup_data->preload_scripts.empty())
++    return false;
++
++  api_service->SetStartupData(std::move(startup_data));
++  return true;
++}
++
+ }  // namespace
+
+ ElectronSandboxedRendererClient::ElectronSandboxedRendererClient() {
+@@ -146,6 +185,8 @@ void ElectronSandboxedRendererClient::DidCreateScriptContext(
+   // Or when nodeSupport is explicitly enabled in sub frames
+   if (!ShouldLoadPreload(isolate, context, render_frame))
+     return;
++  if (!EnsureInitialEmptySubframeStartupData(render_frame))
++    return;
+
+   injected_frames_.insert(render_frame);
+
+diff --git a/shell/renderer/renderer_client_base.cc b/shell/renderer/renderer_client_base.cc
+index 577b69ba56..2ec16fc742 100644
+--- a/shell/renderer/renderer_client_base.cc
++++ b/shell/renderer/renderer_client_base.cc
+@@ -177,6 +177,9 @@ void ExecuteSandboxedWorkerPreloadScripts(v8::Local<v8::Context> context,
+   mojom::RendererStartupDataPtr startup_data;
+   if (!loader->LoadPreloadScripts(std::string{type},
+                                   std::string{injection_point},
++                                  /*is_main_frame=*/false,
++                                  /*is_initial_empty_document=*/false,
++                                  /*allow_legacy_subframe_preload=*/false,
+                                   &startup_data)) {
+     return;
+   }
+@@ -246,7 +249,11 @@ void ExecutePlainPreloadScripts(v8::Local<v8::Context> context,
+
+   mojom::RendererStartupDataPtr data;
+   if (!loader->LoadPreloadScripts(std::string{type},
+-                                  std::string{injection_point}, &data))
++                                  std::string{injection_point},
++                                  /*is_main_frame=*/false,
++                                  /*is_initial_empty_document=*/false,
++                                  /*allow_legacy_subframe_preload=*/false,
++                                  &data))
+     return;
+   if (!data)
+     return;
+@@ -312,7 +319,11 @@ bool HasPreloadScripts(std::string_view type,
+
+   mojom::RendererStartupDataPtr data;
+   return loader->LoadPreloadScripts(std::string{type},
+-                                    std::string{injection_point}, &data) &&
++                                    std::string{injection_point},
++                                    /*is_main_frame=*/false,
++                                    /*is_initial_empty_document=*/false,
++                                    /*allow_legacy_subframe_preload=*/false,
++                                    &data) &&
+          data && !data->preload_scripts.empty();
+ }
+
+diff --git a/spec/api-subframe-spec.ts b/spec/api-subframe-spec.ts
+index 996ce64859..ee99d52907 100644
+--- a/spec/api-subframe-spec.ts
++++ b/spec/api-subframe-spec.ts
+@@ -457,6 +457,72 @@ describe('subframe Node.js global exposure policy', () => {
+   });
+ });
+
++describe('sandboxed subframe initialization', () => {
++  let w: BrowserWindow;
++
++  afterEach(async () => {
++    await closeWindow(w);
++    w = null as unknown as BrowserWindow;
++  });
++
++  const loadSandboxedWindow = async () => {
++    w = new BrowserWindow({
++      show: false,
++      webPreferences: {
++        sandbox: true,
++        preload: path.resolve(__dirname, 'fixtures/empty-preload.js')
++      }
++    });
++    await w.loadURL('data:text/html,<html><body></body></html>');
++  };
++
++  const withoutRendererCrash = async <T>(action: () => Promise<T>) => {
++    return await new Promise<T>((resolve, reject) => {
++      const onRenderProcessGone = (
++        _event: Electron.Event,
++        details: Electron.RenderProcessGoneDetails
++      ) => {
++        reject(new Error(`renderer process gone: ${details.reason}, exitCode: ${details.exitCode}`));
++      };
++      w.webContents.once('render-process-gone', onRenderProcessGone);
++      action().then(resolve, reject).finally(() => {
++        w.webContents.removeListener('render-process-gone', onRenderProcessGone);
++      });
++    });
++  };
++
++  it('does not crash when appending a sandboxed allow-scripts iframe', async () => {
++    await loadSandboxedWindow();
++
++    const result = await withoutRendererCrash(() => w.webContents.executeJavaScript(`new Promise(resolve => {
++      const iframe = document.createElement('iframe');
++      iframe.setAttribute('sandbox', 'allow-scripts');
++      document.body.appendChild(iframe);
++      setTimeout(() => resolve({
++        frameCount: document.querySelectorAll('iframe').length
++      }), 1000);
++    })`));
++
++    expect(result).to.deep.equal({ frameCount: 1 });
++  });
++
++  it('does not crash when appending a sandboxed allow-scripts srcdoc iframe', async () => {
++    await loadSandboxedWindow();
++
++    const result = await withoutRendererCrash(() => w.webContents.executeJavaScript(`new Promise(resolve => {
++      const iframe = document.createElement('iframe');
++      iframe.setAttribute('sandbox', 'allow-scripts');
++      iframe.srcdoc = '<!doctype html><script>parent.postMessage("ready", "*")<\\/script>';
++      document.body.appendChild(iframe);
++      setTimeout(() => resolve({
++        frameCount: document.querySelectorAll('iframe').length
++      }), 1000);
++    })`));
++
++    expect(result).to.deep.equal({ frameCount: 1 });
++  });
++});
++
+ describe('subframe with non-standard schemes', () => {
+   it('should not crash when changing subframe src to about:blank and back', async () => {
+     const w = new BrowserWindow({ show: false, width: 400, height: 400 });
+diff --git a/spec/fixtures/empty-preload.js b/spec/fixtures/empty-preload.js
+new file mode 100644
+index 0000000000..8b13789179
+--- /dev/null
++++ b/spec/fixtures/empty-preload.js
+@@ -0,0 +1 @@
++
