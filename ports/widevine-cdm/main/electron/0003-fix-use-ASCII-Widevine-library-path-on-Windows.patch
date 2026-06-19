@@ -1,0 +1,27 @@
+From 0ac248b029ed17f71de63378d14d1245ab3c1bfc Mon Sep 17 00:00:00 2001
+From: Electron Scripts <scripts@electron>
+Date: Tue, 19 May 2026 11:15:59 +0900
+Subject: [PATCH] fix: use ASCII Widevine library path on Windows
+
+---
+ shell/app/electron_content_client.cc | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/shell/app/electron_content_client.cc b/shell/app/electron_content_client.cc
+index fd72a03c79..3b3e77467f 100644
+--- a/shell/app/electron_content_client.cc
++++ b/shell/app/electron_content_client.cc
+@@ -127,8 +127,8 @@ bool TryGetBundledWidevineCdm(
+   base::FilePath install_dir = exe_dir.AppendASCII(kWidevineCdmBaseDirectory);
+   base::FilePath platform_dir =
+       media::GetPlatformSpecificDirectory(install_dir);
+-  base::FilePath cdm_library_path =
+-      platform_dir.Append(base::GetNativeLibraryName(kWidevineCdmLibraryName));
++  base::FilePath cdm_library_path = platform_dir.AppendASCII(
++      base::GetNativeLibraryName(kWidevineCdmLibraryName));
+   if (!base::PathExists(cdm_library_path))
+     return false;
+ 
+-- 
+2.54.0.windows.1
+

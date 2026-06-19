@@ -15,6 +15,8 @@ Build args:
 - Adds `enable_widevine = true` to Electron's common GN args.
 - Does not set `bundle_widevine_cdm = true`; CDM binary redistribution needs a
   separate Widevine license decision.
+- On Windows, uses `AppendASCII()` for the native Widevine library filename so
+  `base::FilePath` receives the expected string type.
 
 Packaging:
 
