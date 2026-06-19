@@ -6,6 +6,7 @@ Patch sequence:
 
 - `electron/0001-feat-add-worker-runtime-APIs.patch`
 - `electron/0002-fix-align-worker-wrappable-tags-with-Electron-tag-ra.patch`
+- `electron/0003-fix-keep-worker-IPC-ts-smoke-independent-of-main-win.patch`
 
 Dependencies:
 
@@ -29,8 +30,8 @@ Export source:
 Use:
 
 ```powershell
-C:\work\electron\scripts\port-bundle.ps1 apply worker-runtime -Target 42 -SrcRoot C:\work\electron\42\src
-C:\work\electron\scripts\port-bundle.ps1 undo worker-runtime -Target 42 -SrcRoot C:\work\electron\42\src
+.\scripts\port-bundle.ps1 apply worker-runtime -Target 42 -SrcRoot <repo>\42\src
+.\scripts\port-bundle.ps1 undo worker-runtime -Target 42 -SrcRoot <repo>\42\src
 ```
 
 Validation performed before export:
@@ -38,3 +39,6 @@ Validation performed before export:
 - `e build --no-remote -t electron -local_jobs 20`
 - `env -u ELECTRON_RUN_AS_NODE npm run test -- --skipYarnInstall --runners=main --grep "closing a WebContents with an active dedicated worker"`
 - `env -u ELECTRON_RUN_AS_NODE npm run test -- --skipYarnInstall --runners=main --grep "WorkerMain module"`
+- On Electron `v42.4.1`, all-port type generation requires the worker IPC
+  ts-smoke examples to avoid dereferencing a nullable BrowserWindow at top
+  level. `0003` records that follow-up fix.

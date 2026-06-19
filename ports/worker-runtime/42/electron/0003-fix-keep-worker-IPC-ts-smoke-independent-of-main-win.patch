@@ -1,0 +1,112 @@
+From c0c8a0f8d1fbe2883c020e5a57cc9ae454b1f24b Mon Sep 17 00:00:00 2001
+From: Electron Scripts <scripts@electron>
+Date: Wed, 17 Jun 2026 16:13:29 +0900
+Subject: [PATCH] fix: keep worker IPC ts smoke independent of main window
+
+---
+ spec/ts-smoke/electron/main.ts | 30 ++++++++++++++++--------------
+ 1 file changed, 16 insertions(+), 14 deletions(-)
+
+diff --git a/spec/ts-smoke/electron/main.ts b/spec/ts-smoke/electron/main.ts
+index 736d55e223..c3f6712853 100644
+--- a/spec/ts-smoke/electron/main.ts
++++ b/spec/ts-smoke/electron/main.ts
+@@ -886,7 +886,9 @@ ipcMain.handle('worker-invoke-union', (event: Electron.IpcMainInvokeEventUnion)
+   return event.processId;
+ });
+ 
+-mainWindow.webContents.ipc.addListener('webcontents-scoped-message', (event) => {
++const workerTypeSmokeWebContents = {} as Electron.WebContents;
++
++workerTypeSmokeWebContents.ipc.addListener('webcontents-scoped-message', (event) => {
+   const type: 'frame' | 'dedicated-worker' = event.type;
+   console.log(type);
+   if (event.type === 'frame') {
+@@ -896,7 +898,7 @@ mainWindow.webContents.ipc.addListener('webcontents-scoped-message', (event) =>
+   }
+ });
+ 
+-mainWindow.webContents.ipc.handle('webcontents-scoped-invoke', (event) => {
++workerTypeSmokeWebContents.ipc.handle('webcontents-scoped-invoke', (event) => {
+   const type: 'frame' | 'dedicated-worker' = event.type;
+   console.log(type);
+   if (event.type === 'frame') {
+@@ -905,33 +907,33 @@ mainWindow.webContents.ipc.handle('webcontents-scoped-invoke', (event) => {
+   return event.senderDedicatedWorker.id;
+ });
+ 
+-mainWindow.webContents.on('dedicated-worker-created', (event, details) => {
++workerTypeSmokeWebContents.on('dedicated-worker-created', (event, details) => {
+   console.log(event, details.id, details.origin, details.renderProcessId);
+ });
+ 
+-mainWindow.webContents.on('dedicated-worker-destroyed', (event, details) => {
++workerTypeSmokeWebContents.on('dedicated-worker-destroyed', (event, details) => {
+   console.log(event, details.id);
+ });
+ 
+-mainWindow.webContents.dedicatedWorkers.on('created', (details) => {
++workerTypeSmokeWebContents.dedicatedWorkers.on('created', (details) => {
+   console.log(details.id, details.origin, details.renderProcessId);
+ });
+ 
+-mainWindow.webContents.dedicatedWorkers.on('destroyed', (details) => {
++workerTypeSmokeWebContents.dedicatedWorkers.on('destroyed', (details) => {
+   console.log(details.id);
+ });
+ 
+-mainWindow.webContents.dedicatedWorkers.on('final-response-url-determined', (details) => {
++workerTypeSmokeWebContents.dedicatedWorkers.on('final-response-url-determined', (details) => {
+   console.log(details.id, details.url);
+ });
+ 
+-const dedicatedWorkerInfo = mainWindow.webContents.dedicatedWorkers.getAllRunning();
++const dedicatedWorkerInfo = workerTypeSmokeWebContents.dedicatedWorkers.getAllRunning();
+ for (const id of Object.keys(dedicatedWorkerInfo)) {
+   console.log(dedicatedWorkerInfo[id].scriptURL);
+-  mainWindow.webContents.dedicatedWorkers.getWorkerFromID(id)?.send('ping');
++  workerTypeSmokeWebContents.dedicatedWorkers.getWorkerFromID(id)?.send('ping');
+ }
+ 
+-mainWindow.webContents.session.ipc.addListener('session-worker-message', (event) => {
++workerTypeSmokeWebContents.session.ipc.addListener('session-worker-message', (event) => {
+   if (event.type === 'service-worker') {
+     console.log(event.serviceWorker);
+   } else {
+@@ -941,13 +943,13 @@ mainWindow.webContents.session.ipc.addListener('session-worker-message', (event)
+   console.log(event.notARealProperty);
+ });
+ 
+-mainWindow.webContents.session.ipc.off('session-worker-message', (event) => {
++workerTypeSmokeWebContents.session.ipc.off('session-worker-message', (event) => {
+   console.log(event.type);
+   // @ts-expect-error Session IPC off listener events are strongly typed.
+   console.log(event.notARealProperty);
+ });
+ 
+-const serviceWorkerMain = mainWindow.webContents.session.serviceWorkers.getWorkerFromVersionID(0);
++const serviceWorkerMain = workerTypeSmokeWebContents.session.serviceWorkers.getWorkerFromVersionID(0);
+ serviceWorkerMain?.ipc.addListener('service-worker-message', (event) => {
+   console.log(event.serviceWorker, event.versionId);
+   // @ts-expect-error Service worker IPC listener events are strongly typed.
+@@ -959,7 +961,7 @@ serviceWorkerMain?.ipc.off('service-worker-message', (event) => {
+   console.log(event.notARealProperty);
+ });
+ 
+-const sharedWorkerMain = mainWindow.webContents.session.sharedWorkers.getWorkerFromID('shared-worker-id');
++const sharedWorkerMain = workerTypeSmokeWebContents.session.sharedWorkers.getWorkerFromID('shared-worker-id');
+ sharedWorkerMain?.ipc.addListener('shared-worker-message', (event) => {
+   console.log(event.sharedWorker);
+   // @ts-expect-error Shared worker IPC listener events are strongly typed.
+@@ -971,7 +973,7 @@ sharedWorkerMain?.ipc.off('shared-worker-message', (event) => {
+   console.log(event.notARealProperty);
+ });
+ 
+-const dedicatedWorkerMain = mainWindow.webContents.dedicatedWorkers.getWorkerFromID('dedicated-worker-id');
++const dedicatedWorkerMain = workerTypeSmokeWebContents.dedicatedWorkers.getWorkerFromID('dedicated-worker-id');
+ dedicatedWorkerMain?.ipc.addListener('dedicated-worker-message', (event) => {
+   console.log(event.senderDedicatedWorker);
+   // @ts-expect-error Dedicated worker IPC listener events are strongly typed.
+-- 
+2.54.0.windows.1
+
