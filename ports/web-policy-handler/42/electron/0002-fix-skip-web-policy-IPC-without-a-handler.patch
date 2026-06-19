@@ -1,0 +1,53 @@
+From 5d6b8af9252dc485037929ab84f4eeeb176eac87 Mon Sep 17 00:00:00 2001
+From: Jung-Kwang Lee <ntoskrnl7@gmail.com>
+Date: Thu, 18 Jun 2026 20:48:49 +0900
+Subject: fix: skip web policy IPC without a handler
+
+---
+ shell/browser/api/electron_api_session.cc | 4 ++++
+ shell/browser/api/electron_api_session.h  | 1 +
+ shell/browser/electron_browser_client.cc  | 4 ++++
+ 3 files changed, 9 insertions(+)
+
+diff --git a/shell/browser/api/electron_api_session.cc b/shell/browser/api/electron_api_session.cc
+index dd478da971..0396058f73 100644
+--- a/shell/browser/api/electron_api_session.cc
++++ b/shell/browser/api/electron_api_session.cc
+@@ -1004,6 +1004,10 @@ void Session::SetWebPolicyHandler(gin::Arguments* args) {
+   web_policy_handler_ = std::move(handler);
+ }
+
++bool Session::HasWebPolicyHandler() const {
++  return !web_policy_handler_.is_null();
++}
++
+ std::string Session::HandleWebPolicy(v8::Local<v8::Value> details) {
+   if (web_policy_handler_.is_null())
+     return "default";
+diff --git a/shell/browser/api/electron_api_session.h b/shell/browser/api/electron_api_session.h
+index 0b29bb928f..fde878e858 100644
+--- a/shell/browser/api/electron_api_session.h
++++ b/shell/browser/api/electron_api_session.h
+@@ -151,6 +151,7 @@ class Session final : public gin::Wrappable<Session>,
+   void SetWebNotificationHandler(gin::Arguments* args);
+   bool HandleWebNotification(v8::Local<v8::Value> notification);
+   void SetWebPolicyHandler(gin::Arguments* args);
++  bool HasWebPolicyHandler() const;
+   std::string HandleWebPolicy(v8::Local<v8::Value> details);
+   v8::Local<v8::Promise> ClearHostResolverCache(gin::Arguments* args);
+   v8::Local<v8::Promise> ClearAuthCache();
+diff --git a/shell/browser/electron_browser_client.cc b/shell/browser/electron_browser_client.cc
+index e84a6cb278..122caa21ac 100644
+--- a/shell/browser/electron_browser_client.cc
++++ b/shell/browser/electron_browser_client.cc
+@@ -381,6 +381,10 @@ class ElectronWebPolicyChecker : public mojom::ElectronWebPolicyChecker {
+       std::move(callback).Run("default");
+       return;
+     }
++    if (!session_cell->Get()->HasWebPolicyHandler()) {
++      std::move(callback).Run("default");
++      return;
++    }
+
+     v8::Isolate* isolate = JavascriptEnvironment::GetIsolate();
+     v8::HandleScope handle_scope(isolate);

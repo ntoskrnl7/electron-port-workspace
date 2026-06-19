@@ -1,0 +1,8 @@
+schema_version=1
+name=web-policy-handler
+target=42
+depends_on=web-notification-handler
+electronized_chromium_patches=true
+electron_patch_stack_source=chromium-direct
+electron_patch_files=electron/*.patch
+chromium_direct_archive=chromium-direct

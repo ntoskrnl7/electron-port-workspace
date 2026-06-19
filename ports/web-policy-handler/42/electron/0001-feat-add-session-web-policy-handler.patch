@@ -1,0 +1,1261 @@
+From 53ae99ad1453ac751eaa0a26ff352a087775efdb Mon Sep 17 00:00:00 2001
+From: Jung-Kwang Lee <ntoskrnl7@gmail.com>
+Date: Wed, 17 Jun 2026 13:42:32 +0900
+Subject: feat: add session web policy handler
+
+---
+ docs/api/session.md                           |  57 ++
+ .../structures/web-policy-handler-details.md  |  27 +
+ .../structures/web-policy-handler-response.md |   9 +
+ package.json                                  |   2 +-
+ .../fix-web-policy-typescript-definitions.mjs | 217 +++++++
+ shell/browser/api/electron_api_session.cc     |  31 +
+ shell/browser/api/electron_api_session.h      |   5 +
+ shell/browser/electron_browser_client.cc      |  80 +++
+ shell/common/api/api.mojom                    |  18 +
+ shell/renderer/renderer_client_base.cc        |  31 +
+ shell/renderer/renderer_client_base.h         |   2 +
+ spec/api-session-spec.ts                      | 572 ++++++++++++++++++
+ 12 files changed, 1050 insertions(+), 1 deletion(-)
+ create mode 100644 docs/api/structures/web-policy-handler-details.md
+ create mode 100644 docs/api/structures/web-policy-handler-response.md
+ create mode 100644 script/fix-web-policy-typescript-definitions.mjs
+
+diff --git a/docs/api/session.md b/docs/api/session.md
+index aef2a69f0f..88d3e069d0 100644
+--- a/docs/api/session.md
++++ b/docs/api/session.md
+@@ -1320,6 +1320,63 @@ session.defaultSession.setWebNotificationHandler((notification) => {
+ })
+ ```
+
++#### `ses.setWebPolicyHandler(handler)` _Experimental_
++
++* `handler` Function | null
++  * `details` [WebPolicyHandlerDetails](structures/web-policy-handler-details.md)
++
++Sets the synchronous handler used to observe and override selected web policy
++checks in this session. Passing `null` removes the handler.
++
++The handler is called from renderer policy checks and must return before the
++web operation can continue. Do not perform blocking I/O or long-running work in
++the handler.
++
++The handler currently receives checks for:
++
++* `content-security-policy` - CSP directive checks such as `connect-src`,
++  `script-src`, `style-src-elem`, `worker-src`, `trusted-types`, and
++  `require-trusted-types-for`.
++* `permissions-policy` - Permissions Policy feature checks using Chromium's
++  policy feature names, such as `fullscreen`, `camera`, and `sync-xhr`.
++* `document-policy` - Document Policy feature checks such as
++  `force-load-at-top`, `js-profiling`, and `sync-xhr`.
++* `browser-runtime` - named Chromium runtime policy checks that are not
++  represented by a response header, currently `sync-xhr` and
++  `sync-xhr-page-dismissal`.
++
++Returning `{ action: 'default' }` or returning nothing preserves Chromium's
++default behavior. Returning `{ action: 'allow' }` allows the current policy
++check to continue. Returning `{ action: 'deny' }` blocks the current policy
++check.
++
++`allow` only overrides the policy check that produced `details`. It does not
++grant unrelated permissions, bypass CORS, or force a network request to
++succeed.
++
++```js
++const { session } = require('electron')
++
++session.defaultSession.setWebPolicyHandler((details) => {
++  if (
++    details.policy === 'permissions-policy' &&
++    details.name === 'sync-xhr' &&
++    details.documentOrigin === 'https://example.com'
++  ) {
++    return { action: 'allow' }
++  }
++
++  if (
++    details.policy === 'browser-runtime' &&
++    details.name === 'sync-xhr-page-dismissal'
++  ) {
++    return { action: 'allow' }
++  }
++
++  return { action: 'default' }
++})
++```
++
+ #### `ses.clearHostResolverCache()`
+
+ Returns `Promise<void>` - Resolves when the operation is complete.
+diff --git a/docs/api/structures/web-policy-handler-details.md b/docs/api/structures/web-policy-handler-details.md
+new file mode 100644
+index 0000000000..2d3329b7d5
+--- /dev/null
++++ b/docs/api/structures/web-policy-handler-details.md
+@@ -0,0 +1,27 @@
++# WebPolicyHandlerDetails Object
++
++* `policy` string - The policy family being checked. Can be
++  `content-security-policy`, `permissions-policy`, `document-policy`, or
++  `browser-runtime`.
++* `name` string - The policy directive, policy feature, or runtime policy name.
++  For example, CSP uses names such as `connect-src` and `script-src`,
++  Permissions Policy and Document Policy use names such as `sync-xhr`, and
++  browser runtime policies use names such as `sync-xhr-page-dismissal`.
++* `source` string - Where the policy check was generated. Currently
++  `runtime`.
++* `disposition` string - Whether the check is for an enforcing policy or a
++  report-only policy. Can be `enforce` or `report`.
++* `contextType` string - The JavaScript context type making the check. Can be
++  `frame`, `dedicated-worker`, `shared-worker`, `service-worker`, or
++  `unknown`.
++* `documentUrl` string - The URL of the document or worker context making the
++  check, or an empty string when the URL is not available yet.
++* `documentOrigin` string - The security origin of the document or worker
++  context making the check.
++* `resourceUrl` string - The resource URL being checked, or an empty string
++  when the policy check is not for a specific resource.
++* `message` string - Additional context from the policy check, or an empty
++  string when unavailable.
++* `frame` [WebFrameMain](../web-frame-main.md) (optional) - The frame making
++  the policy check. This is only present for frame-backed checks while the frame
++  still exists.
+diff --git a/docs/api/structures/web-policy-handler-response.md b/docs/api/structures/web-policy-handler-response.md
+new file mode 100644
+index 0000000000..a3caf9bf81
+--- /dev/null
++++ b/docs/api/structures/web-policy-handler-response.md
+@@ -0,0 +1,9 @@
++# WebPolicyHandlerResponse Object
++
++* `action` string - The action to take for the policy check. Can be `default`,
++  `allow`, or `deny`.
++
++`default` preserves Chromium's normal policy behavior. `allow` allows this
++specific policy check to continue even when Chromium's policy would block it.
++`deny` blocks this specific policy check even when Chromium's policy would
++allow it.
+diff --git a/package.json b/package.json
+index a338926f45..66d1f948ae 100644
+--- a/package.json
++++ b/package.json
+@@ -74,7 +74,7 @@
+     "lint:api-history": "lint-roller-markdown-api-history --root \"./docs/api/\" --schema \"./docs/api-history.schema.json\" --breaking-changes-file \"./docs/breaking-changes.md\" --check-placement --check-strings \"*.md\"",
+     "lint:chromium-roller": "node ./script/lint-roller-chromium-changes.mjs",
+     "create-api-json": "node script/create-api-json.mjs",
+-    "create-typescript-definitions": "npm run create-api-json && electron-typescript-definitions --api=electron-api.json && node script/fix-preload-typescript-definitions.mjs && node script/fix-web-notification-typescript-definitions.mjs && node spec/ts-smoke/runner.js",
++    "create-typescript-definitions": "npm run create-api-json && electron-typescript-definitions --api=electron-api.json && node script/fix-preload-typescript-definitions.mjs && node script/fix-web-notification-typescript-definitions.mjs && node script/fix-web-policy-typescript-definitions.mjs && node spec/ts-smoke/runner.js",
+     "gn-typescript-definitions": "npm run create-typescript-definitions && node script/cp.mjs electron.d.ts",
+     "pre-flight": "pre-flight",
+     "gn-check": "node ./script/gn-check.js",
+diff --git a/script/fix-web-policy-typescript-definitions.mjs b/script/fix-web-policy-typescript-definitions.mjs
+new file mode 100644
+index 0000000000..f2bc0a3ec5
+--- /dev/null
++++ b/script/fix-web-policy-typescript-definitions.mjs
+@@ -0,0 +1,217 @@
++import fs from 'node:fs';
++import path from 'node:path';
++
++const definitionsPath = path.resolve('electron.d.ts');
++let definitions = fs.readFileSync(definitionsPath, 'utf8');
++
++const cspDirectiveNames = [
++  'base-uri',
++  'block-all-mixed-content',
++  'child-src',
++  'connect-src',
++  'default-src',
++  'fenced-frame-src',
++  'font-src',
++  'form-action',
++  'frame-ancestors',
++  'frame-src',
++  'img-src',
++  'manifest-src',
++  'media-src',
++  'object-src',
++  'report-to',
++  'report-uri',
++  'require-trusted-types-for',
++  'sandbox',
++  'script-src',
++  'script-src-v2',
++  'script-src-attr',
++  'script-src-elem',
++  'style-src',
++  'style-src-attr',
++  'style-src-elem',
++  'treat-as-public-address',
++  'trusted-types',
++  'upgrade-insecure-requests',
++  'wasm-unsafe-eval',
++  'worker-src'
++];
++
++const documentPolicyNames = [
++  'force-load-at-top',
++  'js-profiling',
++  'sync-xhr',
++  'include-js-call-stacks-in-crash-reports',
++  'expect-no-linked-resources',
++  'network-efficiency-guardrails'
++];
++
++const browserRuntimePolicyNames = [
++  'sync-xhr',
++  'sync-xhr-page-dismissal'
++];
++
++function uniqueSorted(values) {
++  return [...new Set(values)].sort();
++}
++
++function stringUnion(values) {
++  return uniqueSorted(values).map(value => `'${value}'`).join(' | ');
++}
++
++function readPermissionsPolicyNames() {
++  const featureFile = path.resolve(
++    '..',
++    'services/network/public/cpp/permissions_policy/permissions_policy_features.json5'
++  );
++  if (!fs.existsSync(featureFile)) {
++    return [
++      'camera',
++      'fullscreen',
++      'geolocation',
++      'microphone',
++      'sync-xhr'
++    ];
++  }
++
++  const text = fs.readFileSync(featureFile, 'utf8');
++  const names = [];
++  const pattern = /permissions_policy_name:\s*"([^"]+)"/g;
++  let match;
++  while ((match = pattern.exec(text)) !== null) {
++    if (match[1] !== 'FEATURE_NAME')
++      names.push(match[1]);
++  }
++  return names;
++}
++
++function replaceGeneratedInterface(source, name, replacement) {
++  const marker = `  interface ${name} {`;
++  const start = source.indexOf(marker);
++  if (start === -1) {
++    throw new Error(`Unable to find generated ${name} interface in electron.d.ts`);
++  }
++
++  const candidates = [
++    source.indexOf('\n  interface ', start + marker.length),
++    source.indexOf('\n  class ', start + marker.length),
++    source.indexOf('\n  type ', start + marker.length)
++  ].filter(index => index !== -1);
++  if (candidates.length === 0) {
++    throw new Error(`Unable to find end of generated ${name} interface in electron.d.ts`);
++  }
++
++  const end = Math.min(...candidates);
++  return source.slice(0, start) + replacement + source.slice(end);
++}
++
++const detailsReplacement = `  type WebPolicyHandlerAction = 'default' | 'allow' | 'deny';
++  type WebPolicyKind = 'content-security-policy' | 'permissions-policy' | 'document-policy' | 'browser-runtime';
++  type WebPolicySource = 'runtime';
++  type WebPolicyDisposition = 'enforce' | 'report';
++  type WebPolicyContextType = 'frame' | 'dedicated-worker' | 'shared-worker' | 'service-worker' | 'unknown';
++  type ContentSecurityPolicyDirective = ${stringUnion(cspDirectiveNames)};
++  type PermissionsPolicyFeatureName = ${stringUnion(readPermissionsPolicyNames())};
++  type DocumentPolicyFeatureName = ${stringUnion(documentPolicyNames)};
++  type BrowserRuntimePolicyName = ${stringUnion(browserRuntimePolicyNames)};
++  type WebPolicyHandlerDetails = WebContentSecurityPolicyHandlerDetails | WebPermissionsPolicyHandlerDetails | WebDocumentPolicyHandlerDetails | WebBrowserRuntimePolicyHandlerDetails;
++
++  interface WebPolicyHandlerDetailsBase {
++
++    // Docs: https://electronjs.org/docs/api/structures/web-policy-handler-details
++
++    /**
++     * The policy family being checked.
++     */
++    policy: WebPolicyKind;
++    /**
++     * The policy directive, policy feature, or runtime policy name.
++     */
++    name: string;
++    /**
++     * Where the policy check was generated.
++     */
++    source: WebPolicySource;
++    /**
++     * Whether the check is for an enforcing policy or a report-only policy.
++     */
++    disposition: WebPolicyDisposition;
++    /**
++     * The JavaScript context type making the check.
++     */
++    contextType: WebPolicyContextType;
++    /**
++     * The URL of the document or worker context making the check, or an empty
++     * string when the URL is not available yet.
++     */
++    documentUrl: string;
++    /**
++     * The security origin of the document or worker context making the check.
++     */
++    documentOrigin: string;
++    /**
++     * The resource URL being checked, or an empty string when the policy check is
++     * not for a specific resource.
++     */
++    resourceUrl: string;
++    /**
++     * Additional context from the policy check, or an empty string when unavailable.
++     */
++    message: string;
++    /**
++     * The frame making the policy check. This is only present for frame-backed
++     * checks while the frame still exists.
++     */
++    frame?: WebFrameMain;
++  }
++
++  interface WebContentSecurityPolicyHandlerDetails extends WebPolicyHandlerDetailsBase {
++    policy: 'content-security-policy';
++    name: ContentSecurityPolicyDirective;
++  }
++
++  interface WebPermissionsPolicyHandlerDetails extends WebPolicyHandlerDetailsBase {
++    policy: 'permissions-policy';
++    name: PermissionsPolicyFeatureName;
++  }
++
++  interface WebDocumentPolicyHandlerDetails extends WebPolicyHandlerDetailsBase {
++    policy: 'document-policy';
++    name: DocumentPolicyFeatureName;
++  }
++
++  interface WebBrowserRuntimePolicyHandlerDetails extends WebPolicyHandlerDetailsBase {
++    policy: 'browser-runtime';
++    name: BrowserRuntimePolicyName;
++  }
++
++  interface WebPolicyHandlerResponse {
++
++    // Docs: https://electronjs.org/docs/api/structures/web-policy-handler-response
++
++    /**
++     * The action to take for the policy check.
++     */
++    action: WebPolicyHandlerAction;
++  }
++`;
++
++if (!definitions.includes('type WebPolicyHandlerAction =')) {
++  definitions = replaceGeneratedInterface(
++    definitions,
++    'WebPolicyHandlerResponse',
++    ''
++  );
++  definitions = replaceGeneratedInterface(
++    definitions,
++    'WebPolicyHandlerDetails',
++    detailsReplacement
++  );
++}
++
++definitions = definitions.replace(
++  /setWebPolicyHandler\(handler: [^\n]+?\): void;/,
++  'setWebPolicyHandler(handler: ((details: WebPolicyHandlerDetails) => (WebPolicyHandlerResponse) | (void)) | null): void;'
++);
++
++fs.writeFileSync(definitionsPath, definitions);
+diff --git a/shell/browser/api/electron_api_session.cc b/shell/browser/api/electron_api_session.cc
+index c7f2f1c4b7..dd478da971 100644
+--- a/shell/browser/api/electron_api_session.cc
++++ b/shell/browser/api/electron_api_session.cc
+@@ -991,6 +991,36 @@ bool Session::HandleWebNotification(v8::Local<v8::Value> notification) {
+   return true;
+ }
+
++void Session::SetWebPolicyHandler(gin::Arguments* args) {
++  v8::Local<v8::Value> value;
++  WebPolicyHandler handler;
++  if (!args->GetNext(&value) ||
++      !(value->IsNull() ||
++        gin::ConvertFromV8(args->isolate(), value, &handler))) {
++    args->ThrowTypeError("Must pass null or function");
++    return;
++  }
++
++  web_policy_handler_ = std::move(handler);
++}
++
++std::string Session::HandleWebPolicy(v8::Local<v8::Value> details) {
++  if (web_policy_handler_.is_null())
++    return "default";
++
++  v8::Local<v8::Value> result = web_policy_handler_.Run(details);
++  if (result.IsEmpty() || !result->IsObject())
++    return "default";
++
++  gin_helper::Dictionary dict(isolate_, result.As<v8::Object>());
++  std::string action;
++  if (!dict.Get("action", &action))
++    return "default";
++  if (action == "allow" || action == "deny" || action == "default")
++    return action;
++  return "default";
++}
++
+ v8::Local<v8::Promise> Session::ClearHostResolverCache(gin::Arguments* args) {
+   v8::Isolate* isolate = args->isolate();
+   gin_helper::Promise<void> promise(isolate);
+@@ -1904,6 +1934,7 @@ void Session::FillObjectTemplate(v8::Isolate* isolate,
+                  &Session::SetBluetoothPairingHandler)
+       .SetMethod("setWebNotificationHandler",
+                  &Session::SetWebNotificationHandler)
++      .SetMethod("setWebPolicyHandler", &Session::SetWebPolicyHandler)
+       .SetMethod("clearHostResolverCache", &Session::ClearHostResolverCache)
+       .SetMethod("clearAuthCache", &Session::ClearAuthCache)
+       .SetMethod("allowNTLMCredentialsForDomains",
+diff --git a/shell/browser/api/electron_api_session.h b/shell/browser/api/electron_api_session.h
+index 3143d6917e..0b29bb928f 100644
+--- a/shell/browser/api/electron_api_session.h
++++ b/shell/browser/api/electron_api_session.h
+@@ -150,6 +150,8 @@ class Session final : public gin::Wrappable<Session>,
+                                   gin::Arguments* args);
+   void SetWebNotificationHandler(gin::Arguments* args);
+   bool HandleWebNotification(v8::Local<v8::Value> notification);
++  void SetWebPolicyHandler(gin::Arguments* args);
++  std::string HandleWebPolicy(v8::Local<v8::Value> details);
+   v8::Local<v8::Promise> ClearHostResolverCache(gin::Arguments* args);
+   v8::Local<v8::Promise> ClearAuthCache();
+   void AllowNTLMCredentialsForDomains(const std::string& domains);
+@@ -225,6 +227,8 @@ class Session final : public gin::Wrappable<Session>,
+
+   using WebNotificationHandler =
+       base::RepeatingCallback<void(v8::Local<v8::Value>)>;
++  using WebPolicyHandler =
++      base::RepeatingCallback<v8::Local<v8::Value>(v8::Local<v8::Value>)>;
+
+   // Cached gin_helper::Wrappable objects.
+   v8::TracedReference<v8::Value> cookies_;
+@@ -237,6 +241,7 @@ class Session final : public gin::Wrappable<Session>,
+   cppgc::Member<api::WebRequest> web_request_;
+
+   WebNotificationHandler web_notification_handler_;
++  WebPolicyHandler web_policy_handler_;
+
+   raw_ptr<v8::Isolate> isolate_;
+
+diff --git a/shell/browser/electron_browser_client.cc b/shell/browser/electron_browser_client.cc
+index c449cb3243..e04ba2623d 100644
+--- a/shell/browser/electron_browser_client.cc
++++ b/shell/browser/electron_browser_client.cc
+@@ -20,6 +20,7 @@
+ #include "base/environment.h"
+ #include "base/files/file_path.h"
+ #include "base/files/file_util.h"
++#include "base/memory/raw_ptr.h"
+ #include "base/no_destructor.h"
+ #include "base/notreached.h"
+ #include "base/path_service.h"
+@@ -38,6 +39,7 @@
+ #include "content/public/browser/browser_main_runner.h"
+ #include "content/public/browser/browser_task_traits.h"
+ #include "content/public/browser/client_certificate_delegate.h"
++#include "content/public/browser/global_routing_id.h"
+ #include "content/public/browser/login_delegate.h"
+ #include "content/public/browser/navigation_throttle_registry.h"
+ #include "content/public/browser/overlay_window.h"
+@@ -82,7 +84,9 @@
+ #include "shell/browser/api/electron_api_app.h"
+ #include "shell/browser/api/electron_api_crash_reporter.h"
+ #include "shell/browser/api/electron_api_protocol.h"
++#include "shell/browser/api/electron_api_session.h"
+ #include "shell/browser/api/electron_api_web_contents.h"
++#include "shell/browser/api/electron_api_web_frame_main.h"
+ #include "shell/browser/api/electron_api_web_request.h"
+ #include "shell/browser/api/electron_api_web_socket.h"
+ #include "shell/browser/badging/badge_manager.h"
+@@ -135,6 +139,7 @@
+ #include "shell/common/options_switches.h"
+ #include "shell/common/platform_util.h"
+ #include "shell/common/plugin.mojom.h"
++#include "shell/common/gin_helper/dictionary.h"
+ #include "shell/common/thread_restrictions.h"
+ #include "shell/common/web_contents_utility.mojom.h"
+ #include "third_party/blink/public/common/associated_interfaces/associated_interface_registry.h"
+@@ -344,6 +349,67 @@ void BindPreloadScriptLoader(
+       std::move(receiver));
+ }
+
++class ElectronWebPolicyChecker : public mojom::ElectronWebPolicyChecker {
++ public:
++  ElectronWebPolicyChecker(content::BrowserContext* browser_context,
++                           int render_process_id)
++      : browser_context_(browser_context),
++        render_process_id_(render_process_id) {}
++
++  ElectronWebPolicyChecker(const ElectronWebPolicyChecker&) = delete;
++  ElectronWebPolicyChecker& operator=(const ElectronWebPolicyChecker&) =
++      delete;
++
++  void CheckWebPolicy(mojom::WebPolicyCheckDetailsPtr details,
++                      CheckWebPolicyCallback callback) override {
++    auto* session_cell = api::Session::FromBrowserContext(browser_context_);
++    if (!session_cell || !session_cell->Get()) {
++      std::move(callback).Run("default");
++      return;
++    }
++
++    v8::Isolate* isolate = JavascriptEnvironment::GetIsolate();
++    v8::HandleScope handle_scope(isolate);
++    auto details_object = gin_helper::Dictionary::CreateEmpty(isolate);
++    details_object.Set("policy", details->policy);
++    details_object.Set("name", details->name);
++    details_object.Set("source", details->source);
++    details_object.Set("disposition", details->disposition);
++    details_object.Set("contextType", details->context_type);
++    details_object.Set("documentUrl", details->document_url);
++    details_object.Set("documentOrigin", details->document_origin);
++    details_object.Set("resourceUrl", details->resource_url);
++    details_object.Set("message", details->message);
++
++    if (details->frame_token) {
++      auto frame_token = content::GlobalRenderFrameHostToken(
++          render_process_id_, *details->frame_token);
++      if (auto* rfh = content::RenderFrameHost::FromFrameToken(frame_token)) {
++        auto handle = api::WebFrameMain::From(isolate, rfh);
++        if (!handle.IsEmpty())
++          details_object.Set("frame", handle.ToV8());
++      }
++    }
++
++    std::move(callback).Run(
++        session_cell->Get()->HandleWebPolicy(details_object.GetHandle()));
++  }
++
++ private:
++  raw_ptr<content::BrowserContext> browser_context_;
++  int render_process_id_;
++};
++
++void BindWebPolicyChecker(
++    content::BrowserContext* browser_context,
++    int render_process_id,
++    mojo::PendingReceiver<mojom::ElectronWebPolicyChecker> receiver) {
++  mojo::MakeSelfOwnedReceiver(
++      std::make_unique<ElectronWebPolicyChecker>(browser_context,
++                                                 render_process_id),
++      std::move(receiver));
++}
++
+ #if BUILDFLAG(ENABLE_ELECTRON_EXTENSIONS)
+ // Used by the GetPrivilegeRequiredByUrl() and GetProcessPrivilege() functions
+ // below.  Extension, and isolated apps require different privileges to be
+@@ -1945,6 +2011,13 @@ void ElectronBrowserClient::BindHostReceiverForRenderer(
+     return;
+   }
+
++  if (auto host_receiver = receiver.As<mojom::ElectronWebPolicyChecker>()) {
++    BindWebPolicyChecker(render_process_host->GetBrowserContext(),
++                         render_process_host->GetDeprecatedID(),
++                         std::move(host_receiver));
++    return;
++  }
++
+   if (auto host_receiver = receiver.As<mojom::ElectronWorkerAPI>()) {
+     ElectronWorkerAPIImpl::Create(render_process_host,
+                                   std::move(host_receiver));
+@@ -2014,6 +2087,13 @@ void ElectronBrowserClient::RegisterBrowserInterfaceBindersForFrame(
+         BindPreloadScriptLoader(frame_host->GetProcess()->GetBrowserContext(),
+                                 std::move(receiver));
+       }));
++  map->Add<mojom::ElectronWebPolicyChecker>(base::BindRepeating(
++      [](content::RenderFrameHost* frame_host,
++        mojo::PendingReceiver<mojom::ElectronWebPolicyChecker> receiver) {
++        BindWebPolicyChecker(frame_host->GetProcess()->GetBrowserContext(),
++                             frame_host->GetProcess()->GetDeprecatedID(),
++                             std::move(receiver));
++      }));
+   map->Add<network_hints::mojom::NetworkHintsHandler>(
+       base::BindRepeating(&BindNetworkHintsHandler));
+   map->Add<blink::mojom::BadgeService>(
+diff --git a/shell/common/api/api.mojom b/shell/common/api/api.mojom
+index 0945a612f9..4b0b674923 100644
+--- a/shell/common/api/api.mojom
++++ b/shell/common/api/api.mojom
+@@ -36,12 +36,30 @@ struct RendererStartupData {
+   string helper_exec_path;
+ };
+
++struct WebPolicyCheckDetails {
++  string policy;
++  string name;
++  string source;
++  string disposition;
++  string context_type;
++  string document_url;
++  string document_origin;
++  string resource_url;
++  string message;
++  blink.mojom.LocalFrameToken? frame_token;
++};
++
+ interface ElectronPreloadScriptLoader {
+   [Sync]
+   LoadPreloadScripts(string type, string injection_point)
+       => (RendererStartupData data);
+ };
+
++interface ElectronWebPolicyChecker {
++  [Sync]
++  CheckWebPolicy(WebPolicyCheckDetails details) => (string action);
++};
++
+ // Per-frame associated interface ordered against content.mojom.Frame, so
+ // SetStartupData() arrives before the CommitNavigation that follows it.
+ interface ElectronFrameStartup {
+diff --git a/shell/renderer/renderer_client_base.cc b/shell/renderer/renderer_client_base.cc
+index b310c61a14..577b69ba56 100644
+--- a/shell/renderer/renderer_client_base.cc
++++ b/shell/renderer/renderer_client_base.cc
+@@ -673,6 +673,37 @@ bool RendererClientBase::IsDomStorageDisabled() const {
+ #endif  // BUILDFLAG(ENABLE_PDF_VIEWER)
+ }
+
++blink::WebPolicyDecision RendererClientBase::CheckWebPolicy(
++    const blink::WebPolicyCheck& check) const {
++  auto* broker = blink::Platform::Current()->GetBrowserInterfaceBroker();
++  if (!broker)
++    return blink::WebPolicyDecision::kDefault;
++
++  mojo::Remote<mojom::ElectronWebPolicyChecker> checker;
++  broker->GetInterface(checker.BindNewPipeAndPassReceiver());
++
++  auto details = mojom::WebPolicyCheckDetails::New();
++  details->policy = check.policy;
++  details->name = check.name;
++  details->source = check.source;
++  details->disposition = check.disposition;
++  details->context_type = check.context_type;
++  details->document_url = check.document_url;
++  details->document_origin = check.document_origin;
++  details->resource_url = check.resource_url;
++  details->message = check.message;
++  details->frame_token = check.frame_token;
++
++  std::string action;
++  if (!checker->CheckWebPolicy(std::move(details), &action))
++    return blink::WebPolicyDecision::kDefault;
++  if (action == "allow")
++    return blink::WebPolicyDecision::kAllow;
++  if (action == "deny")
++    return blink::WebPolicyDecision::kDeny;
++  return blink::WebPolicyDecision::kDefault;
++}
++
+ v8::Local<v8::Object> RendererClientBase::GetScriptableObject(
+     const blink::WebElement& plugin_element,
+     v8::Isolate* isolate) {
+diff --git a/shell/renderer/renderer_client_base.h b/shell/renderer/renderer_client_base.h
+index 5207e8a6e4..971ab4821f 100644
+--- a/shell/renderer/renderer_client_base.h
++++ b/shell/renderer/renderer_client_base.h
+@@ -110,6 +110,8 @@ class RendererClientBase : public content::ContentRendererClient
+                                  const GURL& original_url,
+                                  const std::string& mime_type) override;
+   bool IsDomStorageDisabled() const override;
++  blink::WebPolicyDecision CheckWebPolicy(
++      const blink::WebPolicyCheck& check) const override;
+   v8::Local<v8::Object> GetScriptableObject(
+       const blink::WebElement& plugin_element,
+       v8::Isolate* isolate) override;
+diff --git a/spec/api-session-spec.ts b/spec/api-session-spec.ts
+index 62f68da69f..322634bd4d 100644
+--- a/spec/api-session-spec.ts
++++ b/spec/api-session-spec.ts
+@@ -2598,6 +2598,578 @@ describe('session module', () => {
+     });
+   });
+
++  describe('ses.setWebPolicyHandler(handler)', () => {
++    const sessions: Electron.Session[] = [];
++
++    const createSession = () => {
++      const ses = session.fromPartition(`web-policy-${crypto.randomUUID()}`);
++      sessions.push(ses);
++      return ses;
++    };
++
++    const createPolicyServer = async (
++      headers: http.OutgoingHttpHeaders,
++      body = '<!DOCTYPE html><html><body>policy test</body></html>',
++      handleRequest?: (req: http.IncomingMessage, res: http.ServerResponse) => boolean
++    ) => {
++      const requests: string[] = [];
++      const server = http.createServer((req, res) => {
++        requests.push(req.url ?? '');
++        if (handleRequest?.(req, res))
++          return;
++        if (req.url === '/ok' || req.url === '/dismissal') {
++          res.setHeader('Access-Control-Allow-Origin', '*');
++          res.end('ok');
++          return;
++        }
++        res.writeHead(200, {
++          'Content-Type': 'text/html',
++          ...headers
++        });
++        res.end(body);
++      });
++      defer(() => {
++        server.close();
++      });
++      const serverInfo = await listen(server);
++      return { ...serverInfo, requests };
++    };
++
++    const respond = (
++      res: http.ServerResponse,
++      body: string,
++      headers: http.OutgoingHttpHeaders = {}
++    ) => {
++      res.writeHead(200, headers);
++      res.end(body);
++    };
++
++    afterEach(async () => {
++      for (const ses of sessions) {
++        ses.setWebPolicyHandler(null);
++        await ses.clearStorageData().catch(() => {});
++      }
++      sessions.length = 0;
++      await closeAllWindows();
++    });
++
++    it('can allow a blocked CSP resource check', async () => {
++      const ses = createSession();
++      const detailsSeen: Electron.WebPolicyHandlerDetails[] = [];
++      ses.setWebPolicyHandler((details) => {
++        detailsSeen.push(details);
++        if (
++          details.policy === 'content-security-policy' &&
++          details.name === 'connect-src'
++        ) {
++          return { action: 'allow' };
++        }
++        return { action: 'default' };
++      });
++
++      const { url } = await createPolicyServer({
++        'Content-Security-Policy': "connect-src 'none'"
++      });
++      const w = new BrowserWindow({ show: false, webPreferences: { session: ses } });
++      await w.loadURL(url);
++
++      const result = await w.webContents.executeJavaScript(`
++        fetch('/ok').then(response => response.text())
++      `);
++      expect(result).to.equal('ok');
++      const connectSrcDetails = detailsSeen.find(details => (
++        details.policy === 'content-security-policy' &&
++        details.name === 'connect-src' &&
++        details.resourceUrl === `${url}/ok`
++      ));
++      expect(connectSrcDetails).to.not.equal(undefined);
++      expect(connectSrcDetails?.frame?.frameToken).to.equal(
++        w.webContents.mainFrame.frameToken);
++    });
++
++    it('keeps Chromium default behavior when the handler returns nothing', async () => {
++      const ses = createSession();
++      const detailsSeen: Electron.WebPolicyHandlerDetails[] = [];
++      ses.setWebPolicyHandler((details) => {
++        detailsSeen.push(details);
++      });
++
++      const { url } = await createPolicyServer({
++        'Content-Security-Policy': "connect-src 'none'"
++      });
++      const w = new BrowserWindow({ show: false, webPreferences: { session: ses } });
++      await w.loadURL(url);
++
++      const result = await w.webContents.executeJavaScript(`
++        fetch('/ok').then(
++          () => 'allowed',
++          error => error.name
++        )
++      `);
++      expect(result).to.equal('TypeError');
++      expect(detailsSeen.some(details => (
++        details.policy === 'content-security-policy' &&
++        details.name === 'connect-src'
++      ))).to.equal(true);
++    });
++
++    it('can deny an otherwise allowed CSP resource check', async () => {
++      const ses = createSession();
++      ses.setWebPolicyHandler((details) => {
++        if (
++          details.policy === 'content-security-policy' &&
++          details.name === 'connect-src'
++        ) {
++          return { action: 'deny' };
++        }
++        return { action: 'default' };
++      });
++
++      const { url } = await createPolicyServer({
++        'Content-Security-Policy': 'connect-src *'
++      });
++      const w = new BrowserWindow({ show: false, webPreferences: { session: ses } });
++      await w.loadURL(url);
++
++      const result = await w.webContents.executeJavaScript(`
++        fetch('/ok').then(
++          () => 'allowed',
++          error => error.name
++        )
++      `);
++      expect(result).to.equal('TypeError');
++    });
++
++    it('can allow blocked inline script CSP checks', async () => {
++      const ses = createSession();
++      const detailsSeen: Electron.WebPolicyHandlerDetails[] = [];
++      ses.setWebPolicyHandler((details) => {
++        detailsSeen.push(details);
++        if (
++          details.policy === 'content-security-policy' &&
++          details.name === 'script-src'
++        ) {
++          expect(details.contextType).to.equal('frame');
++          return { action: 'allow' };
++        }
++        return { action: 'default' };
++      });
++
++      const { url } = await createPolicyServer(
++        { 'Content-Security-Policy': "script-src 'self'" },
++        '<!DOCTYPE html><script>window.inlineWebPolicyResult = "allowed";</script>'
++      );
++      const w = new BrowserWindow({ show: false, webPreferences: { session: ses } });
++      await w.loadURL(url);
++
++      const result = await w.webContents.executeJavaScript('window.inlineWebPolicyResult');
++      expect(result).to.equal('allowed');
++      expect(detailsSeen.some(details => (
++        details.policy === 'content-security-policy' &&
++        details.name === 'script-src' &&
++        details.message.includes('inlineWebPolicyResult')
++      ))).to.equal(true);
++    });
++
++    it('can allow blocked eval CSP checks', async () => {
++      const ses = createSession();
++      const detailsSeen: Electron.WebPolicyHandlerDetails[] = [];
++      ses.setWebPolicyHandler((details) => {
++        detailsSeen.push(details);
++        if (
++          details.policy === 'content-security-policy' &&
++          details.name === 'script-src'
++        ) {
++          return { action: 'allow' };
++        }
++        return { action: 'default' };
++      });
++
++      const { url } = await createPolicyServer({
++        'Content-Security-Policy': "script-src 'self'"
++      });
++      const w = new BrowserWindow({ show: false, webPreferences: { session: ses } });
++      await w.loadURL(url);
++
++      const result = await w.webContents.executeJavaScript(`
++        eval('40 + 2')
++      `);
++      expect(result).to.equal(42);
++      expect(detailsSeen.some(details => (
++        details.policy === 'content-security-policy' &&
++        details.name === 'script-src' &&
++        details.message.includes('40 + 2')
++      ))).to.equal(true);
++    });
++
++    it('can allow blocked WebAssembly code generation CSP checks', async () => {
++      const ses = createSession();
++      const detailsSeen: Electron.WebPolicyHandlerDetails[] = [];
++      ses.setWebPolicyHandler((details) => {
++        detailsSeen.push(details);
++        if (
++          details.policy === 'content-security-policy' &&
++          details.name === 'wasm-unsafe-eval'
++        ) {
++          return { action: 'allow' };
++        }
++        return { action: 'default' };
++      });
++
++      const { url } = await createPolicyServer({
++        'Content-Security-Policy': "script-src 'self'"
++      });
++      const w = new BrowserWindow({ show: false, webPreferences: { session: ses } });
++      await w.loadURL(url);
++
++      const result = await w.webContents.executeJavaScript(`
++        WebAssembly.compile(new Uint8Array([
++          0x00, 0x61, 0x73, 0x6d,
++          0x01, 0x00, 0x00, 0x00
++        ])).then(
++          () => 'compiled',
++          error => error.name
++        )
++      `);
++      expect(result).to.equal('compiled');
++      expect(detailsSeen.some(details => (
++        details.policy === 'content-security-policy' &&
++        details.name === 'wasm-unsafe-eval'
++      ))).to.equal(true);
++    });
++
++    it('can allow Trusted Types assignment CSP checks', async () => {
++      const ses = createSession();
++      const detailsSeen: Electron.WebPolicyHandlerDetails[] = [];
++      ses.setWebPolicyHandler((details) => {
++        detailsSeen.push(details);
++        if (
++          details.policy === 'content-security-policy' &&
++          details.name === 'require-trusted-types-for'
++        ) {
++          return { action: 'allow' };
++        }
++        return { action: 'default' };
++      });
++
++      const { url } = await createPolicyServer({
++        'Content-Security-Policy': "require-trusted-types-for 'script'"
++      });
++      const w = new BrowserWindow({ show: false, webPreferences: { session: ses } });
++      await w.loadURL(url);
++
++      const result = await w.webContents.executeJavaScript(`
++        document.body.innerHTML = '<span id="trusted-types-result">ok</span>';
++        document.getElementById('trusted-types-result').textContent;
++      `);
++      expect(result).to.equal('ok');
++      expect(detailsSeen.some(details => (
++        details.policy === 'content-security-policy' &&
++        details.name === 'require-trusted-types-for'
++      ))).to.equal(true);
++    });
++
++    it('provides the subframe for subframe CSP checks', async () => {
++      const ses = createSession();
++      const detailsSeen: Electron.WebPolicyHandlerDetails[] = [];
++      ses.setWebPolicyHandler((details) => {
++        detailsSeen.push(details);
++        if (
++          details.policy === 'content-security-policy' &&
++          details.name === 'connect-src'
++        ) {
++          return { action: 'allow' };
++        }
++        return { action: 'default' };
++      });
++
++      const { url } = await createPolicyServer(
++        {},
++        '<!DOCTYPE html><iframe src="/child.html"></iframe>',
++        (req, res) => {
++          if (req.url === '/child.html') {
++            respond(res, '<!DOCTYPE html><html><body>child</body></html>', {
++              'Content-Type': 'text/html',
++              'Content-Security-Policy': "connect-src 'none'"
++            });
++            return true;
++          }
++          return false;
++        }
++      );
++      const w = new BrowserWindow({ show: false, webPreferences: { session: ses } });
++      await w.loadURL(url);
++
++      const childFrame = w.webContents.mainFrame.frames.find(frame => frame.url === `${url}/child.html`);
++      expect(childFrame).to.not.equal(undefined);
++      const result = await w.webContents.executeJavaScript(`
++        document.querySelector('iframe').contentWindow.fetch('/ok')
++          .then(response => response.text())
++      `);
++      expect(result).to.equal('ok');
++
++      const subframeDetails = detailsSeen.find(details => (
++        details.policy === 'content-security-policy' &&
++        details.name === 'connect-src' &&
++        details.resourceUrl === `${url}/ok` &&
++        details.frame?.frameToken === childFrame?.frameToken
++      ));
++      expect(subframeDetails).to.not.equal(undefined);
++      expect(subframeDetails?.contextType).to.equal('frame');
++    });
++
++    it('can allow CSP checks from dedicated, shared, and service workers', async () => {
++      const ses = createSession();
++      const detailsSeen: Electron.WebPolicyHandlerDetails[] = [];
++      ses.setWebPolicyHandler((details) => {
++        detailsSeen.push(details);
++        if (
++          details.policy === 'content-security-policy' &&
++          details.name === 'connect-src' &&
++          (
++            details.contextType === 'dedicated-worker' ||
++            details.contextType === 'shared-worker' ||
++            details.contextType === 'service-worker'
++          )
++        ) {
++          expect(details.frame).to.equal(undefined);
++          return { action: 'allow' };
++        }
++        return { action: 'default' };
++      });
++
++      const { url } = await createPolicyServer(
++        {},
++        '<!DOCTYPE html><html><body>worker policy test</body></html>',
++        (req, res) => {
++          if (req.url === '/dedicated-worker.js') {
++            respond(res, `
++              self.onmessage = async () => {
++                try {
++                  const text = await fetch('/ok').then(response => response.text());
++                  self.postMessage(text);
++                } catch (error) {
++                  self.postMessage(error.name);
++                }
++              };
++            `, {
++              'Content-Type': 'text/javascript',
++              'Content-Security-Policy': "connect-src 'none'"
++            });
++            return true;
++          }
++          if (req.url === '/shared-worker.js') {
++            respond(res, `
++              self.onconnect = event => {
++                const port = event.ports[0];
++                port.onmessage = async () => {
++                  try {
++                    const text = await fetch('/ok').then(response => response.text());
++                    port.postMessage(text);
++                  } catch (error) {
++                    port.postMessage(error.name);
++                  }
++                };
++              };
++            `, {
++              'Content-Type': 'text/javascript',
++              'Content-Security-Policy': "connect-src 'none'"
++            });
++            return true;
++          }
++          if (req.url === '/service-worker.js') {
++            respond(res, `
++              self.addEventListener('install', event => event.waitUntil(self.skipWaiting()));
++              self.addEventListener('activate', event => event.waitUntil(self.clients.claim()));
++              self.addEventListener('message', event => {
++                event.waitUntil((async () => {
++                  let result;
++                  try {
++                    result = await fetch('/ok').then(response => response.text());
++                  } catch (error) {
++                    result = error.name;
++                  }
++                  const clients = await self.clients.matchAll({ includeUncontrolled: true });
++                  for (const client of clients)
++                    client.postMessage(result);
++                })());
++              });
++            `, {
++              'Content-Type': 'text/javascript',
++              'Content-Security-Policy': "connect-src 'none'"
++            });
++            return true;
++          }
++          return false;
++        }
++      );
++      const w = new BrowserWindow({ show: false, webPreferences: { session: ses } });
++      await w.loadURL(url);
++
++      const results = await w.webContents.executeJavaScript(`
++        (async () => {
++          const dedicated = await new Promise(resolve => {
++            const worker = new Worker('/dedicated-worker.js');
++            worker.onmessage = event => resolve(event.data);
++            worker.postMessage('fetch');
++          });
++
++          const shared = await new Promise(resolve => {
++            const worker = new SharedWorker('/shared-worker.js');
++            worker.port.onmessage = event => resolve(event.data);
++            worker.port.start();
++            worker.port.postMessage('fetch');
++          });
++
++          const registration = await navigator.serviceWorker.register('/service-worker.js');
++          await navigator.serviceWorker.ready;
++          const service = await new Promise(resolve => {
++            navigator.serviceWorker.addEventListener('message', event => {
++              resolve(event.data);
++            }, { once: true });
++            registration.active.postMessage('fetch');
++          });
++
++          return { dedicated, shared, service };
++        })()
++      `);
++      expect(results).to.deep.equal({
++        dedicated: 'ok',
++        shared: 'ok',
++        service: 'ok'
++      });
++
++      for (const contextType of ['dedicated-worker', 'shared-worker', 'service-worker']) {
++        expect(detailsSeen.some(details => (
++          details.policy === 'content-security-policy' &&
++          details.name === 'connect-src' &&
++          details.contextType === contextType
++        )), `missing ${contextType} policy check`).to.equal(true);
++      }
++    });
++
++    it('keeps sync XHR blocked by Permissions-Policy without an allow decision', async () => {
++      const ses = createSession();
++      const detailsSeen: Electron.WebPolicyHandlerDetails[] = [];
++      ses.setWebPolicyHandler((details) => {
++        detailsSeen.push(details);
++        return { action: 'default' };
++      });
++
++      const { url, requests } = await createPolicyServer({
++        'Permissions-Policy': 'sync-xhr=()'
++      });
++      const w = new BrowserWindow({ show: false, webPreferences: { session: ses } });
++      await w.loadURL(url);
++
++      const result = await w.webContents.executeJavaScript(`
++        (() => {
++          const xhr = new XMLHttpRequest();
++          xhr.open('GET', '/ok', false);
++          try {
++            xhr.send();
++            return { ok: true, text: xhr.responseText };
++          } catch (error) {
++            return { ok: false, name: error.name };
++          }
++        })()
++      `);
++      expect(result).to.deep.equal({
++        ok: false,
++        name: 'NetworkError'
++      });
++      expect(requests).to.not.include('/ok');
++      expect(detailsSeen.some(details => (
++        details.policy === 'permissions-policy' &&
++        details.name === 'sync-xhr'
++      ))).to.equal(true);
++    });
++
++    it('can allow sync XHR blocked by Permissions-Policy', async () => {
++      const ses = createSession();
++      const detailsSeen: Electron.WebPolicyHandlerDetails[] = [];
++      ses.setWebPolicyHandler((details) => {
++        detailsSeen.push(details);
++        if (
++          details.policy === 'permissions-policy' &&
++          details.name === 'sync-xhr'
++        ) {
++          expect(details.contextType).to.equal('frame');
++          return { action: 'allow' };
++        }
++        return { action: 'default' };
++      });
++
++      const { url } = await createPolicyServer({
++        'Permissions-Policy': 'sync-xhr=()'
++      });
++      const w = new BrowserWindow({ show: false, webPreferences: { session: ses } });
++      await w.loadURL(url);
++
++      const result = await w.webContents.executeJavaScript(`
++        const xhr = new XMLHttpRequest();
++        xhr.open('GET', '/ok', false);
++        xhr.send();
++        xhr.responseText;
++      `);
++      expect(result).to.equal('ok');
++      expect(detailsSeen.some(details => (
++        details.policy === 'permissions-policy' &&
++        details.name === 'sync-xhr'
++      ))).to.equal(true);
++    });
++
++    it('can observe Document-Policy checks', async () => {
++      const ses = createSession();
++      const detailsSeen: Electron.WebPolicyHandlerDetails[] = [];
++      ses.setWebPolicyHandler((details) => {
++        detailsSeen.push(details);
++        return { action: 'default' };
++      });
++
++      const { url } = await createPolicyServer({
++        'Document-Policy': 'force-load-at-top'
++      });
++      const w = new BrowserWindow({ show: false, webPreferences: { session: ses } });
++      await w.loadURL(url);
++
++      const documentPolicyDetails = detailsSeen.find(details => (
++        details.policy === 'document-policy' &&
++        details.name === 'force-load-at-top'
++      ));
++      expect(documentPolicyDetails).to.not.equal(undefined);
++      expect(documentPolicyDetails?.contextType).to.equal('frame');
++    });
++
++    it('can allow sync XHR during page dismissal', async () => {
++      const ses = createSession();
++      const { url, requests } = await createPolicyServer({});
++      ses.setWebPolicyHandler((details) => {
++        if (
++          details.policy === 'browser-runtime' &&
++          details.name === 'sync-xhr-page-dismissal'
++        ) {
++          expect(details.resourceUrl).to.equal(`${url}/dismissal`);
++          return { action: 'allow' };
++        }
++        return { action: 'default' };
++      });
++
++      const w = new BrowserWindow({ show: false, webPreferences: { session: ses } });
++      await w.loadURL(url);
++      await w.webContents.executeJavaScript(`
++        window.addEventListener('beforeunload', () => {
++          const xhr = new XMLHttpRequest();
++          xhr.open('GET', '/dismissal', false);
++          xhr.send();
++        });
++      `);
++      await w.loadURL('about:blank');
++
++      expect(requests).to.include('/dismissal');
++    });
++  });
++
+   describe('ses.setPermissionCheckHandler(handler)', () => {
+     afterEach(closeAllWindows);
+     it('details provides requestingURL for mainFrame', async () => {

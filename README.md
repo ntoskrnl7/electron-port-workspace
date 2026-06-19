@@ -26,8 +26,8 @@ workspace layout.
 
 The current workspace covers runtime behavior, media packaging, browser
 identity, input forwarding, text-editing state, print ownership, preload
-injection, worker runtime APIs, WebSocket interception, shared-memory channels,
-and release packaging.
+injection, worker runtime APIs, WebSocket interception, web policy handling,
+shared-memory channels, and release packaging.
 
 | Port | Capability |
 | --- | --- |
@@ -44,6 +44,7 @@ and release packaging.
 | `picture-in-picture-handle-api` | Main-process handle and events for active video/document Picture-in-Picture windows. |
 | `worker-runtime` | Main-process runtime objects and scoped IPC dispatch for dedicated workers, shared workers, and service workers. |
 | `websocket-main-bridge` | Session-scoped WebSocket interception API that lets the main process continue, accept, or fail renderer-created WebSockets. |
+| `web-policy-handler` | Session-scoped policy checks for CSP, Permissions Policy, Document Policy, and selected runtime browser gates. |
 | `shared-memory` | Main-process shared-memory pool and channel APIs for moving larger binary payloads outside regular IPC copying. |
 
 Each feature can have separate bundles for targets such as `41`, `42`, and

@@ -1,0 +1,148 @@
+From ffed4e3402a4d7c131af5742935e6a4078ea3f81 Mon Sep 17 00:00:00 2001
+From: Jung-Kwang Lee <ntoskrnl7@gmail.com>
+Date: Thu, 18 Jun 2026 20:48:54 +0900
+Subject: fix: handle sandboxed document policy edge cases
+
+---
+ .../execution_context/security_context.cc     | 92 ++++++++++---------
+ 1 file changed, 50 insertions(+), 42 deletions(-)
+
+diff --git a/third_party/blink/renderer/core/execution_context/security_context.cc b/third_party/blink/renderer/core/execution_context/security_context.cc
+index 3bdbbcd4f5016..48525f14a2fa2 100644
+--- a/third_party/blink/renderer/core/execution_context/security_context.cc
++++ b/third_party/blink/renderer/core/execution_context/security_context.cc
+@@ -26,6 +26,7 @@
+
+ #include "third_party/blink/renderer/core/execution_context/security_context.h"
+
++#include <optional>
+ #include <string>
+
+ #include "base/check_deref.h"
+@@ -58,14 +59,16 @@ std::string ToStdString(const String& value) {
+   return value.Utf8();
+ }
+
+-String GetFeatureName(network::mojom::PermissionsPolicyFeature feature) {
+-  for (const auto& entry :
+-       GetDefaultFeatureNameMap(/*is_isolated_context=*/false)) {
+-    if (entry.value == feature) {
+-      return entry.key;
++std::optional<String> GetFeatureName(
++    network::mojom::PermissionsPolicyFeature feature) {
++  for (bool is_isolated_context : {false, true}) {
++    for (const auto& entry : GetDefaultFeatureNameMap(is_isolated_context)) {
++      if (entry.value == feature) {
++        return entry.key;
++      }
+     }
+   }
+-  NOTREACHED();
++  return std::nullopt;
+ }
+
+ String WebPolicyContextType(ExecutionContext* execution_context) {
+@@ -152,19 +155,19 @@ void SecurityContext::SetSecurityOrigin(
+   // RemoteSecurityContext, then there is no local script execution and the
+   // context is permitted to represent multiple origins over its lifetime, so it
+   // is safe for the SecurityOrigin to change.
+-  // NOTE: A worker may need to make its origin opaque after the main worker
+-  // script is loaded if the worker is origin-sandboxed. Specifically exempt
+-  // that transition. See https://crbug.com/1068008. It would be great if we
+-  // could get rid of this exemption.
+-  bool is_worker_transition_to_opaque =
++  // NOTE: A document or worker may need to make its origin opaque after the
++  // initial execution context is created if it is origin-sandboxed. Specifically
++  // exempt only that transition, where the new opaque origin carries the old
++  // origin as its precursor. See https://crbug.com/1068008. It would be great
++  // if we could get rid of this exemption.
++  bool is_origin_sandbox_transition_to_opaque =
+       execution_context_ &&
+-      execution_context_->IsWorkerOrWorkletGlobalScope() &&
+       IsSandboxed(network::mojom::blink::WebSandboxFlags::kOrigin) &&
+       security_origin->IsOpaque() &&
+       security_origin->GetOriginOrPrecursorOriginIfOpaque() == security_origin_;
+   CHECK(!execution_context_ || !security_origin_ ||
+         security_origin_->CanAccess(security_origin.get()) ||
+-        is_worker_transition_to_opaque);
++        is_origin_sandbox_transition_to_opaque);
+   security_origin_ = std::move(security_origin);
+
+   if (!security_origin_->IsPotentiallyTrustworthy() &&
+@@ -269,21 +272,23 @@ SecurityContext::FeatureStatus SecurityContext::IsFeatureEnabled(
+                            kEnabledPrivacySensitive);
+           if (RuntimeEnabledFeatures::
+                   SelectivePermissionsInterventionEnabled()) {
+-            permissions_policy_result = false;
+-
+-            String feature_name = GetFeatureName(feature);
+-            String intervention_message = StrCat(
+-                {"Blocked call to ", feature_name,
+-                 " because ad-script was in the JavaScript stack at the time "
+-                 "of the call. See http://crbug.com/435223477 for more "
+-                 "information about this intervention."});
+-
+-            Intervention::GenerateReportWithoutAdditionalConsoleWarning(
+-                frame, "SelectivePermissions", intervention_message);
+-
+-            AuditsIssue::ReportSelectivePermissionsInterventionIssue(
+-                execution_context_.Get(), feature_name, ad_ancestry,
+-                CHECK_DEREF(SourceLocation::CaptureWithFullStackTrace()));
++            std::optional<String> feature_name = GetFeatureName(feature);
++            if (feature_name) {
++              permissions_policy_result = false;
++
++              String intervention_message = StrCat(
++                  {"Blocked call to ", *feature_name,
++                   " because ad-script was in the JavaScript stack at the time "
++                   "of the call. See http://crbug.com/435223477 for more "
++                   "information about this intervention."});
++
++              Intervention::GenerateReportWithoutAdditionalConsoleWarning(
++                  frame, "SelectivePermissions", intervention_message);
++
++              AuditsIssue::ReportSelectivePermissionsInterventionIssue(
++                  execution_context_.Get(), *feature_name, ad_ancestry,
++                  CHECK_DEREF(SourceLocation::CaptureWithFullStackTrace()));
++            }
+           }
+         }
+       }
+@@ -294,20 +299,23 @@ SecurityContext::FeatureStatus SecurityContext::IsFeatureEnabled(
+       !permissions_policy_result || !report_only_permissions_policy_result;
+
+   if (should_report) {
+-    String feature_name = GetFeatureName(feature);
+-    WebPolicyDecision web_policy_decision = CheckWebPolicy(
+-        execution_context_.Get(), GetSecurityOrigin(), "permissions-policy",
+-        ToStdString(feature_name),
+-        !permissions_policy_result
+-            ? "enforce"
+-            : (!report_only_permissions_policy_result ? "report" : "enforce"));
+-    if (web_policy_decision == WebPolicyDecision::kAllow) {
+-      permissions_policy_result = true;
+-      report_only_permissions_policy_result = true;
+-      should_report = false;
+-    } else if (web_policy_decision == WebPolicyDecision::kDeny) {
+-      permissions_policy_result = false;
+-      should_report = true;
++    std::optional<String> feature_name = GetFeatureName(feature);
++    if (feature_name) {
++      WebPolicyDecision web_policy_decision = CheckWebPolicy(
++          execution_context_.Get(), GetSecurityOrigin(), "permissions-policy",
++          ToStdString(*feature_name),
++          !permissions_policy_result
++              ? "enforce"
++              : (!report_only_permissions_policy_result ? "report"
++                                                        : "enforce"));
++      if (web_policy_decision == WebPolicyDecision::kAllow) {
++        permissions_policy_result = true;
++        report_only_permissions_policy_result = true;
++        should_report = false;
++      } else if (web_policy_decision == WebPolicyDecision::kDeny) {
++        permissions_policy_result = false;
++        should_report = true;
++      }
+     }
+   }
+

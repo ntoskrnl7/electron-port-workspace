@@ -138,6 +138,37 @@ Passing `null` clears the handler. If a handler is installed and it does not cal
 notification through the native notification presenter after the callback
 returns.
 
+### `ses.setWebPolicyHandler(handler)`
+
+Port: `web-policy-handler`
+
+* `handler` Function | null
+  * `details` [WebPolicyHandlerDetails](web-policy.md#webpolicyhandlerdetails-object)
+
+Returns `void`.
+
+Sets a synchronous handler for renderer web policy checks in this session. The
+handler can return `{ action: 'default' }`, `{ action: 'allow' }`, or
+`{ action: 'deny' }`.
+
+```js
+session.defaultSession.setWebPolicyHandler(details => {
+  if (details.policy === 'content-security-policy' &&
+      details.name === 'connect-src' &&
+      details.resourceUrl === 'https://api.example.test/private') {
+    return { action: 'deny' }
+  }
+
+  return { action: 'default' }
+})
+```
+
+Passing `null` clears the handler. `allow` or `deny` affects only the specific
+policy check that produced the callback; it does not grant unrelated browser
+permissions, bypass CORS, or force a network request to succeed.
+
+See [Web Policy](web-policy.md).
+
 ## Properties
 
 ### `ses.webSocket` _Readonly_
