@@ -17,11 +17,11 @@ index af19733ea6..56011933e0 100644
 @@ -15,7 +15,7 @@ const Promise: PromiseConstructor = global.Promise;
  const envNoAsar = process.env.ELECTRON_NO_ASAR && process.type !== 'browser' && process.type !== 'renderer';
  const isAsarDisabled = () => process.noAsar || envNoAsar;
-
+ 
 -const internalBinding = process.internalBinding!;
 +export const internalBinding = process.internalBinding!;
  delete process.internalBinding;
-
+ 
  const nextTick = (functionToCall: Function, args: any[] = []) => {
 diff --git a/lib/node/init.ts b/lib/node/init.ts
 index b9ef80900f..896e563a77 100644
@@ -34,7 +34,7 @@ index b9ef80900f..896e563a77 100644
 -import { wrapFsWithAsar } from './asar-fs-wrapper';
 +import { internalBinding, wrapFsWithAsar } from './asar-fs-wrapper';
  wrapFsWithAsar(require('fs'));
-
+ 
 +interface WasmStreamingState {
 +  setURL: (url: string) => void;
 +  push: (chunk: ArrayBuffer | ArrayBufferView) => void;
@@ -98,7 +98,7 @@ index b9ef80900f..896e563a77 100644
 +    }
 +  );
  }
-
+ 
  // Hook child_process.fork.
 diff --git a/lib/worker/init.ts b/lib/worker/init.ts
 index 4c231a24f1..054aa59c0b 100644
@@ -106,7 +106,7 @@ index 4c231a24f1..054aa59c0b 100644
 +++ b/lib/worker/init.ts
 @@ -1,6 +1,14 @@
  import * as path from 'path';
-
+ 
 +interface WasmStreamingState {
 +  setURL: (url: string) => void;
 +  push: (chunk: ArrayBuffer | ArrayBufferView) => void;
@@ -116,7 +116,7 @@ index 4c231a24f1..054aa59c0b 100644
 +
  const Module = require('module') as NodeJS.ModuleInternal;
 +const internalBinding = process.internalBinding!;
-
+ 
  // We modified the original process.argv to let node.js load the
  // init.js, we need to restore it here.
 @@ -27,6 +35,54 @@ if ((globalThis as any).blinkfetch) {
@@ -172,7 +172,7 @@ index 4c231a24f1..054aa59c0b 100644
 +    }
 +  );
  }
-
+ 
  // Set the __filename to the path of html file if it is file: protocol.
 diff --git a/spec/chromium-spec.ts b/spec/chromium-spec.ts
 index e450c06a5f..c765521263 100644
@@ -180,7 +180,7 @@ index e450c06a5f..c765521263 100644
 +++ b/spec/chromium-spec.ts
 @@ -413,6 +413,27 @@ describe('web security', () => {
    });
-
+ 
    describe('wasm-eval csp', () => {
 +    const wasmStreamingTestScript = `
 +      (async () => {
@@ -209,7 +209,7 @@ index e450c06a5f..c765521263 100644
 @@ -439,6 +460,40 @@ describe('web security', () => {
        return (await w.webContents.executeJavaScript('loadWasm()')).trim();
      }
-
+ 
 +    async function withRenderProcessGoneGuard<T> (
 +      window: BrowserWindow,
 +      action: () => Promise<T>,
@@ -250,7 +250,7 @@ index e450c06a5f..c765521263 100644
 @@ -1839,6 +1894,54 @@ describe('chromium features', () => {
        expect(data).to.equal('function function function function function');
      });
-
+ 
 +    it('Worker supports wasm streaming compilation with nodeIntegrationInWorker', async () => {
 +      const w = new BrowserWindow({
 +        show: false,
@@ -302,5 +302,6 @@ index e450c06a5f..c765521263 100644
      it('AudioWorklet keeps node integration across pooled worker threads', async () => {
        // Regression test for https://github.com/electron/electron/issues/41263.
        // Blink pools the AudioWorklet backing thread (Chromium CL:5270028) so
---
+-- 
 2.53.0
+

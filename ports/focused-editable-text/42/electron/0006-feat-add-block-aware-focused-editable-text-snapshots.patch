@@ -30,7 +30,7 @@ index e3a498a961..9d11af1a07 100644
 +  return in `html` when `includeHtml` is `true`. Only valid when `mode` is
 +  `full`, or when `mode` is omitted because `full` is the default. Must be
 +  between `1` and `1000000`. Default is `100000`.
-
+ 
  When `mode` is `value`, Electron reads Chromium's current focused input value
  snapshot when available. When `mode` is `surrounding`, Electron reads text
  around the current selection from Blink. When `mode` is `full`, Electron reads
@@ -47,12 +47,12 @@ index 332af5c271..78f76269b6 100644
 +++ b/docs/api/structures/focused-editable-text-watch-options.md
 @@ -1,11 +1,19 @@
  # FocusedEditableTextWatchOptions Object
-
+ 
 -Extends `FocusedEditableTextOptions`.
 +Extends the mode-specific `FocusedEditableTextOptions` union with
 +`throttleMs`. The watcher default `mode` is `surrounding`, so `includeHtml` and
 +`maxHtmlLength` require `mode: 'full'` when used with this object.
-
+ 
  * `mode` string (optional) - The text range to read. Can be `value`,
    `surrounding`, or `full`. Default is `surrounding`.
  * `maxLength` number (optional) - Maximum number of UTF-16 code units to return
@@ -78,7 +78,7 @@ index 40d8773719..c130fcad13 100644
 +  when requested with `includeHtml: true`.
 +* `isHtmlPartial` boolean (optional) - Whether `html` was truncated to
 +  `maxHtmlLength`.
-
+ 
  `selection.start` and `selection.end` are UTF-16 offsets into `text`, so
  `text.slice(selection.start, selection.end)` returns the selected text.
 diff --git a/docs/api/web-contents.md b/docs/api/web-contents.md
@@ -88,7 +88,7 @@ index aa4507eed9..d1af3c901b 100644
 @@ -1271,6 +1271,12 @@ canvas, virtual documents, or application-internal models may only expose the
  focused DOM control. Empty text controls resolve with `text: ''` rather than
  `null`.
-
+ 
 +For contenteditable editors whose visual paragraphs are represented by DOM
 +structure rather than literal newline text nodes, `full` mode returns a
 +best-effort block-aware text snapshot. Pass `includeHtml: true` to include the
@@ -96,12 +96,12 @@ index aa4507eed9..d1af3c901b 100644
 +`maxHtmlLength` are only valid with `full` mode.
 +
  #### `contents.watchFocusedEditableText([options, ]callback)` _Experimental_
-
+ 
  * `options` [FocusedEditableTextWatchOptions](structures/focused-editable-text-watch-options.md) (optional)
 @@ -1288,6 +1294,9 @@ watcher is created, and then again when Electron observes input state, caret,
  selection, composition, or focus changes that may affect the focused editable
  text snapshot.
-
+ 
 +When using `includeHtml` or `maxHtmlLength` with a watcher, pass
 +`mode: 'full'` explicitly. The watcher default mode is `surrounding`.
 +
@@ -115,7 +115,7 @@ index 966341618b..50442c3a69 100644
 @@ -484,6 +484,159 @@ const openChannelOptions = `  interface OpenChannelOptions<TViews = undefined> {
      maxTagSize?: number;
    }`;
-
+ 
 +const focusedEditableTextOptions = `  type FocusedEditableTextOptions = ({
 +
 +    // Docs: https://electronjs.org/docs/api/structures/focused-editable-text-options
@@ -278,7 +278,7 @@ index 966341618b..50442c3a69 100644
  definitions = replaceGeneratedInterface(definitions, 'OpenChannelOptions', openChannelOptions);
 +definitions = replaceGeneratedInterface(definitions, 'FocusedEditableTextOptions', focusedEditableTextOptions);
 +definitions = replaceGeneratedInterface(definitions, 'FocusedEditableTextWatchOptions', focusedEditableTextWatchOptions);
-
+ 
  definitions = definitions.replace(
    '    acceptChannel(pool: SharedMemoryPool, options: AcceptChannelOptions): SharedMemoryChannel;',
 diff --git a/shell/browser/api/electron_api_web_contents.cc b/shell/browser/api/electron_api_web_contents.cc
@@ -292,7 +292,7 @@ index 10340da6c0..9251176604 100644
 +  bool include_html = false;
 +  uint32_t max_html_length = kDefaultFocusedEditableTextMaxLength;
  };
-
+ 
  struct FocusedEditableTextWatchOptions {
 @@ -2326,6 +2328,8 @@ struct FocusedEditableTextSnapshot {
    std::optional<gfx::Range> composition;
@@ -301,7 +301,7 @@ index 10340da6c0..9251176604 100644
 +  std::optional<std::u16string> html;
 +  bool is_html_partial = false;
  };
-
+ 
  enum class FocusedEditableTextEditKind { kInsertText, kReplaceText };
 @@ -2488,6 +2492,10 @@ v8::Local<v8::Value> CreateFocusedEditableTextValue(
    details.Set("source", snapshot.source);
@@ -313,7 +313,7 @@ index 10340da6c0..9251176604 100644
 +  }
    return details.GetHandle();
  }
-
+ 
 @@ -2495,6 +2503,9 @@ bool ParseFocusedEditableTextOptionsDictionary(
      const gin_helper::Dictionary& dict,
      FocusedEditableTextOptions* options,
@@ -327,7 +327,7 @@ index 10340da6c0..9251176604 100644
 @@ -2513,6 +2524,39 @@ bool ParseFocusedEditableTextOptionsDictionary(
      }
    }
-
+ 
 +  if (include_html_present &&
 +      !dict.Get("includeHtml", &options->include_html)) {
 +    *error = "includeHtml must be a boolean";
@@ -367,7 +367,7 @@ index 10340da6c0..9251176604 100644
 @@ -2810,19 +2854,41 @@ void OnFocusedEditableTextSurroundingSelection(
                                   std::move(snapshot));
  }
-
+ 
 -std::u16string CreateFocusedEditableTextDomScript(uint32_t max_length) {
 +std::u16string CreateFocusedEditableTextDomScript(
 +    const FocusedEditableTextOptions& options) {
@@ -418,11 +418,11 @@ index 10340da6c0..9251176604 100644
 +      ...extra
      };
    };
-
+ 
 @@ -2876,6 +2943,72 @@ std::u16string CreateFocusedEditableTextDomScript(uint32_t max_length) {
      return false;
    };
-
+ 
 +  const blockElementNames = new Set([
 +    'address', 'article', 'aside', 'blockquote', 'body', 'caption', 'center',
 +    'dd', 'details', 'dialog', 'dir', 'div', 'dl', 'dt', 'fieldset',
@@ -491,11 +491,11 @@ index 10340da6c0..9251176604 100644
 +
    const active = activeElementDeep(document);
    if (!active) return { ok: false };
-
+ 
 @@ -2910,19 +3043,26 @@ std::u16string CreateFocusedEditableTextDomScript(uint32_t max_length) {
      return { ok: false };
    }
-
+ 
 -  const fullRange = document.createRange();
 -  fullRange.selectNodeContents(host);
 -  const text = fullRange.toString();
@@ -522,7 +522,7 @@ index 10340da6c0..9251176604 100644
 +                                                                   : "false",
 +                                              options.max_html_length));
  }
-
+ 
  void OnFocusedEditableTextDomResult(
 @@ -2960,6 +3100,10 @@ void OnFocusedEditableTextDomResult(
        ClampCompositionToText(input_state.composition, snapshot.text.length());
@@ -537,7 +537,7 @@ index 10340da6c0..9251176604 100644
                                   std::move(snapshot));
 @@ -3017,7 +3161,7 @@ void RequestFocusedEditableTextSnapshot(
    }
-
+ 
    render_frame_host->ExecuteJavaScriptForTests(
 -      CreateFocusedEditableTextDomScript(options.max_length),
 +      CreateFocusedEditableTextDomScript(options),
@@ -551,7 +551,7 @@ index bc11305876..ed318c1aa6 100644
 @@ -1631,6 +1631,66 @@ describe('webContents module', () => {
        expect(info.isPartial).to.be.false();
      });
-
+ 
 +    it('returns block-aware contenteditable text and html on request', async () => {
 +      const w = new BrowserWindow({ show: false, width: 400, height: 300 });
 +      await w.loadURL(
@@ -630,7 +630,7 @@ index bc11305876..ed318c1aa6 100644
 +      ).to.eventually.be.rejectedWith("maxHtmlLength is only valid when mode is 'full'");
      });
    });
-
+ 
 @@ -2309,6 +2378,12 @@ describe('webContents module', () => {
        expect(() => {
          w.webContents.watchFocusedEditableText({ maxLength: 0 }, () => {});
@@ -671,5 +671,6 @@ index e9fa320a1f..24fd083d9b 100644
    mainWindow.webContents.startDrag({ file: '/path/to/img.png', icon: nativeImage.createFromPath('/path/to/icon.png') });
    mainWindow.webContents.findInPage('blah');
    mainWindow.webContents.findInPage('blah', {
---
+-- 
 2.53.0
+

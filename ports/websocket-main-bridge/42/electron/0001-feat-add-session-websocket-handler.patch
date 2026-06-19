@@ -338,7 +338,7 @@ index 0000000000..a4b6490e49
 --- /dev/null
 +++ b/shell/browser/api/electron_api_web_socket.cc
 @@ -0,0 +1,199 @@
-+// Copyright (c) 2026 Electron Port Workspace contributors Co., LTD
++// Copyright (c) 2026 Electron Port Workspace contributors
 +// Use of this source code is governed by the MIT license that can be
 +// found in the LICENSE file.
 +
@@ -543,7 +543,7 @@ index 0000000000..9d2c21ea4a
 --- /dev/null
 +++ b/shell/browser/api/electron_api_web_socket.h
 @@ -0,0 +1,118 @@
-+// Copyright (c) 2026 Electron Port Workspace contributors Co., LTD
++// Copyright (c) 2026 Electron Port Workspace contributors
 +// Use of this source code is governed by the MIT license that can be
 +// found in the LICENSE file.
 +
@@ -667,7 +667,7 @@ index 0000000000..2c5e6b4954
 --- /dev/null
 +++ b/shell/browser/api/electron_api_web_socket_main.cc
 @@ -0,0 +1,759 @@
-+// Copyright (c) 2026 Electron Port Workspace contributors Co., LTD
++// Copyright (c) 2026 Electron Port Workspace contributors
 +// Use of this source code is governed by the MIT license that can be
 +// found in the LICENSE file.
 +
@@ -1432,7 +1432,7 @@ index 0000000000..4466f3f47b
 --- /dev/null
 +++ b/shell/browser/api/electron_api_web_socket_main.h
 @@ -0,0 +1,199 @@
-+// Copyright (c) 2026 Electron Port Workspace contributors Co., LTD
++// Copyright (c) 2026 Electron Port Workspace contributors
 +// Use of this source code is governed by the MIT license that can be
 +// found in the LICENSE file.
 +

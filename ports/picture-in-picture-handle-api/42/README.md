@@ -23,9 +23,9 @@ the Electron patch sequence, then materializes the Chromium patch in `src`.
 Use:
 
 ```powershell
-C:\work\electron\scripts\port-bundle.ps1 apply picture-in-picture-handle-api `
+.\scripts\port-bundle.ps1 apply picture-in-picture-handle-api `
   -Target 42 `
-  -SrcRoot C:\work\electron\42\src
+  -SrcRoot <repo>\42\src
 ```
 
 ```bash
